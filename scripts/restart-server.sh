@@ -2,6 +2,9 @@
 # Restart the AI Studio server in the background and wait until the new process
 # is the one answering.
 #
+# Builds first, so a compile error surfaces here rather than as a server that
+# never comes up.
+#
 # The process to stop is found by *listening port*, never by matching its path in
 # the process table: a `pgrep -f <path>` also matches any shell or editor whose
 # own command line happens to contain that path, and killing those takes down the
@@ -43,7 +46,15 @@ if [ -n "$(pids_on_port)" ]; then
   exit 1
 fi
 
-nohup node ./apps/server/src/index.js >"$LOG" 2>&1 &
+if ! cargo build -q --release -p ai-studio-serve; then
+  echo "server build failed" >&2
+  exit 1
+fi
+
+nohup ./target/release/ai-studio-serve \
+  --port "$PORT" \
+  --workspace "${AI_STUDIO_WORKSPACE:-./workspace}" \
+  --web ./apps/web/dist >"$LOG" 2>&1 &
 new_pid=$!
 disown 2>/dev/null || true
 

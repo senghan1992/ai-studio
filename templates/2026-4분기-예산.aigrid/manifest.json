@@ -1,0 +1,27 @@
+{
+  "format": "ai-studio/grid",
+  "formatVersion": 1,
+  "id": "prj_aqbl1k2",
+  "title": "2026 4분기 예산",
+  "created": "2026-09-01T06:04:51.164Z",
+  "modified": "2026-09-01T06:04:51.211Z",
+  "theme": {
+    "name": "aurora",
+    "accent": "#4f46e5",
+    "font": "Inter"
+  },
+  "sheets": [
+    {
+      "id": "sh_4skws",
+      "name": "예산",
+      "md": "sheets/01-예산.md",
+      "json": "sheets/01-예산.cells.json"
+    },
+    {
+      "id": "sh_5fz6r",
+      "name": "가정",
+      "md": "sheets/02-가정.md",
+      "json": "sheets/02-가정.cells.json"
+    }
+  ]
+}

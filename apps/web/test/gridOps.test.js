@@ -1,14 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toRef, displayValue } from '@ai-studio/formula';
-import {
+import { loadCore } from './core.mjs';
+
+// The grid operations call into the wasm core synchronously, so it has to be
+// resolved before the module graph below is evaluated.
+await loadCore();
+const { toRef, displayValue } = await import('../src/core/index.js');
+const {
   setCellInput, patchCells, clearRange, structuralEdit,
   fillTarget, fillRange, mergeSelection, unmergeSelection, mergeCovering,
   applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn,
   resolveTarget, findCells, replaceInCells,
   rangeToTsv, rangeToFormulaTsv, pasteTsv, normalizeRange, selectionStats,
-} from '../src/grid/gridOps.js';
+} = await import('../src/grid/gridOps.js');
 
 const sheetOf = (cells, extra = {}) => ({
   id: 'sh', name: 's',

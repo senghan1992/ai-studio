@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/ai-formula", "crates/ai-format", "crates/ai-export", "crates/ai-core", "crates/ai-studio-serve", "crates/ai-studio-wasm", "crates/ai-studio-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/senghan1992/ai-studio"
+
+[workspace.dependencies]
+ai-formula = { path = "crates/ai-formula" }
+ai-format  = { path = "crates/ai-format" }
+ai-export  = { path = "crates/ai-export" }
+ai-core    = { path = "crates/ai-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+once_cell = "1"
+anyhow = "1"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Native binaries: the formula engine recalculates on every keystroke, so speed
+# wins over the few hundred KB that size-optimizing would save on disk.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The wasm core travels over the network to the browser, where the trade runs the
+# other way. `s` rather than `z`: `z` also disables the inlining the evaluator
+# depends on, and costs more in recalc latency than it saves in bytes.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"

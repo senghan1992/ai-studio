@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { makeSheet, usedRange, newBlockId } from '@ai-studio/format/browser';
-import { toRef, editValue, FUNCTION_NAMES } from '@ai-studio/formula';
+import {
+  makeSheet, usedRange, newBlockId, toRef, editValue, FUNCTION_NAMES,
+} from '../core/index.js';
 
 import Shell from '../components/Shell.jsx';
 import FileInspector from '../components/FileInspector.jsx';

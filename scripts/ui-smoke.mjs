@@ -39,48 +39,118 @@ const check = (label, ok, detail) => {
 
 /* ------------------------------------------------------------ build bundle */
 
+/**
+ * The harness uses its own entry point rather than `main.jsx`.
+ *
+ * In a browser the wasm core arrives over the network; here it is read off disk
+ * and handed to `initCore` directly, which keeps the test seam out of the app.
+ */
+const wasmPath = path.join(ROOT, 'apps/web/src/core/pkg/ai_studio_wasm_bg.wasm');
+let wasmBase64;
+try {
+  const { readFile } = await import('node:fs/promises');
+  wasmBase64 = (await readFile(wasmPath)).toString('base64');
+} catch {
+  console.error(`wasm 코어가 없습니다: ${wasmPath}\nnpm run build:wasm 을 먼저 실행하세요.`);
+  process.exit(2);
+}
+
 const bundle = await esbuild.build({
-  entryPoints: [path.join(ROOT, 'apps/web/src/main.jsx')],
+  stdin: {
+    contents: `
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import App from './App.jsx';
+      import { initCore } from './core/index.js';
+      import './styles.css';
+
+      const bytes = Uint8Array.from(atob(AI_STUDIO_WASM_BASE64), (c) => c.charCodeAt(0));
+      window.__aiStudioReady = initCore(bytes).then(() => {
+        createRoot(document.getElementById('root')).render(React.createElement(App));
+      });
+    `,
+    resolveDir: path.join(ROOT, 'apps/web/src'),
+    sourcefile: 'smoke-entry.jsx',
+    loader: 'jsx',
+  },
   bundle: true,
   write: false,
   format: 'iife',
   platform: 'browser',
   jsx: 'automatic',
   target: 'es2022',
-  define: { 'process.env.NODE_ENV': '"development"' },
-  loader: { '.css': 'text' },
-  alias: {
-    '@ai-studio/format/browser': path.join(ROOT, 'packages/format/src/browser.js'),
-    '@ai-studio/formula': path.join(ROOT, 'packages/formula/src/index.js'),
+  define: {
+    'process.env.NODE_ENV': '"development"',
+    AI_STUDIO_WASM_BASE64: JSON.stringify(wasmBase64),
+  },
+  loader: { '.css': 'text', '.wasm': 'binary' },
+  // Only reachable inside the Tauri shell, and this harness is not it.
+  external: ['@tauri-apps/api/core'],
+  logOverride: {
+    // `initCore` is given explicit bytes here, so the module's own URL fallback
+    // is dead code; and the stylesheet is loaded as text, not for its effects.
+    'empty-import-meta': 'silent',
+    'ignored-bare-import': 'silent',
   },
   absWorkingDir: TOOLS,
   nodePaths: [path.join(ROOT, 'node_modules')],
 });
 const code = bundle.outputFiles[0].text;
-console.log(`\n번들 생성: ${(code.length / 1024).toFixed(0)}KB`);
+console.log(`\n번들 생성: ${(code.length / 1024).toFixed(0)}KB (wasm 코어 포함)`);
 
 /* --------------------------------------------------------------- fixtures */
 
-const { createProject } = await import(pathToFileURL(path.join(ROOT, 'packages/format/src/project.js')));
-const { promises: fs } = await import('node:fs');
-const os = await import('node:os');
+// Built with the same Rust core the editors use, loaded here as a Node module.
+const { loadCore } = await import(pathToFileURL(path.join(ROOT, 'apps/web/test/core.mjs')));
+await loadCore();
+const core = await import(pathToFileURL(path.join(ROOT, 'apps/web/src/core/index.js')));
 
-const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-studio-smoke-'));
+const theme = { name: 'aurora', accent: '#4f46e5', font: 'Inter' };
+const manifestOf = (title, type) => ({
+  format: `ai-studio/${type}`,
+  formatVersion: 1,
+  id: 'prj_smoke1',
+  title,
+  created: '2026-09-01T00:00:00.000Z',
+  modified: '2026-09-01T00:00:00.000Z',
+  theme,
+});
+
 const fixtures = {};
-for (const type of ['deck', 'doc', 'grid']) {
-  const project = await createProject(tmp, { type, title: `스모크 ${type}` });
+{
+  const slides = [
+    core.makeSlide('title', { title: '스모크 deck' }),
+    core.makeSlide('title-content', { title: '개요', index: 2 }),
+  ];
   // The slideshow's notes pane can only be checked if a slide has notes.
-  if (type === 'deck') project.slides.forEach((s, i) => { s.notes = `슬라이드 ${i + 1} 발표자 노트`; });
-  fixtures[path.basename(project.dir)] = {
-    type: project.type,
-    folder: path.basename(project.dir),
-    manifest: project.manifest,
-    ...(type === 'deck' ? { slides: project.slides } : {}),
-    ...(type === 'doc' ? { sections: project.sections } : {}),
-    ...(type === 'grid' ? { sheets: project.sheets } : {}),
+  slides.forEach((s, i) => {
+    s.notes = `슬라이드 ${i + 1} 발표자 노트`;
+  });
+  fixtures['스모크-덱.aideck'] = {
+    type: 'deck',
+    folder: '스모크-덱.aideck',
+    manifest: manifestOf('스모크 deck', 'deck'),
+    slides,
+  };
+
+  fixtures['스모크-문서.aidoc'] = {
+    type: 'doc',
+    folder: '스모크-문서.aidoc',
+    manifest: manifestOf('스모크 doc', 'doc'),
+    sections: [core.makeSection({ name: '스모크 doc' })],
+  };
+
+  fixtures['스모크-시트.aigrid'] = {
+    type: 'grid',
+    folder: '스모크-시트.aigrid',
+    manifest: manifestOf('스모크 grid', 'grid'),
+    sheets: [core.makeSheet({ name: '시트1', withSample: true })],
   };
 }
 const folders = Object.keys(fixtures);
+// The fixtures live in memory; nothing is written to disk, so the workspace path
+// the launcher displays is only a label.
+const tmp = '/스모크';
 console.log(`픽스처: ${folders.join(', ')}\n`);
 
 /* ------------------------------------------------------------ jsdom harness */
@@ -728,7 +798,6 @@ console.log('\n■ 파일 탭 (세 앱 공통)');
   }
 }
 
-await fs.rm(tmp, { recursive: true, force: true });
 
 console.log(`\n${failures === 0 ? '통과' : '실패'}: ${checks - failures}/${checks} 검사 성공`);
 process.exit(failures === 0 ? 0 : 1);

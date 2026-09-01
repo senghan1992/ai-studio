@@ -1,0 +1,44 @@
+{
+  "id": "sec_mjas3",
+  "page": {
+    "size": "A4",
+    "margin": {
+      "top": 72,
+      "right": 72,
+      "bottom": 72,
+      "left": 72
+    },
+    "columns": 1
+  },
+  "blocks": {
+    "b_711ns": {
+      "indent": 48,
+      "style": {
+        "color": "#6b7280",
+        "fontSize": 14
+      }
+    }
+  },
+  "outline": [
+    {
+      "level": 1,
+      "text": "기존 포맷과의 비교",
+      "anchor": "b_z9ww3"
+    },
+    {
+      "level": 2,
+      "text": "절충점",
+      "anchor": "b_t8fo6"
+    },
+    {
+      "level": 2,
+      "text": "청킹 효율",
+      "anchor": "b_0fhzu"
+    }
+  ],
+  "stats": {
+    "words": 215,
+    "chars": 272,
+    "blocks": 8
+  }
+}

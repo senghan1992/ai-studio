@@ -1,0 +1,51 @@
+{
+  "format": "ai-studio/deck",
+  "formatVersion": 1,
+  "id": "prj_2jlhq48",
+  "title": "2026 3분기 사업 리뷰",
+  "created": "2026-09-01T06:04:51.108Z",
+  "modified": "2026-09-01T06:04:51.144Z",
+  "theme": {
+    "name": "aurora",
+    "accent": "#4f46e5",
+    "font": "Inter"
+  },
+  "slides": [
+    {
+      "id": "s_s5mzu",
+      "name": "2026 3분기 사업 리뷰",
+      "md": "slides/01-2026-3분기-사업-리뷰.md",
+      "json": "slides/01-2026-3분기-사업-리뷰.layout.json"
+    },
+    {
+      "id": "s_0r2eq",
+      "name": "핵심 성과",
+      "md": "slides/02-핵심-성과.md",
+      "json": "slides/02-핵심-성과.layout.json"
+    },
+    {
+      "id": "s_bsdni",
+      "name": "매출 추이",
+      "md": "slides/03-매출-추이.md",
+      "json": "slides/03-매출-추이.layout.json"
+    },
+    {
+      "id": "s_3f009",
+      "name": "신규 시장 진입 현황",
+      "md": "slides/04-신규-시장-진입-현황.md",
+      "json": "slides/04-신규-시장-진입-현황.layout.json"
+    },
+    {
+      "id": "s_5yo5r",
+      "name": "4분기 계획",
+      "md": "slides/05-4분기-계획.md",
+      "json": "slides/05-4분기-계획.layout.json"
+    },
+    {
+      "id": "s_9iqqh",
+      "name": "4분기 우선순위",
+      "md": "slides/06-4분기-우선순위.md",
+      "json": "slides/06-4분기-우선순위.layout.json"
+    }
+  ]
+}

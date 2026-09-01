@@ -1,7 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import {
-  writeSlide, writeSection, writeSheet, buildDigest,
-} from '@ai-studio/format/browser';
+import { writeSlide, writeSection, writeSheet, buildDigest, slugify } from '../core/index.js';
 import { highlight } from '../lib/markdown.js';
 
 const HINTS = {
@@ -73,30 +71,40 @@ export default function FileInspector({ project, activeIndex }) {
 function buildFiles(project, activeIndex) {
   const files = [];
   try {
+    // One serializer, shared with the save path: the `json` these return is the
+    // formatted text that will be on disk, not an object to re-encode here.
+    const pair = ({ item, name, write, suffix }) => {
+      if (!item) return;
+      const { md, json } = write(item);
+      const stem = `${pad(activeIndex + 1)}-${slugify(name)}`;
+      files.push({ key: 'md', name: `${stem}.md`, content: md, lang: 'md' });
+      files.push({ key: 'json', name: `${stem}${suffix}`, content: json, lang: 'json' });
+    };
+
     if (project.type === 'deck') {
       const slide = project.slides?.[activeIndex];
-      if (slide) {
-        const { md, layout } = writeSlide(slide);
-        const stem = `${pad(activeIndex + 1)}-${slide.title || '슬라이드'}`;
-        files.push({ key: 'md', name: `${stem}.md`, content: md, lang: 'md' });
-        files.push({ key: 'json', name: `${stem}.layout.json`, content: pretty(layout), lang: 'json' });
-      }
+      pair({
+        item: slide,
+        name: slide?.title || '슬라이드',
+        write: writeSlide,
+        suffix: '.layout.json',
+      });
     } else if (project.type === 'doc') {
       const section = project.sections?.[activeIndex];
-      if (section) {
-        const { md, meta } = writeSection(section);
-        const stem = `${pad(activeIndex + 1)}-${section.name || '섹션'}`;
-        files.push({ key: 'md', name: `${stem}.md`, content: md, lang: 'md' });
-        files.push({ key: 'json', name: `${stem}.meta.json`, content: pretty(meta), lang: 'json' });
-      }
+      pair({
+        item: section,
+        name: section?.name || '섹션',
+        write: writeSection,
+        suffix: '.meta.json',
+      });
     } else {
       const sheet = project.sheets?.[activeIndex];
-      if (sheet) {
-        const { md, cells } = writeSheet(sheet);
-        const stem = `${pad(activeIndex + 1)}-${sheet.name || '시트'}`;
-        files.push({ key: 'md', name: `${stem}.md`, content: md, lang: 'md' });
-        files.push({ key: 'json', name: `${stem}.cells.json`, content: pretty(cells), lang: 'json' });
-      }
+      pair({
+        item: sheet,
+        name: sheet?.name || '시트',
+        write: writeSheet,
+        suffix: '.cells.json',
+      });
     }
 
     files.push({ key: 'digest', name: 'AI.md', content: buildDigest(project), lang: 'md' });

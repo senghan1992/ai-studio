@@ -1,0 +1,25 @@
+[package]
+name = "ai-studio-wasm"
+description = "The AI Studio core compiled for the browser — the same formula engine and serializers the desktop app uses"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ai-formula = { workspace = true }
+ai-format = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Without `wasmbind`, chrono's `Utc::now()` has no clock in the browser and the
+# TODAY/NOW functions would panic.
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }

@@ -1,0 +1,33 @@
+{
+  "format": "ai-studio/doc",
+  "formatVersion": 1,
+  "id": "prj_dmublk3",
+  "title": "AI Studio 저장 포맷 제안서",
+  "created": "2026-09-01T06:04:51.150Z",
+  "modified": "2026-09-01T06:04:51.161Z",
+  "theme": {
+    "name": "aurora",
+    "accent": "#4f46e5",
+    "font": "Inter"
+  },
+  "sections": [
+    {
+      "id": "sec_gb3pg",
+      "name": "요약",
+      "md": "content/01-요약.md",
+      "json": "content/01-요약.meta.json"
+    },
+    {
+      "id": "sec_xfk7j",
+      "name": "설계 원칙",
+      "md": "content/02-설계-원칙.md",
+      "json": "content/02-설계-원칙.meta.json"
+    },
+    {
+      "id": "sec_mjas3",
+      "name": "비교",
+      "md": "content/03-비교.md",
+      "json": "content/03-비교.meta.json"
+    }
+  ]
+}

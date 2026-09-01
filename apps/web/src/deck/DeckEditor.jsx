@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   makeSlide, newBlockId, SLIDE_LAYOUTS, positionPhrase, autoLayout,
   serializeChartBlock, parseChartBlock,
-} from '@ai-studio/format/browser';
+} from '../core/index.js';
 
 import Shell from '../components/Shell.jsx';
 import FileInspector from '../components/FileInspector.jsx';

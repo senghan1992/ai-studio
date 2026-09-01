@@ -1,21 +1,26 @@
 {
-  "name": "ai-studio",
+  "name": "ai-studio-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "AI-readable office suite — Deck, Doc, Grid stored as markdown + JSON pairs",
-  "workspaces": [
-    "packages/*",
-    "apps/*"
-  ],
+  "description": "The AI Studio editor UI. The document core lives in crates/ and is compiled to WebAssembly.",
+  "workspaces": ["apps/web"],
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
-    "dev:server": "npm run dev -w @ai-studio/server",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:web": "npm run build:wasm && npm run build -w @ai-studio/web",
+    "build": "npm run build:web",
     "dev:web": "npm run dev -w @ai-studio/web",
-    "build": "npm run build -w @ai-studio/web",
-    "start": "npm run start -w @ai-studio/server",
-    "test": "node --test packages/format/test packages/formula/test apps/web/test",
-    "seed": "node scripts/seed.mjs"
+    "dev:server": "cargo run -q -p ai-studio-serve -- --workspace workspace",
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "desktop": "cargo tauri dev --config crates/ai-studio-app/tauri.conf.json",
+    "desktop:build": "cargo tauri build --config crates/ai-studio-app/tauri.conf.json",
+    "serve": "cargo run -q --release -p ai-studio-serve -- --workspace workspace --web apps/web/dist --open",
+    "seed": "cargo run -q -p ai-core --example seed -- workspace",
+    "test": "npm run test:rust && npm run test:web",
+    "test:rust": "cargo test --workspace --exclude ai-studio-app",
+    "test:web": "node --test apps/web/test/",
+    "e2e": "node scripts/e2e.mjs",
+    "smoke": "node scripts/ui-smoke.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

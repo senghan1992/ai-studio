@@ -1,0 +1,40 @@
+{
+  "id": "s_5yo5r",
+  "canvas": {
+    "w": 1280,
+    "h": 720,
+    "bg": "#111827"
+  },
+  "blocks": {
+    "b_pxync": {
+      "x": 96,
+      "y": 300,
+      "w": 1088,
+      "h": 100,
+      "z": 1,
+      "kind": "text",
+      "style": {
+        "fontSize": 44,
+        "weight": 600,
+        "align": "center",
+        "color": "#ffffff",
+        "lineHeight": 1.45
+      }
+    },
+    "b_v3yew": {
+      "x": 96,
+      "y": 412,
+      "w": 1088,
+      "h": 44,
+      "z": 2,
+      "kind": "text",
+      "style": {
+        "fontSize": 20,
+        "weight": 400,
+        "align": "center",
+        "color": "#9ca3af",
+        "lineHeight": 1.45
+      }
+    }
+  }
+}

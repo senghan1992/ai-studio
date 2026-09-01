@@ -1,8 +1,7 @@
 import {
   toRef, parseRef, parseRange, indexToCol, adjustRefs, shiftFormula,
-  recalcSheet, parseCellInput, displayValue, editValue,
-} from '@ai-studio/formula';
-import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT } from '@ai-studio/format/browser';
+  recalcSheet, parseCellInput, displayValue, editValue, LIMITS,
+} from '../core/index.js';
 
 /** Recalculate after any mutation so displayed values never lag the formulas. */
 export function withRecalc(sheet) {
@@ -500,7 +499,7 @@ export function applyBorders(sheet, range, preset) {
 export function setColWidth(sheet, col, width) {
   const key = indexToCol(col);
   const next = { ...(sheet.colWidths ?? {}) };
-  if (width && width !== DEFAULT_COL_WIDTH) next[key] = Math.max(24, Math.round(width));
+  if (width && width !== LIMITS.colWidth) next[key] = Math.max(24, Math.round(width));
   else delete next[key];
   return { ...sheet, colWidths: next };
 }
@@ -508,7 +507,7 @@ export function setColWidth(sheet, col, width) {
 export function setRowHeight(sheet, row, height) {
   const key = String(row + 1);
   const next = { ...(sheet.rowHeights ?? {}) };
-  if (height && height !== DEFAULT_ROW_HEIGHT) next[key] = Math.max(16, Math.round(height));
+  if (height && height !== LIMITS.rowHeight) next[key] = Math.max(16, Math.round(height));
   else delete next[key];
   return { ...sheet, rowHeights: next };
 }

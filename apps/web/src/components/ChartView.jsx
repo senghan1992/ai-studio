@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
-import { renderChartSvg, resolveChartSpec, parseChartBlock } from '@ai-studio/format/browser';
+import { resolveChartSpec, parseChartBlock } from '../core/index.js';
+import { renderChartSvg } from '../lib/chartSvg.js';
 
 /**
  * Render a chart spec as inline SVG.

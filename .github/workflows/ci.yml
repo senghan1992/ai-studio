@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      # The desktop crate needs a webview toolchain; it is built in `desktop`.
+      - name: test
+        run: cargo test --workspace --exclude ai-studio-app
+      - name: clippy
+        run: cargo clippy --workspace --exclude ai-studio-app --all-targets -- -D warnings
+      - name: fmt
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+
+  web:
+    name: web + wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-bindgen-action@v0.2.0
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - name: build
+        run: npm run build:web
+      - name: web tests
+        run: npm run test:web
+
+      - name: end to end
+        run: |
+          cargo build --release -p ai-studio-serve
+          mkdir -p /tmp/e2e-workspace
+          ./target/release/ai-studio-serve --workspace /tmp/e2e-workspace --port 5177 &
+          for _ in $(seq 1 60); do
+            curl -sf http://localhost:5177/api/health >/dev/null && break
+            sleep 0.5
+          done
+          node scripts/e2e.mjs
+
+      - name: ui smoke
+        run: |
+          mkdir -p /tmp/smoke-tools && cd /tmp/smoke-tools
+          npm init -y >/dev/null && npm install --no-audit --no-fund jsdom esbuild
+          cd "$GITHUB_WORKSPACE"
+          AI_STUDIO_TOOLS=/tmp/smoke-tools node scripts/ui-smoke.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist

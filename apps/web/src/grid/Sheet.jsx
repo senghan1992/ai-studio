@@ -1,6 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { indexToCol, toRef, displayValue, dependencies } from '@ai-studio/formula';
-import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT } from '@ai-studio/format/browser';
+import { indexToCol, toRef, displayValue, dependencies, LIMITS } from '../core/index.js';
 import { normalizeRange, mergeCovering, fillTarget } from './gridOps.js';
 import SheetCharts from './SheetCharts.jsx';
 
@@ -58,8 +57,8 @@ export default function Sheet({
   // a transform would break `position: sticky` on the frozen panes.
   const z = zoom;
   const px = (n) => Math.round(n * z);
-  const colWidth = (c) => sheet.colWidths?.[indexToCol(c)] ?? DEFAULT_COL_WIDTH;
-  const rowHeight = (r) => sheet.rowHeights?.[String(r + 1)] ?? DEFAULT_ROW_HEIGHT;
+  const colWidth = (c) => sheet.colWidths?.[indexToCol(c)] ?? LIMITS.colWidth;
+  const rowHeight = (r) => sheet.rowHeights?.[String(r + 1)] ?? LIMITS.rowHeight;
   const headerH = px(HEADER_H);
   const rowHeadW = px(ROW_HEAD_W);
 

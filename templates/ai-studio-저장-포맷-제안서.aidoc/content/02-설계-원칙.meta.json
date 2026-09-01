@@ -1,0 +1,46 @@
+{
+  "id": "sec_xfk7j",
+  "page": {
+    "size": "A4",
+    "margin": {
+      "top": 72,
+      "right": 72,
+      "bottom": 72,
+      "left": 72
+    },
+    "columns": 1
+  },
+  "blocks": {},
+  "outline": [
+    {
+      "level": 1,
+      "text": "설계 원칙",
+      "anchor": "b_n8o9j"
+    },
+    {
+      "level": 2,
+      "text": "프로젝트는 폴더다",
+      "anchor": "b_udahb"
+    },
+    {
+      "level": 2,
+      "text": "내용은 Markdown, 배치는 JSON",
+      "anchor": "b_zn9sp"
+    },
+    {
+      "level": 2,
+      "text": "Markdown은 손으로 고칠 수 있다",
+      "anchor": "b_3s6bt"
+    },
+    {
+      "level": 2,
+      "text": "AI.md는 자동 생성 다이제스트",
+      "anchor": "b_cipk5"
+    }
+  ],
+  "stats": {
+    "words": 271,
+    "chars": 330,
+    "blocks": 9
+  }
+}

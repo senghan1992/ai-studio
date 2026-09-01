@@ -1,0 +1,18 @@
+[package]
+name = "ai-format"
+description = "AI Studio save format — markdown/JSON pair parsing, AI.md digest, project I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ai-formula = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+serde_yaml_ng = "0.10"

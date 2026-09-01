@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import {
-  CHART_TYPES, CHART_TYPE_LABELS, normalizeChartSpec, renderChartSvg, resolveChartSpec,
-} from '@ai-studio/format/browser';
+import { CHART_TYPES, CHART_TYPE_LABELS, normalizeChartSpec, resolveChartSpec } from '../core/index.js';
+import { renderChartSvg } from '../lib/chartSvg.js';
 import { Dialog, Field, Select } from './ui.jsx';
 
 /**

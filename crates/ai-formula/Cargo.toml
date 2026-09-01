@@ -1,0 +1,15 @@
+[package]
+name = "ai-formula"
+description = "Spreadsheet formula engine — lexer, parser, evaluator, 90+ functions, recalc, reference adjustment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true }

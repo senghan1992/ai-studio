@@ -1,0 +1,34 @@
+{
+  "id": "sec_gb3pg",
+  "page": {
+    "size": "A4",
+    "margin": {
+      "top": 72,
+      "right": 72,
+      "bottom": 72,
+      "left": 72
+    },
+    "columns": 1
+  },
+  "blocks": {
+    "b_srqt7": {
+      "align": "center",
+      "style": {
+        "italic": true,
+        "color": "#4f46e5"
+      }
+    }
+  },
+  "outline": [
+    {
+      "level": 1,
+      "text": "AI Studio 저장 포맷 제안서",
+      "anchor": "b_33kzy"
+    }
+  ],
+  "stats": {
+    "words": 159,
+    "chars": 208,
+    "blocks": 4
+  }
+}

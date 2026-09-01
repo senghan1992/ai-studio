@@ -1,0 +1,29 @@
+[package]
+name = "ai-studio-serve"
+description = "Headless AI Studio server — the same core over HTTP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ai-studio-serve"
+path = "src/main.rs"
+
+[dependencies]
+ai-core = { workspace = true }
+ai-format = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
+
+[features]
+default = []
+# Bake the built web UI into the binary, so one file serves everything.
+embed-ui = ["rust-embed", "mime_guess"]

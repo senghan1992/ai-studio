@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   makeSection, newBlockId, PAGE_SIZES, headingLevel, plainText, countWords,
   serializeChartBlock, parseChartBlock,
-} from '@ai-studio/format/browser';
+} from '../core/index.js';
 
 import Shell from '../components/Shell.jsx';
 import FileInspector from '../components/FileInspector.jsx';

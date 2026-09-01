@@ -1,0 +1,117 @@
+name: release
+
+# Builds the downloadable app for every desktop OS, plus the headless server.
+# Tag a version (`v0.1.0`) to publish, or run it by hand to check the matrix.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (Apple silicon)
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - label: macOS (Intel)
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - label: Windows (x64)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - label: Linux (x64)
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux build needs the system webview and its toolchain.
+      - name: linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libssl-dev build-essential file
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}, wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: jetli/wasm-bindgen-action@v0.2.0
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The desktop bundle and the headless server share one UI build.
+      - name: build web
+        run: npm run build:web
+
+      - name: build desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/ai-studio-app
+          tauriScript: cargo tauri
+          args: --target ${{ matrix.target }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: AI Studio ${{ github.ref_name }}
+          releaseBody: |
+            OS에 맞는 파일을 내려받아 실행하세요. 별도 설치나 런타임이 필요하지 않습니다.
+
+            | OS | 파일 |
+            |---|---|
+            | Windows | `.msi` 또는 `.exe` |
+            | macOS | `.dmg` |
+            | Linux | `.AppImage`, `.deb`, `.rpm` |
+
+            서버로 쓰려면 `ai-studio-serve` 바이너리를 내려받아
+            `ai-studio-serve --workspace ./documents --open` 을 실행하세요.
+          releaseDraft: true
+          includeUpdaterJson: false
+
+      # A single self-contained server binary, UI baked in.
+      - name: build headless server
+        run: cargo build --release --target ${{ matrix.target }} -p ai-studio-serve --features embed-ui
+
+      - name: package server
+        shell: bash
+        run: |
+          mkdir -p out
+          name="ai-studio-serve-${{ matrix.target }}"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/ai-studio-serve.exe" "out/$name.exe"
+          else
+            cp "target/${{ matrix.target }}/release/ai-studio-serve" "out/$name"
+            chmod +x "out/$name"
+          fi
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.target }}
+          path: out/*
+
+      - name: attach server to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          draft: true

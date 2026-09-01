@@ -1,0 +1,41 @@
+{
+  "id": "s_bsdni",
+  "canvas": {
+    "w": 1280,
+    "h": 720,
+    "bg": "#ffffff"
+  },
+  "blocks": {
+    "b_ru7lr": {
+      "x": 96,
+      "y": 64,
+      "w": 1088,
+      "h": 70,
+      "z": 1,
+      "kind": "text",
+      "style": {
+        "fontSize": 38,
+        "weight": 700,
+        "align": "left",
+        "color": "#1f2937",
+        "lineHeight": 1.45
+      }
+    },
+    "b_1nt7t": {
+      "x": 96,
+      "y": 168,
+      "w": 620,
+      "h": 420,
+      "z": 2,
+      "kind": "chart"
+    },
+    "b_77td3": {
+      "x": 748,
+      "y": 168,
+      "w": 436,
+      "h": 420,
+      "z": 3,
+      "kind": "chart"
+    }
+  }
+}

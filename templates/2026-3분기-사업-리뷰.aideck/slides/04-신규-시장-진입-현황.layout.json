@@ -1,0 +1,55 @@
+{
+  "id": "s_3f009",
+  "canvas": {
+    "w": 1280,
+    "h": 720,
+    "bg": "#ffffff"
+  },
+  "blocks": {
+    "b_2ifry": {
+      "x": 96,
+      "y": 64,
+      "w": 1088,
+      "h": 70,
+      "z": 1,
+      "kind": "text",
+      "style": {
+        "fontSize": 38,
+        "weight": 700,
+        "align": "left",
+        "color": "#1f2937",
+        "lineHeight": 1.45
+      }
+    },
+    "b_6wwpu": {
+      "x": 96,
+      "y": 180,
+      "w": 512,
+      "h": 380,
+      "z": 2,
+      "kind": "text",
+      "style": {
+        "fontSize": 19,
+        "weight": 400,
+        "align": "left",
+        "color": "#1f2937",
+        "lineHeight": 1.7
+      }
+    },
+    "b_0onja": {
+      "x": 672,
+      "y": 180,
+      "w": 512,
+      "h": 380,
+      "z": 3,
+      "kind": "text",
+      "style": {
+        "fontSize": 19,
+        "weight": 400,
+        "align": "left",
+        "color": "#1f2937",
+        "lineHeight": 1.7
+      }
+    }
+  }
+}

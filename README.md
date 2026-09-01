@@ -1,6 +1,7 @@
 # AI Studio
 
 Office 365처럼 쓰고, AI가 읽을 수 있게 저장하는 오피스 스위트.
+**Rust로 만들어 어느 운영체제에서든 파일 하나 내려받아 실행합니다.**
 
 | 앱 | 대응 | 확장자 | 저장 방식 |
 |---|---|---|---|
@@ -12,28 +13,44 @@ Office 365처럼 쓰고, AI가 읽을 수 있게 저장하는 오피스 스위�
 프로젝트 전체를 요약한 `AI.md`를 함께 생성합니다. `.pptx`처럼 zip 안에 XML을 숨기지 않으므로
 `git diff`, `grep`, RAG 인덱서가 모두 그대로 동작합니다.
 
-포맷 전체 스펙은 [`docs/FORMAT.md`](docs/FORMAT.md)에 있습니다.
+포맷 전체 스펙은 [`docs/FORMAT.md`](docs/FORMAT.md), 구조는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)에 있습니다.
 
 ---
 
-## 실행
+## 받아서 실행하기
+
+[Releases](../../releases)에서 OS에 맞는 파일을 내려받습니다. **런타임을 따로 설치할 필요가 없습니다** —
+문서 코어(수식 엔진, 저장 포맷, `AI.md` 생성, Office 내보내기) 전체가 실행 파일 안에 컴파일되어 있습니다.
+
+| OS | 파일 | 실행 |
+|---|---|---|
+| Windows 10+ | `AI.Studio_0.1.0_x64-setup.exe` 또는 `.msi` | 설치 후 시작 메뉴에서 |
+| macOS 12+ | `AI.Studio_0.1.0_aarch64.dmg` (Intel은 `x64`) | 드래그해 설치 |
+| Linux | `ai-studio_0.1.0_amd64.AppImage` | `chmod +x` 후 실행. `.deb` · `.rpm`도 있습니다 |
+
+문서는 기본적으로 `~/Documents/AI Studio` 에 저장됩니다. 다른 위치를 쓰려면
+`AI_STUDIO_WORKSPACE=/경로` 를 지정하세요.
+
+### 서버로 쓰기
+
+브라우저에서 열거나, 공유 장비에 두거나, 에이전트가 UI 없이 문서를 다루게 하려면
+`ai-studio-serve` 바이너리 하나만 두면 됩니다. 웹 UI가 내장되어 있습니다.
 
 ```bash
-npm install
-npm run seed     # 샘플 문서 3개 생성 (선택)
-npm run dev      # 서버(5177) + 웹(5178) 동시 실행
+./ai-studio-serve --workspace ./documents --open
+# http://localhost:5177
 ```
 
-브라우저에서 **http://localhost:5178** 을 엽니다.
-
-프로덕션처럼 한 포트에서 띄우려면:
-
-```bash
-npm run build    # 웹 앱을 apps/web/dist 로 빌드
-npm start        # 서버가 5177에서 API와 정적 파일을 함께 제공
+```
+--workspace <경로>   문서 폴더 (기본 ./workspace, 환경변수 AI_STUDIO_WORKSPACE)
+--port <번호>        수신 포트 (기본 5177, 환경변수 PORT)
+--host <주소>        수신 주소 (기본 127.0.0.1). 0.0.0.0은 네트워크에 노출됩니다
+--web <경로>         빌드된 웹 UI 폴더 (내장본보다 우선)
+--open               시작 후 브라우저를 엽니다
 ```
 
-문서는 `workspace/` 폴더에 저장됩니다. 다른 위치를 쓰려면 `AI_STUDIO_WORKSPACE=/경로` 를 지정하세요.
+인증이 없습니다. `--host 0.0.0.0` 은 같은 네트워크의 누구나 문서를 읽고 쓸 수 있다는 뜻이므로,
+신뢰하는 망에서만 쓰거나 앞에 리버스 프록시를 두세요.
 
 ---
 
@@ -188,33 +205,44 @@ TSV로 복사하므로 Excel과 오갈 수 있습니다. `Ctrl+V`는 TSV와 마�
 삽입·삭제하면 수식 참조가 자동으로 따라갑니다.
 
 오른쪽 **`{ } 저장 포맷`** 패널은 지금 이 순간 디스크에 쓰일 md와 json을 그대로 보여줍니다.
-브라우저와 서버가 같은 직렬화 코드를 쓰기 때문에 실제 저장될 내용과 바이트 단위로 같습니다.
+패널과 저장 경로가 **같은 Rust 직렬화기**를 쓰기 때문에 실제 저장될 내용과 바이트 단위로 같습니다.
 
 ### 내보내기
 
 | 앱 | 형식 | 무엇이 넘어가는가 |
 |---|---|---|
-| Deck | `.pptx` | 좌표·서식·발표자 노트·표·이미지, 그리고 **PowerPoint에서 편집 가능한 네이티브 차트** |
+| Deck | `.pptx` | 좌표·서식·발표자 노트·표·이미지·하이퍼링크, 그리고 **PowerPoint에서 편집 가능한 네이티브 차트** |
 | Doc | `.docx` | 용지·여백·제목 스타일·목록·표·인용·코드·이미지·문단 서식 |
 | Grid | `.xlsx` | **수식이 살아 있는 채로**, 표시 형식·셀 스타일·병합·틀 고정·이름 범위 |
 | Grid | `.csv` | 현재 시트의 값 (Excel 한글용 BOM 포함) |
 | 전부 | `AI.md` | RAG에 그대로 넣는 다이제스트 |
+
+OOXML을 직접 씁니다 — 내보내기에 외부 라이브러리가 없습니다.
 
 ---
 
 ## 구조
 
 ```
-packages/formula/   수식 엔진 — 렉서, 파서, 평가기, 함수 90여 개, 재계산, 참조 조정
-packages/format/    포맷 라이브러리 — md/json 파싱·직렬화, 차트 렌더러, AI.md 생성, 파일 I/O
-apps/server/        Express — 프로젝트 CRUD, 이미지 자산, Office 내보내기, 서버측 재계산
-apps/web/           React — 런처 + 세 에디터, 저장 포맷 패널
-docs/FORMAT.md      포맷 스펙
-scripts/            seed, e2e, export-check, ui-smoke, restart-server
+crates/ai-formula/     수식 엔진 — 렉서, 파서, 평가기, 함수 74개, 재계산, 참조 조정
+crates/ai-format/      포맷 — md/json 파싱·직렬화, AI.md 생성, 차트 스펙, 파일 I/O
+crates/ai-export/      OOXML 작성기 — pptx(네이티브 차트) · docx · xlsx(살아있는 수식) · csv
+crates/ai-core/        하나뿐인 API 표면 — 데스크톱과 서버가 함께 씁니다
+crates/ai-studio-app/  Tauri 데스크톱 앱
+crates/ai-studio-serve/ axum 헤드리스 서버 (웹 UI 내장 가능)
+crates/ai-studio-wasm/ 같은 코어를 브라우저용 WebAssembly로
+apps/web/              React — 런처 + 세 에디터. 뷰 코드만 들어 있습니다
+templates/             샘플 문서 — 이 프로젝트가 정의하는 포맷 그 자체로 저장
+docs/FORMAT.md         포맷 스펙
+docs/ARCHITECTURE.md   왜 이렇게 나누었는가
 ```
 
-`packages/format`은 두 개의 진입점을 갖습니다: 기본(`node:fs` 포함)과 `./browser`(파서만).
-웹 에디터가 후자를 쓰기 때문에 브라우저와 서버가 같은 파서·같은 차트 렌더러를 공유합니다.
+**문서 로직의 구현은 하나뿐입니다.** 수식 엔진도, 저장 포맷도, `AI.md` 생성기도 Rust에만 있습니다.
+데스크톱 앱은 Tauri 커맨드로, 서버는 HTTP로, 브라우저 에디터는 WebAssembly로 **같은 크레이트**를
+호출합니다. 그래서 `{ } 저장 포맷` 패널이 보여주는 내용과 디스크에 쓰이는 바이트가 어긋날 수 없습니다.
+
+에디터에 남아 있는 JavaScript는 뷰 코드입니다 — 차트 SVG 그리기, 마크다운→HTML 렌더링,
+페이지 높이 측정. 어느 것도 디스크에 저장되는 내용을 결정하지 않습니다.
 
 차트 팔레트는 색각 이상 대비를 검증한 8색 고정 순서이고, 밝은/어두운 배경에 각각 다른 단계를
 씁니다. 9번째 계열은 새 색을 만들지 않고 `기타`로 합칩니다.
@@ -227,8 +255,9 @@ scripts/            seed, e2e, export-check, ui-smoke, restart-server
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
+| `GET` | `/api/health` | 상태와 작업 폴더 |
 | `GET` | `/api/projects` | 목록 |
-| `POST` | `/api/projects` | 생성 `{ type, title }` |
+| `POST` | `/api/projects` | 생성 `{ type, title, sample }` |
 | `GET` | `/api/projects/:folder` | 전체 내용 |
 | `PUT` | `/api/projects/:folder` | 저장 (md/json/AI.md 재생성) |
 | `PATCH` | `/api/projects/:folder` | 제목·폴더명 변경 `{ title }` |
@@ -236,50 +265,88 @@ scripts/            seed, e2e, export-check, ui-smoke, restart-server
 | `GET` | `/api/projects/:folder/files` | 파일 목록 |
 | `GET` | `/api/projects/:folder/file?path=` | 파일 내용 |
 | `GET` | `/api/projects/:folder/digest` | `AI.md` |
+| `POST` | `/api/projects/:folder/preview` | 저장하지 않고 쓰일 md/json 확인 |
 | `GET` | `/api/projects/:folder/export/:ext` | `pptx` · `docx` · `xlsx` · `csv` |
 | `GET` `POST` | `/api/projects/:folder/assets` | 이미지 목록 / 업로드 `{ name, dataUrl }` |
 | `GET` | `/api/projects/:folder/asset?path=` | 이미지 제공 |
 | `POST` | `/api/recalc` | 시트 재계산 `{ cells, names }` |
 
+`PUT` 은 보낸 부분만 반영합니다 — 슬라이드만 고쳐 보내면 매니페스트의 나머지는 디스크의 값을 씁니다.
 폴더 파라미터는 작업 폴더 밖을 벗어나지 못하도록 검증되고, 자산은 `assets/` 안만 읽힙니다.
+
+데스크톱 앱에서는 같은 함수들이 Tauri 커맨드(`get_project`, `save_project`, …)로 노출되며,
+HTTP 서버가 전혀 뜨지 않습니다.
+
+---
+
+## 직접 빌드하기
+
+Rust와 Node 20이 필요합니다.
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli tauri-cli
+npm install
+
+npm run seed             # 샘플 문서 3개 (선택)
+npm run desktop          # 데스크톱 앱을 개발 모드로
+npm run desktop:build    # 설치 파일 생성
+```
+
+브라우저 모드로 개발하려면:
+
+```bash
+npm run build:wasm       # Rust 코어를 WebAssembly로
+npm run dev              # 서버(5177) + 웹(5178) 동시 실행
+```
+
+http://localhost:5178 을 엽니다. 프로덕션처럼 한 포트에서 띄우려면:
+
+```bash
+npm run build            # wasm + 웹 UI 빌드
+npm run serve            # 5177에서 API와 정적 파일을 함께 제공
+```
 
 ---
 
 ## 검증
 
 ```bash
-npm test                       # 단위 테스트 170개
-./scripts/restart-server.sh    # 서버를 백그라운드로 재시작하고 준비될 때까지 대기
-node scripts/e2e.mjs           # API·디스크 검증 60개
-node scripts/export-check.mjs  # Office 파일 구조 검증 72개 (unzip 필요)
+npm test                 # Rust 208개 + 웹 53개
+npm run e2e              # API·디스크 검증 60개 (서버 실행 중일 때)
+npm run smoke            # 실제 React 앱을 jsdom에 마운트, 95개
 ```
 
-- **`e2e.mjs`** — 세 문서 타입을 실제로 만들고 편집해 저장한 뒤 **디스크에 쓰인 파일**을 열어
+- **`cargo test`** — 수식 엔진(원래 JS 스위트를 그대로 이식한 34개 포함), 포맷 왕복, 경로 탈출 차단,
+  그리고 **만들어진 Office 파일의 zip을 풀어 XML을 검사**합니다: 수식이 값이 아니라 수식으로 나갔는지,
+  병합·틀 고정·이름 범위가 각 형식의 요소로 변환됐는지, pptx에 네이티브 차트 파트가 생겼는지,
+  모든 관계(`_rels`)가 실제로 존재하는 파트를 가리키는지.
+- **`npm run e2e`** — 세 문서 타입을 실제로 만들고 편집해 저장한 뒤 **디스크에 쓰인 파일**을 열어
   확인합니다. 좌표가 md로 새지 않는지, 텍스트가 json으로 새지 않는지, 손으로 고친 마크다운이 다시
   열리는지, 경로 탈출이 막히는지까지.
-- **`export-check.mjs`** — 만들어진 `.pptx`/`.docx`/`.xlsx`의 zip을 풀어 XML을 검사합니다. 수식이
-  값이 아니라 수식으로 나갔는지, 병합·틀 고정·이름 범위가 각 형식의 요소로 변환됐는지, pptx에
-  네이티브 차트 파트가 생겼는지.
-- **`ui-smoke.mjs`** — 실제 React 앱을 jsdom에 마운트해 **95개**를 검사합니다. 렌더링뿐 아니라
-  편집 상호작용까지: 셀 입력이 의존 수식을 연쇄 재계산하는지, 자동 채우기가 등차수열을 이어가는지,
-  `F5`가 슬라이드 쇼를 띄우고 방향키로 넘어가는지, 차트 삽입이 SVG를 그리는지, 페이지 나누기가 페이지를
-  늘리는지. `jsdom`과 `esbuild`가 필요합니다.
+- **`npm run smoke`** — 렌더링뿐 아니라 편집 상호작용까지: 셀 입력이 의존 수식을 연쇄 재계산하는지,
+  자동 채우기가 등차수열을 이어가는지, `F5`가 슬라이드 쇼를 띄우고 방향키로 넘어가는지, 차트 삽입이
+  SVG를 그리는지, 페이지 나누기가 페이지를 늘리는지. `jsdom`과 `esbuild`가 필요합니다.
 
 ```bash
 npm i -D jsdom esbuild
-AI_STUDIO_TOOLS=$(pwd) node scripts/ui-smoke.mjs
+AI_STUDIO_TOOLS=$(pwd) npm run smoke
 ```
 
-브라우저를 띄워 눈으로 확인한 것은 아닙니다 — 이 환경에 headless 브라우저를 실행할 시스템
-라이브러리가 없어서, 렌더링 검증은 jsdom과 SVG 출력 감사(마크 규격·레이블 충돌·대비)까지입니다.
+만들어진 `.xlsx`/`.pptx`/`.docx`는 `openpyxl`·`python-pptx`·`python-docx`로도 열어 확인했습니다
+(수식·표시 형식·틀 고정·이름 범위, 네이티브 차트의 계열과 항목, A4 용지와 여백, 제목 스타일).
+브라우저를 띄워 눈으로 확인한 것은 아닙니다 — 이 개발 환경에 headless 브라우저를 실행할 시스템
+라이브러리가 없어서, 렌더링 검증은 jsdom까지입니다.
 
 ---
 
 ## 현재 한계
 
 - **`.docx`·`.xlsx`에는 네이티브 차트가 없습니다.** `.pptx`만 편집 가능한 차트로 나가고, Word는 차트를
-  데이터 표 + 캡션으로, Excel은 데이터 블록으로 씁니다(사용한 라이브러리가 차트 파트를 쓰지 못함).
-- **PDF는 브라우저 인쇄로만 만듭니다.** Doc은 `Ctrl+P` → PDF로 저장이 되지만, Deck·Grid는 서버에서
+  데이터 표 + 캡션으로, Excel은 데이터 블록으로 씁니다. Word/Excel의 차트는 별도의 임베디드 워크북
+  파트를 함께 써야 하는데, 차트가 이미 시트 범위를 가리키는 이 포맷에서는 숫자를 그대로 넘기는 편이
+  받는 사람에게 더 쓸모 있습니다.
+- **PDF는 브라우저 인쇄로만 만듭니다.** Doc은 `Ctrl+P` → PDF로 저장이 되지만, Deck·Grid는
   PDF를 생성하지 않습니다.
 - **동시 편집을 가정하지 않았습니다.** 저장은 마지막 쓰기가 이깁니다.
 - **Doc의 페이지 나눔은 블록 단위입니다.** 한 문단이 페이지 경계를 넘으면 문단 전체가 다음 장으로
@@ -287,6 +354,4 @@ AI_STUDIO_TOOLS=$(pwd) node scripts/ui-smoke.mjs
 - **머리글·바닥글·각주·목차 자동 생성이 없습니다.** 페이지 번호는 화면에만 표시됩니다.
 - **셀 서식 대화상자, 조건부 서식, 필터가 없습니다.** 정렬은 선택 범위의 첫 열 기준만 지원합니다.
 - **애니메이션·화면 전환이 없습니다.**
-- **내보내기 라이브러리의 전이 의존성에 DoS 취약점 경고가 있습니다** (`pptxgenjs` → `image-size`,
-  `docx` → `uuid`). 손상된 이미지를 파싱할 때만 문제가 되고 수정 버전이 아직 없습니다. 이 서버는
-  사용자 자신의 프로젝트 폴더 안 이미지만 읽습니다.
+- **서버에 인증이 없습니다.** 위의 `--host` 주의를 참고하세요.
