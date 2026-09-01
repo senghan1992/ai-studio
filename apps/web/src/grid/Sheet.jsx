@@ -1,0 +1,507 @@
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { indexToCol, toRef, displayValue, dependencies } from '@ai-studio/formula';
+import { DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT } from '@ai-studio/format/browser';
+import { normalizeRange, mergeCovering, fillTarget } from './gridOps.js';
+import SheetCharts from './SheetCharts.jsx';
+
+const ROW_BUFFER = 24;
+const MIN_VISIBLE_ROWS = 32;
+const HEADER_H = 26;
+const ROW_HEAD_W = 44;
+
+/**
+ * The spreadsheet surface.
+ *
+ * Rows render lazily — used range plus a buffer — because a 200x26 sheet is 5,200
+ * DOM nodes and almost all of them are empty. The window grows as the selection
+ * moves down, which keeps typing responsive without a full virtualiser.
+ *
+ * The interactions here are the ones Excel users have in muscle memory: drag to
+ * select, drag the corner handle to fill, drag a header edge to resize,
+ * double-click an edge to auto-fit, right-click for a menu, and frozen panes that
+ * actually stay put while scrolling.
+ */
+export default function Sheet({
+  sheet, sel, onSelChange, editing, showFormulas, zoom = 1,
+  onEditStart, onCommit, onEditCancel,
+  onFill, onResizeCol, onResizeRow, onAutoFitCol, onContextMenu,
+  findHits, currentHit,
+  selectedChartId, onSelectChart, onMoveChart, onEditChart, onDeleteChart,
+}) {
+  const containerRef = useRef(null);
+  const [dragSelect, setDragSelect] = useState(false);
+  const [fillTo, setFillTo] = useState(null);
+  const [resizing, setResizing] = useState(null);
+
+  /*
+   * Live drag state is mirrored into refs.
+   *
+   * A `setState` updater must be pure — React may call it more than once — so the
+   * commit at mouse-up reads the ref and calls the parent from the event handler
+   * instead of from inside the updater, where the nested state update was
+   * unreliable.
+   */
+  const resizingRef = useRef(null);
+  const fillRef = useRef(null);
+  resizingRef.current = resizing;
+  fillRef.current = fillTo;
+
+  const range = normalizeRange(sel);
+  const usedRow = maxUsedRow(sheet.cells);
+  const visibleRows = Math.min(
+    sheet.dims.rows,
+    Math.max(MIN_VISIBLE_ROWS, usedRow + ROW_BUFFER, range.r2 + ROW_BUFFER)
+  );
+  const visibleCols = Math.min(sheet.dims.cols, Math.max(12, maxUsedCol(sheet.cells) + 4, range.c2 + 3));
+
+  // Zoom scales the rendered geometry instead of CSS-transforming the table:
+  // a transform would break `position: sticky` on the frozen panes.
+  const z = zoom;
+  const px = (n) => Math.round(n * z);
+  const colWidth = (c) => sheet.colWidths?.[indexToCol(c)] ?? DEFAULT_COL_WIDTH;
+  const rowHeight = (r) => sheet.rowHeights?.[String(r + 1)] ?? DEFAULT_ROW_HEIGHT;
+  const headerH = px(HEADER_H);
+  const rowHeadW = px(ROW_HEAD_W);
+
+  const frozenCols = Math.min(sheet.frozen?.cols ?? 0, visibleCols);
+  const frozenRows = Math.min(sheet.frozen?.rows ?? 0, visibleRows);
+
+  /** Sticky offsets for frozen panes, accumulated from the real sizes. */
+  const colOffset = useMemo(() => {
+    const offsets = [];
+    let x = rowHeadW;
+    for (let c = 0; c < frozenCols; c++) {
+      offsets.push(x);
+      x += px(colWidth(c));
+    }
+    return offsets;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frozenCols, sheet.colWidths, z]);
+
+  const rowOffset = useMemo(() => {
+    const offsets = [];
+    let y = headerH;
+    for (let r = 0; r < frozenRows; r++) {
+      offsets.push(y);
+      y += px(rowHeight(r));
+    }
+    return offsets;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frozenRows, sheet.rowHeights, z]);
+
+  /** Cells the selected formula reads, highlighted like Excel's trace precedents. */
+  const depRefs = useMemo(() => {
+    if (editing || range.r1 !== range.r2 || range.c1 !== range.c2) return new Set();
+    const cell = sheet.cells[toRef(range.c1, range.r1)];
+    return cell?.f ? new Set(dependencies(cell.f)) : new Set();
+  }, [sheet.cells, range.r1, range.c1, range.r2, range.c2, editing]);
+
+  const hitSet = useMemo(() => new Set((findHits ?? []).map((h) => h.ref)), [findHits]);
+
+  // Keep the active cell in view when navigating by keyboard.
+  useEffect(() => {
+    if (editing) return;
+    const el = containerRef.current?.querySelector('td.is-selected');
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [sel.row, sel.col, editing]);
+
+  /* ------------------------------------------------------------- resizing */
+
+  useEffect(() => {
+    if (!resizing) return undefined;
+    const onMove = (e) => {
+      const current = resizingRef.current;
+      if (!current) return;
+      const delta = (current.axis === 'col' ? e.clientX - current.startX : e.clientY - current.startY) / zoom;
+      const size = Math.max(current.axis === 'col' ? 24 : 16, current.origin + delta);
+      resizingRef.current = { ...current, size };
+      setResizing(resizingRef.current);
+    };
+    const onUp = () => {
+      const current = resizingRef.current;
+      setResizing(null);
+      resizingRef.current = null;
+      if (!current || current.size === current.origin) return;
+      if (current.axis === 'col') onResizeCol(current.index, current.size);
+      else onResizeRow(current.index, current.size);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizing, zoom, onResizeCol, onResizeRow]);
+
+  const liveColWidth = (c) => (resizing?.axis === 'col' && resizing.index === c ? resizing.size : colWidth(c));
+  const liveRowHeight = (r) => (resizing?.axis === 'row' && resizing.index === r ? resizing.size : rowHeight(r));
+
+  /* ------------------------------------------------------------ fill drag */
+
+  useEffect(() => {
+    if (!fillTo) return undefined;
+    const onUp = () => {
+      const current = fillRef.current;
+      setFillTo(null);
+      fillRef.current = null;
+      if (current?.target) onFill(current.source, current.target);
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      setFillTo(null);
+      fillRef.current = null;
+    };
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [fillTo, onFill]);
+
+  const fillPreview = fillTo?.target ?? null;
+  const inFillPreview = (r, c) =>
+    fillPreview &&
+    r >= fillPreview.r1 && r <= fillPreview.r2 && c >= fillPreview.c1 && c <= fillPreview.c2 &&
+    !(r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2);
+
+  /* ---------------------------------------------------------------- cells */
+
+  const totalWidth = rowHeadW + Array.from({ length: visibleCols }, (_, c) => px(liveColWidth(c))).reduce((a, b) => a + b, 0);
+
+  const enterCell = (r, c) => {
+    const current = fillRef.current;
+    if (current) {
+      const target = fillTarget(current.source, r, c);
+      fillRef.current = { ...current, target };
+      setFillTo(fillRef.current);
+      return;
+    }
+    if (dragSelect) onSelChange({ ...sel, row2: r, col2: c });
+  };
+
+  return (
+    <div
+      className="sheet"
+      ref={containerRef}
+      onMouseUp={() => setDragSelect(false)}
+      onMouseLeave={() => setDragSelect(false)}
+    >
+      <div style={{ position: 'relative', width: totalWidth }}>
+      <table style={{ width: totalWidth, fontSize: `${Math.max(8, Math.round(13 * z))}px` }}>
+        <colgroup>
+          <col style={{ width: rowHeadW }} />
+          {Array.from({ length: visibleCols }, (_, c) => (
+            <col key={c} style={{ width: px(liveColWidth(c)) }} />
+          ))}
+        </colgroup>
+
+        <thead>
+          <tr style={{ height: headerH }}>
+            <th style={{ left: 0, zIndex: 6 }} aria-label="모두 선택">
+              <button
+                type="button"
+                className="selectall"
+                title="시트 전체 선택"
+                onClick={() => onSelChange({ row: 0, col: 0, row2: visibleRows - 1, col2: visibleCols - 1 })}
+              />
+            </th>
+            {Array.from({ length: visibleCols }, (_, c) => {
+              const frozen = c < frozenCols;
+              return (
+                <th
+                  key={c}
+                  className={[
+                    c >= range.c1 && c <= range.c2 ? 'is-active' : '',
+                    frozen ? 'is-frozen' : '',
+                  ].filter(Boolean).join(' ')}
+                  style={frozen ? { left: colOffset[c], zIndex: 5 } : undefined}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    onSelChange({ row: 0, col: c, row2: visibleRows - 1, col2: c });
+                  }}
+                  onContextMenu={(e) => onContextMenu?.(e, { kind: 'col', index: c })}
+                  title={`${indexToCol(c)}열 — 눌러 전체 선택, 경계를 끌어 너비 조절`}
+                >
+                  {indexToCol(c)}
+                  <span
+                    className="resizer resizer--col"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      resizingRef.current = { axis: 'col', index: c, startX: e.clientX, origin: colWidth(c), size: colWidth(c) };
+                      setResizing(resizingRef.current);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onAutoFitCol?.(c);
+                    }}
+                    title="너비 조절 (두 번 누르면 자동 맞춤)"
+                  />
+                </th>
+              );
+            })}
+          </tr>
+        </thead>
+
+        <tbody>
+          {Array.from({ length: visibleRows }, (_, r) => {
+            const frozenRow = r < frozenRows;
+            return (
+              <tr key={r} style={{ height: px(liveRowHeight(r)) }}>
+                <th
+                  className={[
+                    r >= range.r1 && r <= range.r2 ? 'is-active' : '',
+                    frozenRow ? 'is-frozen' : '',
+                  ].filter(Boolean).join(' ')}
+                  style={{ left: 0, ...(frozenRow ? { top: rowOffset[r], zIndex: 4 } : {}) }}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    onSelChange({ row: r, col: 0, row2: r, col2: visibleCols - 1 });
+                  }}
+                  onContextMenu={(e) => onContextMenu?.(e, { kind: 'row', index: r })}
+                  title={`${r + 1}행 — 눌러 전체 선택, 경계를 끌어 높이 조절`}
+                >
+                  {r + 1}
+                  <span
+                    className="resizer resizer--row"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      resizingRef.current = { axis: 'row', index: r, startY: e.clientY, origin: rowHeight(r), size: rowHeight(r) };
+                      setResizing(resizingRef.current);
+                    }}
+                    title="높이 조절"
+                  />
+                </th>
+
+                {Array.from({ length: visibleCols }, (_, c) => {
+                  const merge = mergeCovering(sheet, r, c);
+                  // A cell covered by a merge but not its anchor renders nothing.
+                  if (merge && !(merge.r1 === r && merge.c1 === c)) return null;
+
+                  const ref = toRef(c, r);
+                  const cell = sheet.cells[ref];
+                  const isSelected = r === sel.row && c === sel.col;
+                  const inRange =
+                    r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2 && !isSelected;
+                  const isEditing = editing && isSelected;
+                  const frozenCol = c < frozenCols;
+                  const isFillCorner = !editing && r === range.r2 && c === range.c2;
+
+                  return (
+                    <td
+                      key={c}
+                      rowSpan={merge ? merge.r2 - merge.r1 + 1 : undefined}
+                      colSpan={merge ? merge.c2 - merge.c1 + 1 : undefined}
+                      className={[
+                        isSelected ? 'is-selected' : '',
+                        inRange ? 'is-inrange' : '',
+                        depRefs.has(ref) ? 'is-dep' : '',
+                        inFillPreview(r, c) ? 'is-fillpreview' : '',
+                        frozenCol || frozenRow ? 'is-frozen' : '',
+                      ].filter(Boolean).join(' ')}
+                      style={{
+                        ...cellVisualStyle(cell),
+                        ...(frozenCol ? { left: colOffset[c] } : {}),
+                        ...(frozenRow ? { top: rowOffset[r] } : {}),
+                        ...(frozenCol || frozenRow ? { position: 'sticky' } : {}),
+                        ...(frozenCol && frozenRow ? { zIndex: 3 } : {}),
+                      }}
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        setDragSelect(true);
+                        onSelChange(
+                          e.shiftKey
+                            ? { ...sel, row2: r, col2: c }
+                            : { row: r, col: c, row2: r, col2: c }
+                        );
+                      }}
+                      onMouseEnter={() => enterCell(r, c)}
+                      onDoubleClick={() => onEditStart(r, c)}
+                      onContextMenu={(e) => {
+                        if (!(r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2)) {
+                          onSelChange({ row: r, col: c, row2: r, col2: c });
+                        }
+                        onContextMenu?.(e, { kind: 'cell', row: r, col: c });
+                      }}
+                    >
+                      {isEditing ? (
+                        <CellEditor initial={editing.value} onCommit={onCommit} onCancel={onEditCancel} />
+                      ) : (
+                        <CellView
+                          cell={cell}
+                          showFormulas={showFormulas}
+                          highlight={hitSet.has(ref) ? { query: findHits?.query, current: currentHit === ref } : null}
+                        />
+                      )}
+
+                      {isFillCorner && (
+                        <span
+                          className="fillhandle"
+                          title="끌어서 자동 채우기"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            fillRef.current = { source: { ...range }, target: null };
+                            setFillTo(fillRef.current);
+                          }}
+                        />
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <SheetCharts
+        sheet={sheet}
+        zoom={z}
+        selectedId={selectedChartId}
+        onSelect={onSelectChart}
+        onMove={onMoveChart}
+        onEdit={onEditChart}
+        onDelete={onDeleteChart}
+      />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- cell */
+
+function CellView({ cell, showFormulas, highlight }) {
+  if (!cell) return <div className="cell" />;
+  const text = showFormulas && cell.f ? cell.f : displayValue(cell);
+  const type = cell.t === 'e' ? 'e' : cell.t === 'n' || cell.t === 'd' ? 'n' : cell.t === 'b' ? 'b' : 's';
+  const style = cell.style ?? {};
+  return (
+    <div
+      className={`cell cell--${showFormulas && cell.f ? 's' : type}`}
+      style={{
+        fontWeight: style.bold ? 700 : undefined,
+        fontStyle: style.italic ? 'italic' : undefined,
+        textDecoration: style.underline ? 'underline' : undefined,
+        color: style.color,
+        justifyContent: alignOf(style.align),
+      }}
+      title={cell.f ? `${cell.f} → ${displayValue(cell)}` : undefined}
+    >
+      {highlight?.query ? markMatches(text, highlight.query, highlight.current) : text}
+    </div>
+  );
+}
+
+/** Wrap search matches in <mark> so Find shows where the hits are. */
+function markMatches(text, query, current) {
+  const source = String(text);
+  const needle = String(query);
+  if (!needle) return source;
+  const parts = [];
+  const lower = source.toLowerCase();
+  const target = needle.toLowerCase();
+  let i = 0;
+  let key = 0;
+  while (i < source.length) {
+    const at = lower.indexOf(target, i);
+    if (at === -1) {
+      parts.push(source.slice(i));
+      break;
+    }
+    if (at > i) parts.push(source.slice(i, at));
+    parts.push(
+      <mark key={key++} className={`findhit${current ? ' is-current' : ''}`}>
+        {source.slice(at, at + needle.length)}
+      </mark>
+    );
+    i = at + needle.length;
+  }
+  return parts;
+}
+
+function alignOf(align) {
+  if (align === 'left') return 'flex-start';
+  if (align === 'center') return 'center';
+  if (align === 'right') return 'flex-end';
+  return undefined; // fall back to the type-based class
+}
+
+const BORDER = '1px solid #9ca3af';
+
+function cellVisualStyle(cell) {
+  const style = cell?.style;
+  if (!style) return undefined;
+  const out = {};
+  if (style.bg) out.background = style.bg;
+  const b = style.border;
+  if (b) {
+    if (b.t) out.borderTop = BORDER;
+    if (b.b) out.borderBottom = BORDER;
+    if (b.l) out.borderLeft = BORDER;
+    if (b.r) out.borderRight = BORDER;
+  }
+  return out;
+}
+
+/**
+ * In-cell editor. Enter/Tab commit with a direction so the selection advances the
+ * way it does in Excel; Escape restores the previous content.
+ */
+function CellEditor({ initial, onCommit, onCancel }) {
+  const ref = useRef(null);
+  const [value, setValue] = useState(initial ?? '');
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    el?.focus();
+    el?.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+
+  return (
+    <input
+      ref={ref}
+      className="cell__editor"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          onCommit(value, e.shiftKey ? 'up' : 'down');
+        } else if (e.key === 'Tab') {
+          e.preventDefault();
+          onCommit(value, e.shiftKey ? 'left' : 'right');
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      onBlur={() => onCommit(value, null)}
+      spellCheck={false}
+    />
+  );
+}
+
+function maxUsedRow(cells) {
+  let max = 0;
+  for (const ref of Object.keys(cells)) {
+    const m = ref.match(/(\d+)$/);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max;
+}
+
+function maxUsedCol(cells) {
+  let max = 0;
+  for (const ref of Object.keys(cells)) {
+    const m = ref.match(/^([A-Z]+)/);
+    if (!m) continue;
+    let n = 0;
+    for (const ch of m[1]) n = n * 26 + (ch.charCodeAt(0) - 64);
+    max = Math.max(max, n);
+  }
+  return max;
+}

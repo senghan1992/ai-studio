@@ -1,0 +1,8 @@
+node_modules/
+apps/web/dist/
+*.log
+
+# User documents. Ignored here because this is the app's repo, not a document
+# repo — but the whole point of the format is that a workspace *is* worth
+# versioning, so keep yours in its own repo and `git diff` will read cleanly.
+workspace/
