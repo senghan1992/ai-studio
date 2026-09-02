@@ -10,7 +10,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use ai_core::{
-    CreateRequest, Error, ProjectPayload, RecalcRequest, RenameRequest, Studio, UploadAssetRequest,
+    CreateRequest, Error, ImportRequest, ProjectPayload, RecalcRequest, RenameRequest, Studio,
+    UploadAssetRequest,
 };
 
 pub type Shared = Arc<Studio>;
@@ -45,6 +46,7 @@ pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/health", get(health))
         .route("/projects", get(list_projects).post(create_project))
+        .route("/import", post(import_file))
         .route(
             "/projects/{folder}",
             get(get_project)
@@ -78,6 +80,15 @@ async fn create_project(
     Json(request): Json<CreateRequest>,
 ) -> ApiResult<impl IntoResponse> {
     Ok((StatusCode::CREATED, Json(studio.create_project(request)?)))
+}
+
+/// Convert an Office file into a project. The upload is base64 in JSON rather
+/// than multipart so the desktop and browser paths send the identical body.
+async fn import_file(
+    State(studio): State<Shared>,
+    Json(request): Json<ImportRequest>,
+) -> ApiResult<impl IntoResponse> {
+    Ok((StatusCode::CREATED, Json(studio.import(request)?)))
 }
 
 async fn get_project(

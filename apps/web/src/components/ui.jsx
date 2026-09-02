@@ -1,8 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 /* ------------------------------------------------------------------ ribbon */
 
-export function Ribbon({ tabs, active, onTab, children }) {
+/**
+ * The ribbon.
+ *
+ * `contextual` tabs appear only while something that needs them is selected — a
+ * shape brings up 도형 서식, a table brings up 표 디자인 and 레이아웃. Office
+ * groups them to the right under a shared heading, and they vanish again when
+ * the selection changes, which is why they are a separate list rather than
+ * entries the caller splices into `tabs`.
+ */
+export function Ribbon({ tabs, active, onTab, children, contextual = [], contextLabel }) {
   return (
     <div className="ribbon">
       <div className="ribbon__tabs" role="tablist" aria-label="리본 탭">
@@ -17,6 +27,22 @@ export function Ribbon({ tabs, active, onTab, children }) {
             {tab}
           </button>
         ))}
+        {contextual.length > 0 && (
+          <span className="ribbon__context" aria-label={contextLabel}>
+            {contextLabel && <span className="ribbon__contextlabel">{contextLabel}</span>}
+            {contextual.map((tab) => (
+              <button
+                key={tab}
+                role="tab"
+                className="ribbon__tab ribbon__tab--context"
+                aria-selected={tab === active}
+                onClick={() => onTab(tab)}
+              >
+                {tab}
+              </button>
+            ))}
+          </span>
+        )}
       </div>
       <div className="ribbon__body" role="tabpanel">
         {children}
@@ -88,21 +114,245 @@ export function NumInput({ value, onChange, title, min, max, step = 1 }) {
   );
 }
 
-export function ColorRow({ colors, value, onChange, title }) {
+/* ------------------------------------------------------------------ popover */
+
+/**
+ * A panel that hangs off a control without being clipped by it.
+ *
+ * The ribbon scrolls sideways, so it clips its own children — a palette or a
+ * shape gallery placed inside it gets cut off at the ribbon's edge. This renders
+ * into `document.body` instead and positions itself against the control's
+ * on-screen box, which is how a menu behaves everywhere else: it can overhang
+ * the toolbar, the window edge flips it, and scrolling keeps it attached.
+ *
+ * Dismisses on a click outside, on Escape, and on the control being pressed
+ * again — all three of which people try.
+ */
+export function Popover({ anchorRef, onClose, label, children, gap = 4 }) {
+  const panel = useRef(null);
+  const [box, setBox] = useState(null);
+
+  const place = useCallback(() => {
+    const anchor = anchorRef?.current;
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    const width = panel.current?.offsetWidth ?? 0;
+    const height = panel.current?.offsetHeight ?? 0;
+    const margin = 8;
+    const viewport = {
+      w: window.innerWidth || 1024,
+      h: window.innerHeight || 768,
+    };
+    // Left-aligned with the control, pulled back when it would run off the
+    // right edge, and never off the left.
+    const left = Math.max(margin, Math.min(rect.left, viewport.w - width - margin));
+    // Below by default; above when there is no room below but there is above.
+    const below = rect.bottom + gap;
+    const fitsBelow = below + height <= viewport.h - margin;
+    const top = fitsBelow ? below : Math.max(margin, rect.top - gap - height);
+    setBox({ top, left, maxHeight: Math.max(160, viewport.h - top - margin) });
+  }, [anchorRef, gap]);
+
+  useLayoutEffect(() => {
+    place();
+    // A scroll anywhere moves the control, so the listener is on capture.
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [place]);
+
+  useEffect(() => {
+    const onAway = (e) => {
+      if (panel.current?.contains(e.target) || anchorRef?.current?.contains(e.target)) return;
+      onClose?.();
+    };
+    const onKey = (e) => e.key === 'Escape' && onClose?.();
+    window.addEventListener('mousedown', onAway);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onAway);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [anchorRef, onClose]);
+
+  if (typeof document === 'undefined') return null;
+  return createPortal(
+    <div
+      className="popover"
+      ref={panel}
+      role="dialog"
+      aria-label={label}
+      style={box ? { top: box.top, left: box.left, '--popover-max': `${box.maxHeight}px` } : { visibility: 'hidden' }}
+    >
+      {children}
+    </div>,
+    document.body
+  );
+}
+
+/* ------------------------------------------------------------- colour picker */
+
+/** Office's standard colour row, unchanged since it was invented. */
+const STANDARD = [
+  '#c00000', '#ff0000', '#ffc000', '#ffff00', '#92d050',
+  '#00b050', '#00b0f0', '#0070c0', '#002060', '#7030a0',
+];
+
+/**
+ * The theme row: the two backgrounds, the two text colours, then six accents.
+ *
+ * These are the colours this project's own `.pptx` theme writes, so a shape
+ * filled from here keeps its colour when the deck is exported and reopened in
+ * PowerPoint. The first accent is the document's own, which is what the theme
+ * picker in the 디자인 tab sets.
+ */
+const themeRow = (accent) => [
+  '#ffffff', '#000000', '#e7e6e6', '#44546a',
+  accent || '#4472c4', '#ed7d31', '#a5a5a5', '#ffc000', '#5b9bd5', '#70ad47',
+];
+
+const channels = (hex) => {
+  const v = String(hex ?? '').replace('#', '');
+  const full = v.length === 3 ? v.split('').map((c) => c + c).join('') : v;
+  return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) || 0);
+};
+
+const toHex = (rgb) =>
+  `#${rgb.map((n) => Math.round(Math.min(255, Math.max(0, n))).toString(16).padStart(2, '0')).join('')}`;
+
+/** Mix toward white (`amount` > 0) or black (`amount` < 0), as Office does. */
+const mix = (hex, amount) =>
+  toHex(channels(hex).map((c) => (amount >= 0 ? c + (255 - c) * amount : c * (1 + amount))));
+
+/**
+ * The five variants Office lists under each theme colour.
+ *
+ * Light colours get darker, dark colours get lighter, and an accent goes three
+ * steps lighter then two steps darker — the ramp everyone recognises from the
+ * fill dropdown.
+ */
+function variants(hex) {
+  const [r, g, b] = channels(hex);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  if (luminance > 0.85) return [-0.05, -0.15, -0.25, -0.35, -0.5].map((a) => mix(hex, a));
+  if (luminance < 0.35) return [0.5, 0.35, 0.25, 0.15, 0.05].map((a) => mix(hex, a));
+  return [0.8, 0.6, 0.4, -0.25, -0.5].map((a) => mix(hex, a));
+}
+
+/**
+ * A colour control shaped like Office's: a swatch showing the current colour,
+ * and a palette under it.
+ *
+ * The palette is the one Office shows — theme colours with their tints and
+ * shades, the ten standard colours, an explicit "none", and the system picker
+ * for anything else. Six fixed swatches in the ribbon is the thing that makes a
+ * lookalike feel like a lookalike.
+ */
+export function ColorPicker({ value, onChange, title, none, accent, small, disabled }) {
+  const [open, setOpen] = useState(false);
+  const button = useRef(null);
+
+  const pick = (color) => {
+    onChange(color);
+    setOpen(false);
+  };
+  const theme = themeRow(accent);
+
   return (
-    <div className="rrow" role="group" aria-label={title}>
-      {colors.map((c) => (
-        <button
-          key={c}
-          type="button"
-          className="swatch"
-          style={{ background: c }}
-          aria-pressed={value?.toLowerCase() === c.toLowerCase()}
-          title={c}
-          onClick={() => onChange(c)}
+    <>
+      <button
+        type="button"
+        ref={button}
+        className={`colorbtn${small ? ' colorbtn--sm' : ''}`}
+        title={title}
+        aria-label={title}
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span
+          className={`colorbtn__swatch${value ? '' : ' is-none'}`}
+          style={value ? { background: value } : undefined}
         />
-      ))}
-    </div>
+        <span className="colorbtn__caret" aria-hidden="true">
+          ▾
+        </span>
+      </button>
+
+      {open && !disabled && (
+        <Popover anchorRef={button} onClose={() => setOpen(false)} label={title}>
+          <div className="palette">
+          <p className="palette__label">테마 색</p>
+          <div className="palette__grid">
+            {theme.map((color) => (
+              <button
+                key={color}
+                type="button"
+                className="swatch"
+                style={{ background: color }}
+                title={color}
+                aria-pressed={value?.toLowerCase() === color.toLowerCase()}
+                onClick={() => pick(color)}
+              />
+            ))}
+            {[0, 1, 2, 3, 4].map((row) =>
+              theme.map((color) => {
+                const shade = variants(color)[row];
+                return (
+                  <button
+                    key={`${color}-${row}`}
+                    type="button"
+                    className="swatch"
+                    style={{ background: shade }}
+                    title={shade}
+                    aria-pressed={value?.toLowerCase() === shade.toLowerCase()}
+                    onClick={() => pick(shade)}
+                  />
+                );
+              })
+            )}
+          </div>
+
+          <p className="palette__label">표준 색</p>
+          <div className="palette__grid">
+            {STANDARD.map((color) => (
+              <button
+                key={color}
+                type="button"
+                className="swatch"
+                style={{ background: color }}
+                title={color}
+                aria-pressed={value?.toLowerCase() === color.toLowerCase()}
+                onClick={() => pick(color)}
+              />
+            ))}
+          </div>
+
+          <div className="palette__foot">
+            {none && (
+              <button type="button" className="palette__item" onClick={() => pick(null)}>
+                <span className="colorbtn__swatch is-none" />
+                {none}
+              </button>
+            )}
+            <label className="palette__item">
+              <span className="colorbtn__swatch" style={{ background: value || '#4f46e5' }} />
+              다른 색…
+              <input
+                type="color"
+                value={/^#[0-9a-f]{6}$/i.test(value ?? '') ? value : '#4f46e5'}
+                onChange={(e) => onChange(e.target.value)}
+                aria-label={`${title} 직접 선택`}
+              />
+            </label>
+          </div>
+          </div>
+        </Popover>
+      )}
+    </>
   );
 }
 
@@ -335,4 +585,25 @@ export function ZoomSlider({ value, onChange, min = 0.25, max = 2 }) {
 
 function clampZoom(v, min, max) {
   return Math.min(max, Math.max(min, Math.round(v * 100) / 100));
+}
+
+/**
+ * A labelled checkbox for a ribbon group.
+ *
+ * Office's table style options are checkboxes, not toggle buttons — the state
+ * has to be readable at a glance without hovering, because three of them decide
+ * how the table looks.
+ */
+export function Check({ label, checked, onChange, disabled, title }) {
+  return (
+    <label className={`ribbon__check${disabled ? ' is-disabled' : ''}`} title={title ?? label}>
+      <input
+        type="checkbox"
+        checked={!!checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
+  );
 }

@@ -108,6 +108,16 @@ fn is_word_char(c: char) -> bool {
 }
 
 static NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\d*\.?\d+(?:[eE][+-]?\d+)?").unwrap());
+/// `Sheet2!A1`, `Sheet2!$A$1:$B$4`, `'2분기 실적'!A1` — a reference into another
+/// sheet, which is most of what a summary sheet contains.
+static SHEET_REF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        r#"^(?:'([^']+)'|([^\s!'"(),;:+\-*/^&<>=]+))!"#,
+        r"(\$?[A-Za-z]{1,3}\$?\d{1,7})",
+        r"(?:[ \t]*:[ \t]*(\$?[A-Za-z]{1,3}\$?\d{1,7}))?"
+    ))
+    .unwrap()
+});
 static RANGE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^\$?[A-Za-z]{1,3}\$?\d{1,7}[ \t]*:[ \t]*\$?[A-Za-z]{1,3}\$?\d{1,7}").unwrap()
 });
@@ -168,6 +178,29 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             tokens.push(Token::Number(value));
             i += literal.len();
             continue;
+        }
+
+        // A sheet-qualified reference, before anything else: `Sheet2` would
+        // otherwise lex as a name and `!` as an unexpected character, which
+        // fails the whole formula.
+        if is_word_start(c) || c == '\'' {
+            if let Some(caps) = SHEET_REF_RE.captures(rest) {
+                let sheet = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+                let start = caps.get(3).unwrap().as_str().to_uppercase();
+                let token = match caps.get(4) {
+                    Some(end) => {
+                        Token::Range(format!("{sheet}!{start}:{}", end.as_str().to_uppercase()))
+                    }
+                    None => Token::Ref(format!("{sheet}!{start}")),
+                };
+                tokens.push(token);
+                i += caps.get(0).unwrap().as_str().len();
+                continue;
+            }
         }
 
         // A run of letters/digits/$ may be a range, a ref, a boolean, or a name.

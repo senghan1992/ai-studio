@@ -16,7 +16,7 @@ use crate::chart::{
 };
 use crate::doc::describe_override;
 use crate::geometry::{position_phrase, reading_order};
-use crate::grid::{recalculated, summarize_columns, summary_scope, used_range};
+use crate::grid::{summarize_columns, summary_scope, used_range};
 use crate::mdblocks::{count_words, heading_level, plain_text};
 use crate::model::{Items, Project, Section, Sheet, Slide};
 
@@ -104,7 +104,13 @@ fn deck_digest(project: &Project, slides: &[Slide]) -> String {
 
         for (bi, block) in ordered.iter().enumerate() {
             let where_ = position_phrase(&block.geometry(), &slide.canvas);
-            lines.push(format!("### {}) {} — {where_}", bi + 1, block.kind.label()));
+            // A shape says which shape it is: "도형(판단)" carries the meaning of
+            // a flowchart node, where a bare "도형" carries none.
+            let kind = match (&block.kind, &block.shape) {
+                (Kind::Shape, Some(shape)) => format!("{}({})", block.kind.label(), shape.label()),
+                _ => block.kind.label().to_string(),
+            };
+            lines.push(format!("### {}) {kind} — {where_}", bi + 1));
             lines.push(String::new());
             let content = block.md.trim();
 
@@ -233,7 +239,9 @@ fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
     // Recalculate here rather than trusting the caller's cached `v` values: the
     // digest is generated on save, and a caller may hand us cells whose formulas
     // have never been evaluated (an API client, or a freshly parsed file).
-    let sheets: Vec<Sheet> = sheets.iter().map(recalculated).collect();
+    // The whole workbook at once: a summary sheet's `=요약!B4` cannot be
+    // resolved by recalculating its sheet alone.
+    let sheets: Vec<Sheet> = crate::grid::recalculated_all(sheets);
     let mut lines = header(
         project,
         &format!("AI Studio 스프레드시트 · 시트 {}개", sheets.len()),

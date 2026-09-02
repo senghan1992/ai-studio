@@ -9,6 +9,7 @@
  * project's dependencies:
  *   node scripts/ui-smoke.mjs
  */
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
@@ -105,7 +106,7 @@ const { loadCore } = await import(pathToFileURL(path.join(ROOT, 'apps/web/test/c
 await loadCore();
 const core = await import(pathToFileURL(path.join(ROOT, 'apps/web/src/core/index.js')));
 
-const theme = { name: 'aurora', accent: '#4f46e5', font: 'Inter' };
+const theme = { name: 'aurora', accent: '#4f46e5', font: 'Pretendard' };
 const manifestOf = (title, type) => ({
   format: `ai-studio/${type}`,
   formatVersion: 1,
@@ -133,11 +134,57 @@ const fixtures = {};
     slides,
   };
 
+  const docSection = core.makeSection({ name: '스모크 doc' });
+  const blank = core.blankTable(3, 3);
+  docSection.blocks.push({
+    id: 'b_doctable',
+    md: blank.md,
+    type: 'table',
+    override: null,
+    table: blank.table,
+  });
   fixtures['스모크-문서.aidoc'] = {
     type: 'doc',
     folder: '스모크-문서.aidoc',
     manifest: manifestOf('스모크 doc', 'doc'),
-    sections: [core.makeSection({ name: '스모크 doc' })],
+    sections: [docSection],
+  };
+
+  // A shape and a table, so their renderers are exercised rather than assumed.
+  slides.push({
+    ...core.makeSlide('blank', { title: '도형과 표', index: 3 }),
+    title: '도형과 표',
+    blocks: [
+      (() => {
+        const b = core.makeShape('flowChartDecision', { x: 96, y: 96, w: 300, h: 200, z: 1 });
+        b.md = '승인?';
+        return b;
+      })(),
+      core.makeTable(3, 3, { x: 500, y: 96, w: 600, h: 200, z: 2 }),
+    ],
+  });
+
+  // A 4:3 deck: the size a projector deck is still made at, and the one every
+  // hardcoded 16:9 assumption shows itself on.
+  const standard = core.makeSlide('title-content', { title: '4:3 표준 비율' });
+  fixtures['스모크-표준.aideck'] = {
+    type: 'deck',
+    folder: '스모크-표준.aideck',
+    manifest: manifestOf('스모크 4:3', 'deck'),
+    slides: [
+      {
+        ...standard,
+        canvas: { w: 960, h: 720, bg: '#ffffff' },
+        blocks: [
+          ...standard.blocks,
+          (() => {
+            const b = core.makeShape('roundRect', { x: 672, y: 595, w: 250, h: 96, z: 9 });
+            b.md = '우측 하단';
+            return b;
+          })(),
+        ],
+      },
+    ],
   };
 
   fixtures['스모크-시트.aigrid'] = {
@@ -212,6 +259,20 @@ async function mount(hash, { interact } = {}) {
       if (!fixtures[folder]) return json({ error: 'not found' }, 404);
       return json(fixtures[folder]);
     }
+    // Importing an Office file: the response shape the server sends, with the
+    // conversion notes a real file produces.
+    if (u.endsWith('/api/import')) {
+      const folder = folders[0];
+      return json({
+        folder,
+        project: fixtures[folder],
+        warnings: [
+          '글꼴은 모두 Pretendard로 바꿔 열었습니다 (Calibri)',
+          'SmartArt는 같은 모양의 도형들로 바꿨습니다',
+          '조건부 서식은 저장된 값 기준의 고정 서식으로 바꿨습니다',
+        ],
+      });
+    }
     return json({ error: `unhandled ${u}` }, 500);
   };
 
@@ -238,6 +299,11 @@ async function mount(hash, { interact } = {}) {
   // The bundle calls bare `fetch`, which resolves against globalThis rather than
   // the `window` we pass in, so the stub has to be installed globally too.
   global.fetch = window.fetch;
+  // Reading a dropped file goes through `FileReader`, which the bundle reaches
+  // as a bare identifier — so it has to exist on globalThis, not only on window.
+  global.FileReader = window.FileReader;
+  global.File = window.File;
+  global.Blob = window.Blob;
   global.HTMLElement = window.HTMLElement;
   global.Element = window.Element;
   global.Node = window.Node;
@@ -317,6 +383,13 @@ function makeDriver(window) {
     fire(el, 'input');
   };
 
+  /** A `<select>` needs its own prototype's setter, and a `change` event. */
+  const selectValue = (el, value) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(el, value);
+    fire(el, 'change');
+  };
+
   const fireWindow = (type, init = {}) => {
     window.dispatchEvent(new window.Event(type, { bubbles: true, ...init }));
   };
@@ -327,6 +400,7 @@ function makeDriver(window) {
     fire,
     fireWindow,
     setValue,
+    selectValue,
     /** Key event on window, for the app-level shortcut handlers. */
     winKey: (key, init = {}) =>
       window.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })),
@@ -359,7 +433,9 @@ console.log('■ 시작 화면 (Launcher)');
   check('최근 문서 목록 렌더링', folders.every((f) => html.includes(f)), html.slice(0, 300));
 }
 
-const byType = Object.fromEntries(folders.map((f) => [fixtures[f].type, f]));
+// The first fixture of each type is the one the general checks run against;
+// later ones (a 4:3 deck, say) are addressed by name.
+const byType = Object.fromEntries([...folders].reverse().map((f) => [fixtures[f].type, f]));
 
 console.log('\n■ Deck 에디터');
 {
@@ -680,7 +756,7 @@ console.log('\n■ Deck 슬라이드 쇼 · 정렬 · 복제');
   check('왼쪽 맞춤이 x를 0으로', got.leftMost === '0px', `left = ${got.leftMost}`);
   check('F5가 슬라이드 쇼를 시작', got.showing === true);
   check('슬라이드 쇼가 내용을 렌더링', got.showText.includes('스모크 deck'), got.showText.slice(0, 120));
-  check('방향키로 슬라이드 이동', got.counter === '2 / 2', `counter = ${got.counter}`);
+  check('방향키로 슬라이드 이동', got.counter === '2 / 3', `counter = ${got.counter}`);
   check('S가 발표자 노트를 표시', got.notesShown === true);
   check('Esc로 슬라이드 쇼 종료', got.closed === true);
 }
@@ -773,6 +849,321 @@ console.log('\n■ Doc 찾기 · 페이지 나누기');
   check('페이지 번호가 표시됨', (got.pageNums ?? []).some((t) => /1 \/ \d+/.test(t)), JSON.stringify(got.pageNums));
 }
 
+console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
+{
+  const got = {};
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    async interact({ settle, $, $$, click, fire, setValue }) {
+      const block = $$('.docblock')[0];
+      click(block);
+      await settle(6);
+      const ta = $('.docblock__editor');
+      got.opened = !!ta;
+      if (!ta) return;
+
+      /*
+       * Put the caret in the middle of the paragraph, then make the editor
+       * re-render (Ctrl+L sets the paragraph's alignment) and check the caret
+       * is still there. A focus effect that re-runs on every render drags it to
+       * the end, which makes typing anywhere but the last word impossible.
+       */
+      setValue(ta, '가나다라마');
+      await settle(6);
+      ta.setSelectionRange(2, 2);
+      fire(ta, 'keydown', { key: 'l', ctrlKey: true });
+      await settle(8);
+      got.caretAfterTyping = $('.docblock__editor')?.selectionStart;
+      got.textLength = ta.value.length;
+
+      // Tab indents rather than throwing focus out of the document.
+      setValue(ta, '- 항목');
+      await settle(5);
+      ta.setSelectionRange(6, 6);
+      fire(ta, 'keydown', { key: 'Tab' });
+      await settle(8);
+      got.afterTab = $('.docblock__editor')?.value;
+
+      // Ctrl+U underlines: markdown has no syntax for it, so it has to land in
+      // the paragraph's meta.json.
+      fire(ta, 'keydown', { key: 'u', ctrlKey: true });
+      await settle(8);
+      got.underlineBadge = !!$('.docblock__badge');
+      const jsonTab = $$('.inspector__tab').find((t) => t.textContent.includes('.meta.json'));
+      if (jsonTab) click(jsonTab);
+      await settle(5);
+      got.metaHasUnderline = ($('.panel--wide .code')?.textContent ?? '').includes('underline');
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('문단을 눌러 편집기가 열림', got.opened === true);
+  check(
+    '문단 중간에 입력해도 커서가 끝으로 튀지 않음',
+    got.caretAfterTyping === 2,
+    `caret = ${got.caretAfterTyping} (길이 ${got.textLength})`
+  );
+  check('Tab이 목록 수준을 내림', got.afterTab === '  - 항목', JSON.stringify(got.afterTab));
+  check('Ctrl+U가 문단 서식으로 기록됨', got.underlineBadge === true);
+  check('밑줄이 meta.json에 들어감', got.metaHasUnderline === true);
+}
+
+console.log('\n■ Grid 이동 (Excel의 손버릇)');
+{
+  const got = {};
+  const { errors } = await mount(`#/grid/${encodeURIComponent(byType.grid)}`, {
+    async interact({ settle, $, $$, winKey, cellText }) {
+      const label = () => $('.formulabar__ref')?.value;
+
+      // Ctrl+Down runs to the end of the data instead of moving one row.
+      winKey('ArrowDown', { ctrlKey: true });
+      await settle(5);
+      got.afterCtrlDown = label();
+
+      winKey('Home', { ctrlKey: true });
+      await settle(4);
+      got.afterCtrlHome = label();
+
+      // Ctrl+Shift+Down selects the column of values, not one extra cell.
+      winKey('ArrowDown', { ctrlKey: true, shiftKey: true });
+      await settle(5);
+      got.afterCtrlShiftDown = label();
+
+      // Ctrl+End goes to the last used cell of the sheet.
+      winKey('End', { ctrlKey: true });
+      await settle(4);
+      got.afterCtrlEnd = label();
+
+      // Ctrl+A takes the block the cursor is in.
+      winKey('Home', { ctrlKey: true });
+      await settle(3);
+      winKey('a', { ctrlKey: true });
+      await settle(4);
+      got.afterCtrlA = label();
+
+      // Ctrl+Space is the whole column, Shift+Space the whole row.
+      winKey('Home', { ctrlKey: true });
+      await settle(3);
+      winKey(' ', { ctrlKey: true });
+      await settle(4);
+      got.afterCtrlSpace = label();
+
+      // Ctrl+; stamps today's date into the cell.
+      winKey('Home', { ctrlKey: true });
+      await settle(3);
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      await settle(5);
+      got.dateCellRef = label();
+      winKey(';', { ctrlKey: true });
+      await settle(8);
+      got.stamped = $('.formulabar__input')?.value;
+
+      // Ctrl+Enter fills the selection with the active cell's value rather
+      // than opening the cell for editing.
+      winKey('Home', { ctrlKey: true });
+      await settle(3);
+      winKey('ArrowDown', { ctrlKey: true, shiftKey: true });
+      await settle(4);
+      winKey('Enter', { ctrlKey: true });
+      await settle(10);
+      got.filledSame = cellText(1, 0) === cellText(2, 0) && cellText(1, 0) !== '';
+      got.stillNotEditing = !$('.cell__editor');
+
+      // Ctrl+1 opens 셀 서식.
+      winKey('1', { ctrlKey: true });
+      await settle(5);
+      got.formatDialog = ($('.dialog__head')?.textContent ?? '').includes('셀 서식');
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('Ctrl+↓가 데이터 끝으로 건너뜀', /^A[2-9]|^A\d\d/.test(got.afterCtrlDown ?? ''), `ref = ${got.afterCtrlDown}`);
+  check('Ctrl+Home이 A1로', got.afterCtrlHome === 'A1', `ref = ${got.afterCtrlHome}`);
+  check('Ctrl+Shift+↓가 범위를 끝까지 확장', /^A1:A\d+$/.test(got.afterCtrlShiftDown ?? ''), `ref = ${got.afterCtrlShiftDown}`);
+  check('Ctrl+End가 마지막 데이터 셀로', /^[B-Z]\d+$/.test(got.afterCtrlEnd ?? ''), `ref = ${got.afterCtrlEnd}`);
+  check('Ctrl+A가 데이터 블록을 선택', /^A1:[A-Z]+\d+$/.test(got.afterCtrlA ?? ''), `ref = ${got.afterCtrlA}`);
+  check('Ctrl+Space가 열 전체를 선택', /^A1:A\d{2,}$/.test(got.afterCtrlSpace ?? ''), `ref = ${got.afterCtrlSpace}`);
+  check('Ctrl+;가 오늘 날짜를 넣음', /^\d{4}-\d{2}-\d{2}$/.test(got.stamped ?? ''), `${got.dateCellRef} = ${got.stamped}`);
+  check('Ctrl+Enter가 선택 영역을 같은 값으로 채움', got.filledSame === true);
+  check('Ctrl+Enter가 셀 편집으로 새지 않음', got.stillNotEditing === true);
+  check('Ctrl+1이 셀 서식을 열음', got.formatDialog === true);
+}
+
+console.log('\n■ 슬라이드 쇼 (보이는 것이 만든 것과 같은지)');
+{
+  const got = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    async interact({ settle, $, $$, click, winKey }) {
+      // Go to the slide that has a real shape and a real table on it.
+      const thumbs = $$('.sorter-item');
+      got.slides = thumbs.length;
+      if (thumbs[2]) click(thumbs[2]);
+      await settle(6);
+      got.shapesOnCanvas = $$('.canvas svg.shape').length;
+
+      // Shift+F5 presents the slide being looked at, so the shape and table on
+      // slide 3 are the ones on screen.
+      winKey('F5', { shiftKey: true });
+      await settle(8);
+      got.showing = !!$('.slideshow');
+      got.fromCurrent = $('.slideshow__count')?.textContent?.trim();
+      // The shape must be drawn as its preset geometry here too.
+      got.shapesInShow = $$('.slideshow svg.shape').length;
+      got.tablesInShow = $$('.slideshow table').length;
+
+      // B blanks the screen; pressing it again brings the slide back.
+      winKey('b');
+      await settle(4);
+      got.blanked = !!$('.slideshow__blank');
+      winKey('b');
+      await settle(4);
+      got.unblanked = !$('.slideshow__blank');
+
+      winKey('Escape');
+      await settle(5);
+      got.closed = !$('.slideshow');
+
+      // A bare F5 starts at the top, as its own ribbon label promises.
+      winKey('F5');
+      await settle(8);
+      got.showCounter = $('.slideshow__count')?.textContent?.trim();
+      winKey('Escape');
+      await settle(4);
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('캔버스에 도형이 프리셋 도형으로 그려짐', (got.shapesOnCanvas ?? 0) > 0, `${got.shapesOnCanvas}`);
+  check('Shift+F5가 슬라이드 쇼를 시작', got.showing === true);
+  check('Shift+F5는 현재 슬라이드부터', /^3 \//.test(got.fromCurrent ?? ''), `counter = ${got.fromCurrent}`);
+  check('F5는 처음 슬라이드부터', /^1 \//.test(got.showCounter ?? ''), `counter = ${got.showCounter}`);
+  check(
+    '쇼에서도 도형이 사각형이 아니라 그 도형으로 보임',
+    (got.shapesInShow ?? 0) === (got.shapesOnCanvas ?? -1),
+    `캔버스 ${got.shapesOnCanvas}개 / 쇼 ${got.shapesInShow}개`
+  );
+  check('쇼에서 표가 표로 그려짐', (got.tablesInShow ?? 0) > 0, `${got.tablesInShow}`);
+  check('B가 화면을 지움', got.blanked === true);
+  check('B를 다시 누르면 돌아옴', got.unblanked === true);
+  check('Esc로 쇼가 끝남', got.closed === true);
+}
+
+console.log('\n■ 표 안의 키가 슬라이드를 건드리지 않는지 (Deck)');
+{
+  const got = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    async interact({ settle, $, $$, click, fire, winKey }) {
+      const thumbs = $$('.sorter-item');
+      if (thumbs[2]) click(thumbs[2]);
+      await settle(6);
+      got.blocksBefore = $$('.canvas .block').length;
+
+      // Put the cursor in a table cell — the cell listens on pointerdown —
+      // then press the keys the canvas also listens for on window.
+      const cells = $$('.canvas .tableblock td, .canvas .tableblock th');
+      const cell = cells[1] ?? cells[0];
+      if (cell) fire(cell, 'pointerdown', { button: 0 });
+      await settle(8);
+      got.cursorInCell = !!$('.canvas .tableblock .is-active, .canvas .tableblock td.is-active, .canvas .tableblock th.is-active');
+      got.textBefore = cell?.textContent ?? '';
+
+      // The arrow first, while the table is certainly still there: if the
+      // canvas also handles it the table slides sideways under the cursor.
+      const box = () => {
+        const el = $$('.canvas .block').find((b) => b.querySelector('.tableblock'));
+        return el ? `${el.style.left},${el.style.top}` : null;
+      };
+      const before = box();
+      got.foundTableBlock = before !== null;
+      winKey('ArrowRight');
+      await settle(8);
+      got.moved = box() !== before;
+
+      winKey('Delete');
+      await settle(10);
+      got.blocksAfterDelete = $$('.canvas .block').length;
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('셀에 커서가 들어감', got.cursorInCell === true);
+  check('표 블록을 찾음', got.foundTableBlock === true);
+  check(
+    '셀에 커서가 있을 때 Delete가 표를 지우지 않음',
+    got.blocksAfterDelete === got.blocksBefore,
+    `${got.blocksBefore} → ${got.blocksAfterDelete}`
+  );
+  check('셀에 커서가 있을 때 화살표가 표를 끌고 가지 않음', got.moved === false);
+}
+
+console.log('\n■ 서식 복사 (Office에서 가장 많이 누르는 버튼)');
+{
+  const got = {};
+  const { errors } = await mount(`#/grid/${encodeURIComponent(byType.grid)}`, {
+    async interact({ settle, $, $$, click, winKey }) {
+      // Make A1 bold, pick its format up, and paint it onto A3.
+      winKey('Home', { ctrlKey: true });
+      await settle(4);
+      winKey('b', { ctrlKey: true });
+      await settle(6);
+
+      const brush = () => $$('.rbtn').find((b) => /서식 복사|여기에 붙이기/.test(b.textContent));
+      got.hasBrush = !!brush();
+      click(brush());
+      await settle(5);
+      got.armed = /여기에 붙이기/.test(brush()?.textContent ?? '');
+
+      winKey('ArrowDown');
+      winKey('ArrowDown');
+      await settle(5);
+      click(brush());
+      await settle(8);
+      got.disarmed = /서식 복사/.test(brush()?.textContent ?? '');
+      const json = $$('.inspector__tab').find((t) => t.textContent.includes('.cells.json'));
+      if (json) click(json);
+      await settle(5);
+      got.cells = $('.panel--wide .code')?.textContent ?? '';
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('클립보드 그룹에 서식 복사가 있음', got.hasBrush === true);
+  check('누르면 붙일 준비 상태가 됨', got.armed === true);
+  check('붙이면 다시 풀림', got.disarmed === true);
+  check('서식이 옮겨져 JSON에 기록됨', (got.cells.match(/"bold": true/g) ?? []).length >= 2, sample(got.cells));
+}
+
+console.log('\n■ 단축키 도움말 (F1)');
+{
+  for (const [type, expect] of [['deck', 'Ctrl+M'], ['doc', 'Ctrl+U'], ['grid', 'Alt+Enter']]) {
+    const got = {};
+    const { errors } = await mount(`#/${type}/${encodeURIComponent(byType[type])}`, {
+      async interact({ settle, $, winKey }) {
+        winKey('F1');
+        await settle(6);
+        got.open = !!$('.shortcuts');
+        got.text = $('.shortcuts')?.textContent ?? '';
+        winKey('Escape');
+        await settle(4);
+        got.closed = !$('.shortcuts');
+      },
+    });
+    check(`${type}: F1이 단축키 목록을 열음`, got.open === true, errors.join('\n      '));
+    check(`${type}: 이 앱의 단축키가 실려 있음 (${expect})`, got.text.includes(expect), sample(got.text));
+    check(`${type}: Esc로 닫힘`, got.closed === true);
+  }
+}
+
 console.log('\n■ 파일 탭 (세 앱 공통)');
 {
   for (const type of ['deck', 'doc', 'grid']) {
@@ -798,6 +1189,767 @@ console.log('\n■ 파일 탭 (세 앱 공통)');
   }
 }
 
+
+console.log('\n■ 도형 · 표 렌더링');
+{
+  const { html, text, errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ window, settle }) => {
+      // The third slide is the one with a shape and a table.
+      const thumbs = [...window.document.querySelectorAll('.sorter-item')];
+      if (thumbs[2]) {
+        thumbs[2].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await settle(6);
+      }
+    },
+  });
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('도형이 SVG 경로로 그려짐', /class="shape"/.test(html) && /<path/.test(html), html.slice(0, 200));
+  check('도형 안의 텍스트가 보임', text.includes('승인?'));
+  check('표가 실제 table 요소로 그려짐', /class="tableblock/.test(html));
+  check('표에 머리글 셀이 있음', /<th/.test(html));
+}
+
+console.log('\n■ 삽입 리본 (도형 갤러리 · 표 격자)');
+{
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ window, settle, $, $$, click, fire }) => {
+      const insertTab = $$('.ribbon__tab, .tabs button').find((t) => t.textContent.trim() === '삽입');
+      if (insertTab) {
+        click(insertTab);
+        await settle(4);
+      }
+      const shapeBtn = $$('button').find((b) => b.textContent.includes('도형'));
+      check('삽입 탭에 도형 버튼이 있음', !!shapeBtn);
+      if (shapeBtn) {
+        click(shapeBtn);
+        await settle(4);
+        const gallery = $('.gallery');
+        check('도형 갤러리가 열림', !!gallery);
+        check(
+          '갤러리가 Office 서랍 이름을 씀',
+          !!gallery && gallery.textContent.includes('순서도') && gallery.textContent.includes('블록 화살표'),
+          gallery?.textContent.slice(0, 120)
+        );
+        const items = $$('.gallery__item');
+        check('갤러리에 도형이 100개 이상', items.length > 100, `${items.length}개`);
+        if (items[0]) {
+          const before = $$('.shape').length;
+          click(items[0]);
+          await settle(4);
+          // Office arms the cursor rather than inserting: the shape appears when
+          // you drag (or click) on the slide.
+          check('도형을 고르면 갤러리가 닫힘', !$('.gallery'));
+          const canvas = $('.canvas');
+          check('캔버스가 십자 커서로 바뀜', canvas?.style.cursor === 'crosshair', canvas?.style.cursor);
+          if (canvas) {
+            fire(canvas, 'pointerdown', { button: 0, pointerId: 1, clientX: 300, clientY: 220 });
+            await settle(2);
+            fire(canvas, 'pointermove', { pointerId: 1, clientX: 480, clientY: 340 });
+            await settle(2);
+            fire(canvas, 'pointerup', { pointerId: 1, clientX: 480, clientY: 340 });
+            await settle(6);
+            check('캔버스에 끌어 그리면 삽입됨', $$('.shape').length > before);
+            check('삽입 후 도형 서식 탭이 열림', !!$$('.ribbon__tab').find(
+              (t) => t.textContent.trim() === '도형 서식' && t.getAttribute('aria-selected') === 'true'
+            ));
+            check('회전 핸들이 나타남', !!$('.handle--rotate'));
+          }
+        }
+      }
+
+      const tableBtn = $$('button').find((b) => b.textContent.trim() === '표');
+      if (tableBtn) {
+        click(tableBtn);
+        await settle(4);
+        const picker = $('.tablepicker');
+        check('표 격자 선택기가 열림', !!picker);
+        const cells = $$('.tablepicker__cell');
+        check('격자가 10×8', cells.length === 80, `${cells.length}개`);
+        if (cells[12]) {
+          click(cells[12]);
+          await settle(4);
+          check('격자를 클릭하면 표가 삽입됨', $$('.tableblock').length > 0);
+        }
+      }
+    },
+  });
+  check('삽입 상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 상황별 탭 (표 도구 · 도형 도구)');
+{
+  const captured = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ settle, $, $$, click, fire }) => {
+      // Slide 3 of the fixture holds a shape and a table.
+      const thumbs = $$('.sorter-item');
+      if (thumbs[2]) {
+        click(thumbs[2]);
+        await settle(6);
+      }
+
+      const shape = $('.block.is-selected') ?? $$('.block')[0];
+      if (shape) {
+        fire(shape, 'pointerdown', { button: 0, pointerId: 2 });
+        await settle(2);
+        fire(shape, 'pointerup', { pointerId: 2 });
+        await settle(4);
+        captured.shapeTabs = $$('.ribbon__tab--context').map((t) => t.textContent.trim());
+        captured.contextLabel = $('.ribbon__contextlabel')?.textContent;
+        const format = $$('.ribbon__tab').find((t) => t.textContent.trim() === '도형 서식');
+        if (format) {
+          click(format);
+          await settle(4);
+          const body = $('.ribbon__body')?.textContent ?? '';
+          captured.shapeGroups = ['도형 채우기', '도형 윤곽선', '회전'].filter((g) => body.includes(g));
+          // The fill control is Office's split button: a swatch that opens a
+          // palette of theme colours, standard colours, "no fill" and a picker.
+          const fill = $$('.colorbtn').find((b) => b.getAttribute('aria-label') === '채우기 색');
+          if (fill) {
+            click(fill);
+            await settle(4);
+            captured.paletteSwatches = $$('.palette .swatch').length;
+            captured.paletteLabels = $$('.palette__label').map((l) => l.textContent.trim());
+            captured.hasCustom = !!$('.palette input[type="color"]');
+            const shapePath = () => $$('svg path').map((el) => el.getAttribute('fill')).find((f) => f);
+            const before = shapePath();
+            const noFill = $$('.palette__item').find((b) => b.textContent.includes('채우기 없음'));
+            if (noFill) {
+              click(noFill);
+              await settle(6);
+              const after = shapePath();
+              captured.noFillWorked = before !== after && after === 'none';
+              captured.fillBefore = before;
+              captured.fillAfter = after;
+            }
+          }
+        }
+      }
+
+      // Now the table: click a cell, then use the Layout tab.
+      const cell = $$('.tableblock td, .tableblock th')[0];
+      if (cell) {
+        fire(cell, 'pointerdown', { button: 0, pointerId: 3 });
+        await settle(4);
+        captured.cellActive = !!$('.tableblock .is-active');
+        captured.tableTabs = $$('.ribbon__tab--context').map((t) => t.textContent.trim());
+
+        const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '레이아웃');
+        if (layout) {
+          click(layout);
+          await settle(4);
+          const rowsBefore = $$('.tableblock tr').length;
+          const insertBelow = $$('button').find((b) => b.textContent.includes('아래에 삽입'));
+          if (insertBelow) {
+            click(insertBelow);
+            await settle(6);
+            captured.rowAdded = $$('.tableblock tr').length === rowsBefore + 1;
+          }
+          const mergeRight = $$('button').find((b) => b.textContent.includes('오른쪽과 병합'));
+          if (mergeRight) {
+            click(mergeRight);
+            await settle(6);
+            captured.merged = !!$$('.tableblock td[colspan], .tableblock th[colspan]').length;
+          }
+        }
+      }
+    },
+  });
+
+  check('상황별 탭 상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('도형을 고르면 도형 서식 탭이 붙음', captured.shapeTabs?.includes('도형 서식'),
+    JSON.stringify(captured.shapeTabs));
+  check('상황별 탭에 대상 이름이 붙음', captured.contextLabel === '도형 도구', captured.contextLabel);
+  check('도형 서식 탭에 Office 그룹이 있음', captured.shapeGroups?.length === 3,
+    JSON.stringify(captured.shapeGroups));
+  check('채우기 색이 Office식 팔레트로 열림',
+    captured.paletteSwatches === 70 && JSON.stringify(captured.paletteLabels) === JSON.stringify(['테마 색', '표준 색']),
+    `${captured.paletteSwatches} swatches · ${JSON.stringify(captured.paletteLabels)}`);
+  check('팔레트에 다른 색 선택이 있음', captured.hasCustom === true);
+  check('채우기 없음이 도형에 반영됨', captured.noFillWorked === true,
+    `${captured.fillBefore} → ${captured.fillAfter}`);
+  check('셀을 누르면 선택 표시됨', captured.cellActive === true);
+  check('표를 고르면 표 도구 탭이 붙음',
+    captured.tableTabs?.includes('표 디자인') && captured.tableTabs?.includes('레이아웃'),
+    JSON.stringify(captured.tableTabs));
+  check('레이아웃 탭에서 행을 삽입', captured.rowAdded === true);
+  check('레이아웃 탭에서 셀을 병합', captured.merged === true);
+}
+
+console.log('\n■ 표 셀 편집 (Office 방식)');
+{
+  const captured = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ settle, $, $$, click, fire, setValue, fireWindow }) => {
+      const thumbs = $$('.sorter-item');
+      if (thumbs[2]) {
+        click(thumbs[2]);
+        await settle(6);
+      }
+      const cells = $$('.tableblock td, .tableblock th');
+      if (!cells.length) return;
+
+      // Double-click opens the in-cell editor, as in Office.
+      fire(cells[0], 'pointerdown', { button: 0, pointerId: 4 });
+      await settle(3);
+      fire(cells[0], 'dblclick', {});
+      await settle(6);
+      const editor = $('.tableblock__editor');
+      captured.opened = !!editor;
+      if (editor) {
+        setValue(editor, '입력한 값');
+        // Tab commits and moves to the next cell.
+        fire(editor, 'keydown', { key: 'Tab' });
+        await settle(8);
+        captured.committed = ($('.tableblock')?.textContent ?? '').includes('입력한 값');
+        captured.movedOn = !!$('.tableblock__editor');
+      }
+      // Escape leaves editing without losing the committed text.
+      fireWindow('keydown', { key: 'Escape' });
+      await settle(4);
+    },
+  });
+
+  check('셀 편집 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('두 번 누르면 셀 편집기가 열림', captured.opened === true);
+  check('입력한 값이 표에 반영됨', captured.committed === true);
+  check('Tab이 다음 셀로 이동', captured.movedOn === true);
+}
+
+console.log('\n■ 리본 구성 (Office 이름과 순서)');
+{
+  const expected = {
+    deck: {
+      tabs: ['파일', '홈', '삽입', '디자인', '슬라이드 쇼', 'AI'],
+      홈: ['되돌리기', '클립보드', '슬라이드', '글꼴', '색', '단락', '그리기'],
+      삽입: ['표', '이미지', '일러스트레이션', '텍스트'],
+    },
+    doc: {
+      tabs: ['파일', '홈', '삽입', '레이아웃', '보기', 'AI'],
+      // Word's own order in this tab: margins, orientation, size.
+      레이아웃: ['여백 (px)', '용지 방향', '용지 크기', '단', '크기 (px)', '섹션 이름'],
+    },
+    grid: {
+      tabs: ['파일', '홈', '삽입', '수식', '데이터', 'AI'],
+    },
+  };
+
+  for (const [type, want] of Object.entries(expected)) {
+    const { errors } = await mount(`#/${type}/${encodeURIComponent(byType[type])}`, {
+      interact: async ({ settle, $, $$, click }) => {
+        const tabs = $$('.ribbon__tab:not(.ribbon__tab--context)').map((t) => t.textContent.trim());
+        check(`${type}: 탭 이름과 순서`, JSON.stringify(tabs) === JSON.stringify(want.tabs),
+          JSON.stringify(tabs));
+
+        for (const [tabName, groups] of Object.entries(want)) {
+          if (tabName === 'tabs') continue;
+          const button = $$('.ribbon__tab').find((t) => t.textContent.trim() === tabName);
+          if (!button) continue;
+          click(button);
+          await settle(4);
+          const found = $$('.ribbon__body .rgroup__label').map((l) => l.textContent.trim());
+          check(`${type} ${tabName}: 그룹 순서`,
+            JSON.stringify(found) === JSON.stringify(groups),
+            JSON.stringify(found));
+        }
+      },
+    });
+    check(`${type}: 리본 렌더링에 오류 없음`, errors.length === 0, errors.join('\n      '));
+  }
+}
+
+console.log('\n■ Doc 표 도구');
+{
+  const captured = {};
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    interact: async ({ settle, $, $$, click, fire }) => {
+      captured.rendered = $$('.tableblock').length > 0;
+      const cell = $$('.tableblock td, .tableblock th')[0];
+      if (!cell) return;
+      fire(cell, 'pointerdown', { button: 0, pointerId: 7 });
+      await settle(4);
+      captured.tabs = $$('.ribbon__tab--context').map((t) => t.textContent.trim());
+      captured.label = $('.ribbon__contextlabel')?.textContent;
+      // A table must not open the plain markdown textarea.
+      captured.noTextarea = !$('.docblock__editor');
+
+      const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '표 레이아웃');
+      if (layout) {
+        click(layout);
+        await settle(4);
+        const before = $$('.tableblock tr').length;
+        const insertRight = $$('button').find((b) => b.textContent.includes('오른쪽에 삽입'));
+        const cols = $$('.tableblock tr')[0]?.children.length;
+        if (insertRight) {
+          click(insertRight);
+          await settle(6);
+          captured.colAdded = $$('.tableblock tr')[0]?.children.length === cols + 1;
+          captured.rowsUnchanged = $$('.tableblock tr').length === before;
+        }
+      }
+    },
+  });
+
+  check('Doc 표 상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('Doc의 표가 table 요소로 그려짐', captured.rendered === true);
+  check('표를 고르면 표 도구 탭이 붙음',
+    captured.tabs?.includes('표 디자인') && captured.tabs?.includes('표 레이아웃'),
+    JSON.stringify(captured.tabs));
+  check('상황별 탭에 대상 이름이 붙음', captured.label === '표 도구', captured.label);
+  check('표는 마크다운 편집기를 열지 않음', captured.noTextarea === true);
+  check('열을 삽입해도 행 수는 그대로', captured.colAdded === true && captured.rowsUnchanged === true,
+    `colAdded=${captured.colAdded} rowsUnchanged=${captured.rowsUnchanged}`);
+}
+
+console.log('\n■ 용지 크기와 방향 (Doc)');
+{
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    interact: async ({ settle, $, $$, click, setValue, selectValue }) => {
+      const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '레이아웃');
+      click(layout);
+      await settle(4);
+
+      const page = () => $('.page');
+      const size = () => ({ w: Math.round(page().getBoundingClientRect().width || parseFloat(page().style.width)),
+                            h: Math.round(parseFloat(page().style.minHeight)) });
+      const before = size();
+      check('A4 세로로 시작', before.w === 794 && before.h === 1123, JSON.stringify(before));
+
+      // Office keeps the size list and the orientation as separate controls, so
+      // turning the page must not reset the paper.
+      const landscape = $$('button').find((b) => b.textContent.includes('가로'));
+      click(landscape);
+      await settle(6);
+      const turned = size();
+      check('가로로 바꾸면 비율이 뒤바뀜', turned.w === 1123 && turned.h === 794, JSON.stringify(turned));
+
+      const select = $$('select').find((el) => el.getAttribute('title') === '용지 크기');
+      check('용지 크기 목록에 A4가 있음', !!select && [...select.options].some((o) => o.value === 'A4'));
+      check('용지 크기는 여전히 A4', select.value === 'A4', select?.value);
+
+      // A4 chosen while landscape stays landscape, as in Word.
+      selectValue(select, 'Letter');
+      await settle(6);
+      const letter = size();
+      check('가로 상태에서 Letter를 고르면 가로 Letter', letter.w === 1056 && letter.h === 816,
+        JSON.stringify(letter));
+
+      const width = $$('input[type="number"]').find((el) => el.getAttribute('title') === '너비');
+      check('너비를 직접 입력할 수 있음', !!width);
+      setValue(width, '700');
+      await settle(6);
+      const custom = size();
+      check('임의 크기가 그대로 적용됨', custom.w === 700, JSON.stringify(custom));
+      const options = [...select.options].map((o) => o.value);
+      check('이름 없는 크기는 사용자 지정으로 표시', select.value === '사용자 지정' && options.includes('사용자 지정'),
+        `${select.value} / ${options.join(',')}`);
+    },
+  });
+  check('용지 설정에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 슬라이드 크기 (Deck)');
+{
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ settle, $, $$, click, selectValue }) => {
+      const design = $$('.ribbon__tab').find((t) => t.textContent.trim() === '디자인');
+      click(design);
+      await settle(4);
+      const select = $$('select').find((el) => el.getAttribute('title') === '슬라이드 크기');
+      check('슬라이드 크기 목록이 있음', !!select);
+      const labels = [...select.options].map((o) => o.textContent.trim());
+      check('PowerPoint의 두 크기를 제공', labels.includes('와이드스크린 (16:9)') && labels.includes('표준 (4:3)'),
+        labels.join(', '));
+      check('현재 크기가 선택되어 있음', select.value === '1280x720', select.value);
+
+      selectValue(select, '960x720');
+      await settle(6);
+      const canvas = $('.canvas');
+      check('4:3으로 바꾸면 캔버스가 좁아짐', Math.round(parseFloat(canvas.style.width)) === 960,
+        canvas.style.width);
+    },
+  });
+  check('슬라이드 크기 변경에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 두 단 문서 (Doc)');
+{
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    interact: async ({ settle, $, $$, click, selectValue }) => {
+      const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '레이아웃');
+      click(layout);
+      await settle(4);
+      const select = $$('select').find((el) => el.getAttribute('title') === '단');
+      check('단 설정이 있음', !!select);
+      selectValue(select, '2');
+      await settle(8);
+      const inner = $('.page__inner');
+      check('페이지가 두 단으로 흐름', inner?.style.columnCount === '2', inner?.style.columnCount);
+      check('단 사이 간격이 Word와 같음', parseFloat(inner?.style.columnGap) === 48, inner?.style.columnGap);
+    },
+  });
+  check('단 설정에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 수식 리본 (함수 목록)');
+{
+  const { errors } = await mount(`#/grid/${encodeURIComponent(byType.grid)}`, {
+    interact: async ({ settle, $$, click, selectValue }) => {
+      const formulas = $$('.ribbon__tab').find((t) => t.textContent.trim() === '수식');
+      click(formulas);
+      await settle(4);
+
+      const groups = $$('.ribbon__body .rgroup__label').map((l) => l.textContent.trim());
+      check('Excel의 함수 범주를 그 순서로', 
+        JSON.stringify(groups) ===
+          JSON.stringify(['재무', '논리', '텍스트', '날짜 및 시간', '찾기/참조', '수학/삼각', '통계', '검사']),
+        groups.join(', '));
+
+      // Every name the menus offer has to exist in the engine.
+      const offered = $$('.ribbon__body select')
+        .flatMap((el) => [...el.options].map((o) => o.value))
+        .filter((v) => v);
+      const missing = offered.filter((name) => !core.FUNCTION_NAMES.includes(name));
+      check(`목록의 함수 ${offered.length}개가 모두 구현됨`, missing.length === 0, missing.join(', '));
+      check('엔진에 함수가 200개 이상', core.FUNCTION_NAMES.length >= 200, String(core.FUNCTION_NAMES.length));
+
+      // And picking one starts the formula.
+      const financial = $$('.ribbon__body select')[0];
+      selectValue(financial, 'PMT');
+      await settle(6);
+      check(
+        '고르면 수식 입력이 시작됨',
+        !!$$('input, textarea').find((el) => String(el.value).startsWith('=PMT(')),
+        $$('.formulabar input').map((el) => el.value).join('|')
+      );
+    },
+  });
+  check('수식 리본에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 리본을 넘어가는 메뉴 (잘림 방지)');
+{
+  // The ribbon scrolls sideways, so it clips its own children. A palette or a
+  // shape gallery placed inside it was cut off at the ribbon's edge; they hang
+  // off the control from `document.body` instead.
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ settle, $, $$, click, fire, winKey }) => {
+      const insert = $$('.ribbon__tab').find((t) => t.textContent.trim() === '삽입');
+      click(insert);
+      await settle(4);
+
+      const inRibbon = (el) => !!el?.closest('.ribbon');
+      const parentIsBody = (el) => el?.parentElement === document.body;
+
+      // The shape gallery.
+      click($$('button').find((b) => b.textContent.includes('도형')));
+      await settle(6);
+      const gallery = $('.gallery');
+      check('도형 갤러리가 열림', !!gallery);
+      check('갤러리가 리본 밖에 그려짐', !inRibbon(gallery), gallery?.parentElement?.className);
+      check('갤러리가 body 직속의 팝오버 안에', parentIsBody(gallery?.closest('.popover')));
+      check('팝오버는 fixed로 놓임', $('.popover')?.style.position !== 'absolute');
+      winKey('Escape');
+      await settle(4);
+      check('Esc로 갤러리가 닫힘', !$('.gallery'));
+
+      // The table grid.
+      // The icon is part of the label text, so the match is on the ending.
+      const tableButton = $$('.rbtn').find((b) => b.textContent.trim().endsWith('표'));
+      check('표 단추가 있음', !!tableButton);
+      click(tableButton);
+      await settle(6);
+      check('표 격자도 리본 밖에', !inRibbon($('.tablepicker')) && !!$('.tablepicker'));
+
+      // A click somewhere else closes it, as a menu does.
+      const away = $('.canvas') ?? $('.stage') ?? document.body;
+      away.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true }));
+      await settle(4);
+      check('바깥을 누르면 닫힘', !$('.tablepicker'));
+
+      // The colour palette, from the 홈 tab.
+      click($$('.ribbon__tab').find((t) => t.textContent.trim() === '홈'));
+      await settle(4);
+      const textColor = () => $$('.colorbtn').find((b) => b.getAttribute('aria-label') === '글자 색');
+      // Nothing selected: the control is dead, the way Office greys it out.
+      check('선택이 없으면 색 단추가 잠김', textColor()?.disabled === true);
+      // The canvas selects on pointerdown, as it does when dragging.
+      const block = $('.canvas .block');
+      fire(block, 'pointerdown', { button: 0, pointerId: 1 });
+      fire(block, 'pointerup', { button: 0, pointerId: 1 });
+      await settle(8);
+      // Re-queried: selecting a block re-renders the ribbon.
+      check('선택하면 색 단추가 열림', textColor()?.disabled === false);
+      click(textColor());
+      await settle(6);
+      const palette = $('.palette');
+      check('색 팔레트가 리본 밖에', !!palette && !inRibbon(palette), palette?.parentElement?.className);
+      check('팔레트도 body 직속의 팝오버 안에', parentIsBody(palette?.closest('.popover')));
+      // Still pickable — being outside the ribbon must not break the click.
+      // Where a menu opens is the whole point: it hangs off the control's own
+      // box. jsdom measures nothing, so the control is given a box and the
+      // panel's placement is read back from it.
+      const anchored = await (async () => {
+        const control = textColor();
+        control.getBoundingClientRect = () => ({
+          top: 300, bottom: 326, left: 640, right: 666, width: 26, height: 26, x: 640, y: 300,
+        });
+        window.dispatchEvent(new window.Event('resize'));
+        await settle(6);
+        const panel = $('.popover');
+        return { top: panel?.style.top, left: panel?.style.left };
+      })();
+      check('메뉴가 단추 아래에서 열림', anchored.top === '330px', `top = ${anchored.top}`);
+      check('메뉴가 단추 왼쪽에 맞춰짐', anchored.left === '640px', `left = ${anchored.left}`);
+
+      // Near the bottom of the window there is no room below, so it flips above;
+      // near the right edge it is pulled back so it stays on screen.
+      const flipped = await (async () => {
+        const control = textColor();
+        const height = window.innerHeight || 768;
+        const width = window.innerWidth || 1024;
+        control.getBoundingClientRect = () => ({
+          top: height - 30, bottom: height - 4, left: width - 20, right: width + 6,
+          width: 26, height: 26, x: width - 20, y: height - 30,
+        });
+        window.dispatchEvent(new window.Event('resize'));
+        await settle(6);
+        const panel = $('.popover');
+        return { top: parseFloat(panel?.style.top), left: parseFloat(panel?.style.left) };
+      })();
+      check('아래 자리가 없으면 위로 뒤집음', flipped.top < (window.innerHeight || 768) - 30,
+        `top = ${flipped.top}`);
+      check('오른쪽으로 넘치지 않게 당겨짐', flipped.left <= (window.innerWidth || 1024) - 8,
+        `left = ${flipped.left}`);
+
+      const target = $$('.palette .swatch')[14];
+      const styleOf = () => $('.block.is-selected .block__content')?.getAttribute('style') ?? '';
+      const before = styleOf();
+      click(target);
+      await settle(8);
+      check('팝오버 안에서 색을 고를 수 있음', !$('.palette'), '고르면 닫힘');
+      check('고른 색이 선택한 블록에 반영됨', styleOf() !== before && /color/.test(styleOf()),
+        `${before} → ${styleOf()}`);
+    },
+  });
+  check('메뉴 팝오버에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 16:9가 아닌 덱 (4:3)');
+{
+  const folder = '스모크-표준.aideck';
+  const { errors } = await mount(`#/deck/${encodeURIComponent(folder)}`, {
+    interact: async ({ settle, $, $$, click, selectValue, setValue }) => {
+      const canvas = $('.canvas');
+      check('캔버스가 파일의 크기로 열림',
+        Math.round(parseFloat(canvas.style.width)) === 960 && Math.round(parseFloat(canvas.style.height)) === 720,
+        `${canvas?.style.width} x ${canvas?.style.height}`);
+
+      // A 4:3 deck stretched into a 16:9 thumbnail is the first thing that looks
+      // wrong about it.
+      const thumb = $('.sorter-item__thumb');
+      check('썸네일도 파일의 비율', thumb?.style.aspectRatio === '960 / 720', thumb?.style.aspectRatio);
+
+      // The corner shape is at the corner of *this* canvas.
+      const shape = $$('.block').find((b) => b.textContent.includes('우측 하단'));
+      const left = parseFloat(shape?.style.left);
+      check('도형이 이 캔버스의 우측 하단에', left > 600 && left < 960, shape?.style.left);
+
+      const design = $$('.ribbon__tab').find((t) => t.textContent.trim() === '디자인');
+      click(design);
+      await settle(4);
+      const select = $$('select').find((el) => el.getAttribute('title') === '슬라이드 크기');
+      check('크기 목록이 이 파일의 크기를 가리킴', select?.value === '960x720', select?.value);
+      const labels = [...select.options].map((o) => o.textContent);
+      check('PowerPoint의 크기들을 제공',
+        labels.some((l) => l.includes('표준 (4:3)')) && labels.some((l) => l.includes('A4')),
+        labels.join(' · '));
+      check('비율을 함께 보여줌', $('.ribbon__body').textContent.includes('4:3'),
+        sample($('.ribbon__body').textContent));
+
+      // Any size at all, typed in — and the blocks stay on the canvas.
+      const width = $$('input[type="number"]').find((el) => el.getAttribute('title') === '너비 (px)');
+      check('너비를 직접 입력할 수 있음', !!width);
+      setValue(width, '700');
+      await settle(8);
+      const resized = $('.canvas');
+      check('입력한 크기로 캔버스가 바뀜', Math.round(parseFloat(resized.style.width)) === 700,
+        resized?.style.width);
+      const moved = $$('.block').find((b) => b.textContent.includes('우측 하단'));
+      const box = { x: parseFloat(moved.style.left), w: parseFloat(moved.style.width) };
+      check('좁아진 캔버스 안으로 도형이 들어옴', box.x + box.w <= 700, JSON.stringify(box));
+      const sizeSelect = $$('select').find((el) => el.getAttribute('title') === '슬라이드 크기');
+      check('이름 없는 크기는 사용자 지정으로',
+        [...sizeSelect.options].some((o) => o.textContent.includes('사용자 지정')),
+        [...sizeSelect.options].map((o) => o.textContent).join(' · '));
+    },
+  });
+  check('4:3 덱에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 이미지 삽입 (Doc)');
+{
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    interact: async ({ settle, $, $$, click, setValue }) => {
+      const insert = $$('.ribbon__tab').find((t) => t.textContent.trim() === '삽입');
+      click(insert);
+      await settle(4);
+      const button = $$('button').find((b) => b.textContent.includes('이미지'));
+      check('이미지 버튼이 있음', !!button);
+      click(button);
+      await settle(6);
+
+      const dialog = $('.dialog');
+      check('이미지 대화상자가 열림', !!dialog);
+      const url = $$('.dialog input').find((el) => el.type !== 'file');
+      check('주소를 넣을 칸이 있음', !!url);
+      // A data URL keeps the check offline; the point is that a block appears
+      // and renders as an image.
+      setValue(url, 'data:image/gif;base64,R0lGODlhAQABAAAAACw=');
+      const alt = $$('.dialog input').filter((el) => el.type !== 'file')[1];
+      if (alt) setValue(alt, '도표');
+      const confirm = $$('.dialog__foot button').find((b) => b.textContent.trim() === '삽입');
+      check('삽입 버튼이 있음', !!confirm);
+      click(confirm);
+      await settle(10);
+
+      const img = $('.page img');
+      check('페이지에 이미지가 그려짐', !!img, 'page img');
+      check('대체 텍스트가 붙음', img?.getAttribute('alt')?.length > 0, img?.getAttribute('alt'));
+    },
+  });
+  check('이미지 삽입에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 머리글 · 바닥글 · 페이지 번호 (Doc)');
+{
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    interact: async ({ settle, $, $$, click, setValue }) => {
+      const insert = $$('.ribbon__tab').find((t) => t.textContent.trim() === '삽입');
+      click(insert);
+      await settle(4);
+
+      const groups = $$('.ribbon__body .rgroup__label').map((l) => l.textContent.trim());
+      check('삽입 탭에 머리글 및 바닥글 그룹이 있음', groups.includes('머리글 및 바닥글'), groups.join(', '));
+
+      // Office's one-click page number: the footer's centre slot.
+      const pageNumber = $$('button').find((b) => b.textContent.includes('페이지 번호'));
+      check('페이지 번호 버튼이 있음', !!pageNumber);
+      click(pageNumber);
+      await settle(8);
+      const footer = $('.running--footer');
+      check('바닥글이 페이지에 그려짐', !!footer, 'running--footer');
+      check('페이지 번호가 숫자로 치환됨', footer?.textContent.includes('1'), footer?.textContent);
+      check('토큰이 그대로 남지 않음', !footer?.textContent.includes('{PAGE}'), footer?.textContent);
+
+      // And the header dialog writes all three slots.
+      const header = $$('button').find((b) => b.textContent.includes('머리글'));
+      click(header);
+      await settle(6);
+      const inputs = $$('.dialog input');
+      check('머리글 대화상자에 세 칸이 있음', inputs.length >= 3, String(inputs.length));
+      setValue(inputs[1], 'AI Studio 제안서');
+      const confirm = $$('.dialog button').find((b) => b.textContent.trim() === '확인');
+      click(confirm);
+      await settle(8);
+      const band = $('.running--header');
+      check('머리글이 가운데 칸에 그려짐',
+        band?.querySelectorAll('.running__slot')[1]?.textContent === 'AI Studio 제안서',
+        band?.textContent);
+    },
+  });
+  check('머리글·바닥글에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 셀 글꼴 크기 (Grid)');
+{
+  const { errors } = await mount(`#/grid/${encodeURIComponent(byType.grid)}`, {
+    interact: async ({ settle, $, $$, setValue, cellText }) => {
+      const box = $$('input[type="number"]').find((el) => el.getAttribute('title') === '글꼴 크기');
+      check('글꼴 크기 입력이 있음', !!box, '홈 탭 글꼴 그룹');
+      check('기본값은 시트가 그리는 크기', box && Number(box.value) === 15, box?.value);
+
+      setValue(box, '24');
+      await settle(6);
+      // A1 is the selected cell on load.
+      const cell = $('.sheet tbody tr td .cell');
+      check('셀 글꼴 크기가 상대 크기로 적용됨', cell?.style.fontSize?.endsWith('em'), cell?.style.fontSize);
+      check('셀 내용은 그대로', cellText(1, 0).length > 0, cellText(1, 0));
+    },
+  });
+  check('셀 글꼴 크기 변경에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ 문서 글꼴 (한 글꼴로 그리기)');
+{
+  const css = fs.readFileSync(path.join(ROOT, 'apps/web/src/styles.css'), 'utf8');
+  check('번들된 글꼴을 @font-face로 선언', /@font-face[\s\S]*?PretendardVariable\.woff2/.test(css));
+  check('네트워크에서 글꼴을 받아오지 않음', !/@import\s+url\(https|fonts\.googleapis/.test(css));
+  check('문서 표면에 --doc-font를 씀', /--doc-font:/.test(css) && /\.canvas \{[\s\S]*?font-family: var\(--doc-font\)/.test(css));
+  const font = path.join(ROOT, 'apps/web/src/fonts/PretendardVariable.woff2');
+  check('글꼴 파일이 저장소에 있음', fs.existsSync(font) && fs.statSync(font).size > 500000);
+  check('글꼴 라이선스를 함께 담음', fs.existsSync(path.join(ROOT, 'apps/web/src/fonts/OFL.txt')));
+}
+
+console.log('\n■ 기존 파일 열기 (런처)');
+{
+  const { html, text, errors } = await mount('');
+  check('런처에 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('기존 파일 열기 카드가 있음', text.includes('기존 파일 열기'));
+  check('지원 형식을 밝힘', text.includes('.pptx') && text.includes('.xlsx'));
+  check('파일 선택 입력이 있음', /type="file"/.test(html));
+}
+
+console.log('\n■ 가져오기 보고 (무엇이 바뀌었는지)');
+{
+  const { errors } = await mount('', {
+    interact: async ({ settle, $, $$, fire, window }) => {
+      const input = $('input[type="file"]');
+      check('파일 입력이 있음', !!input);
+      // A File the launcher will hand to the import API, whose stub answers with
+      // the conversion notes.
+      const file = new window.File([new Uint8Array([1, 2, 3])], '분기보고.pptx', {
+        type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      });
+      Object.defineProperty(input, 'files', { value: [file], configurable: true });
+      fire(input, 'change');
+      await settle(30);
+
+      const dialog = $('.dialog');
+      check('바뀐 것을 알리는 대화상자가 열림', !!dialog, dialog?.textContent?.slice(0, 80));
+      const notes = $$('.importnotes li').map((li) => li.textContent);
+      check('토스트가 아니라 목록으로 보여줌', notes.length === 3, notes.join(' | '));
+      check('글꼴 치환을 알려줌', notes.some((n) => n.includes('Pretendard')));
+      check('SmartArt 변환을 알려줌', notes.some((n) => n.includes('SmartArt')));
+      const open = $$('.dialog__foot button').find((b) => b.textContent.trim() === '열기');
+      check('열기 버튼이 있음', !!open);
+
+      /*
+       * And pressing it actually opens the imported document.
+       *
+       * Checking only that the button exists is what let a swapped pair of
+       * arguments through: the hash came out as `#/<folder>/<type>`, no editor
+       * matched it, and the very first thing a new user does — open the .pptx
+       * they already have — put them back on the start screen with no error.
+       */
+      if (open) {
+        open.click();
+        await settle(30);
+      }
+      check(
+        '열기가 가져온 문서를 실제로 엽니다',
+        !!$('.titlebar') && !$('.launcher'),
+        `hash = ${window.location.hash}`
+      );
+      check(
+        '주소가 #/<종류>/<폴더> 형태',
+        /^#\/(deck|doc|grid)\//.test(window.location.hash),
+        `hash = ${window.location.hash}`
+      );
+    },
+  });
+  check('가져오기 보고에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
 
 console.log(`\n${failures === 0 ? '통과' : '실패'}: ${checks - failures}/${checks} 검사 성공`);
 process.exit(failures === 0 ? 0 : 1);

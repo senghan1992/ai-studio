@@ -112,27 +112,43 @@ pub fn adjust_refs(formula: &str, axis: &str, at: i32, delta: i32) -> String {
 
 /* ---------------------------------------------------------------- formulas */
 
+/// Recalculate one sheet. `others` are the workbook's remaining sheets, which
+/// cross-sheet formulas (`=요약!B4`) read from.
 #[wasm_bindgen(js_name = recalcSheet)]
-pub fn recalc_sheet(sheet: JsValue) -> Result<JsValue, JsValue> {
+pub fn recalc_sheet(sheet: JsValue, others: JsValue) -> Result<JsValue, JsValue> {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct Input {
         cells: IndexMap<String, Cell>,
         names: Names,
+        name: String,
     }
     #[derive(Serialize)]
     struct Output {
         cells: IndexMap<String, Cell>,
         changed: Vec<String>,
         errors: IndexMap<String, String>,
+        unresolved: Vec<String>,
     }
 
     let input: Input = from_js(sheet)?;
-    let out = ai_formula::evaluate::recalc_sheet(&input.cells, &input.names);
+    let siblings: Vec<Input> = if others.is_undefined() || others.is_null() {
+        Vec::new()
+    } else {
+        from_js(others)?
+    };
+    let book = ai_formula::evaluate::book_of(
+        siblings
+            .iter()
+            .map(|s| (s.name.as_str(), &s.cells))
+            .collect::<Vec<_>>(),
+    );
+    let out = ai_formula::evaluate::recalc_sheet_in(&input.cells, &input.names, &input.name, &book);
     to_js(&Output {
         cells: out.cells,
         changed: out.changed,
         errors: out.errors,
+        unresolved: out.unresolved,
     })
 }
 
@@ -409,6 +425,263 @@ pub fn make_sheet(name: Option<String>, with_sample: Option<bool>) -> Result<JsV
     ))
 }
 
+/// The shape gallery, grouped the way Office's picker is.
+#[wasm_bindgen(js_name = shapeGallery)]
+pub fn shape_gallery() -> Result<JsValue, JsValue> {
+    let groups: Vec<Json> = ai_format::shape::gallery()
+        .into_iter()
+        .map(|(group, presets)| {
+            serde_json::json!({
+                "group": group.as_str(),
+                "label": group.label(),
+                "presets": presets
+                    .iter()
+                    .map(|p| serde_json::json!({ "name": p.name, "label": p.label }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    to_js(&groups)
+}
+
+/// A shape block for the gallery to insert.
+#[wasm_bindgen(js_name = makeShape)]
+pub fn make_shape(preset: &str, box_: JsValue) -> Result<JsValue, JsValue> {
+    #[derive(Deserialize)]
+    struct B {
+        #[serde(default)]
+        x: f64,
+        #[serde(default)]
+        y: f64,
+        #[serde(default = "default_w")]
+        w: f64,
+        #[serde(default = "default_h")]
+        h: f64,
+        #[serde(default = "one")]
+        z: f64,
+    }
+    fn default_w() -> f64 {
+        240.0
+    }
+    fn default_h() -> f64 {
+        140.0
+    }
+    fn one() -> f64 {
+        1.0
+    }
+    let b: B = from_js(box_)?;
+    to_js(&ai_format::deck::make_shape(
+        preset,
+        ai_format::geometry::Box {
+            x: b.x,
+            y: b.y,
+            w: b.w,
+            h: b.h,
+            z: b.z,
+        },
+    ))
+}
+
+/// A table block of the given size, as Office's grid picker makes one.
+#[wasm_bindgen(js_name = makeTable)]
+pub fn make_table(columns: usize, rows: usize, box_: JsValue) -> Result<JsValue, JsValue> {
+    #[derive(Deserialize)]
+    struct B {
+        #[serde(default)]
+        x: f64,
+        #[serde(default)]
+        y: f64,
+        #[serde(default = "default_w")]
+        w: f64,
+        #[serde(default = "default_h")]
+        h: f64,
+        #[serde(default = "one")]
+        z: f64,
+    }
+    fn default_w() -> f64 {
+        520.0
+    }
+    fn default_h() -> f64 {
+        200.0
+    }
+    fn one() -> f64 {
+        1.0
+    }
+    let b: B = from_js(box_)?;
+    to_js(&ai_format::deck::make_table(
+        columns.clamp(1, 20),
+        rows.clamp(1, 50),
+        ai_format::geometry::Box {
+            x: b.x,
+            y: b.y,
+            w: b.w,
+            h: b.h,
+            z: b.z,
+        },
+    ))
+}
+
+/// An empty markdown table plus its layout, for a Doc block.
+#[wasm_bindgen(js_name = blankTable)]
+pub fn blank_table(columns: usize, rows: usize) -> Result<JsValue, JsValue> {
+    let (md, spec) = ai_format::table::blank_table(columns.clamp(1, 20), rows.clamp(1, 50));
+    to_js(&serde_json::json!({ "md": md, "table": spec }))
+}
+
+/* ------------------------------------------------------------- table edits */
+
+/// One structural edit to a table.
+///
+/// The whole table goes across and comes back, rather than a diff: a table is a
+/// few hundred bytes, and a diff protocol between the editor and the core is a
+/// second place for the two to disagree about merges.
+#[wasm_bindgen(js_name = tableEdit)]
+pub fn table_edit(md: &str, spec: JsValue, op: &str, args: JsValue) -> Result<JsValue, JsValue> {
+    use ai_format::table::{Axis, Table, TableSpec};
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Args {
+        col: usize,
+        row: usize,
+        /// The far corner, for a merge.
+        col2: usize,
+        row2: usize,
+        text: String,
+        /// `"row"` or `"col"`.
+        axis: String,
+        align: Option<String>,
+        valign: Option<String>,
+        fill: Option<String>,
+        color: Option<String>,
+    }
+
+    let spec: TableSpec = if spec.is_null() || spec.is_undefined() {
+        TableSpec::default()
+    } else {
+        from_js(spec)?
+    };
+    let args: Args = if args.is_null() || args.is_undefined() {
+        Args::default()
+    } else {
+        from_js(args)?
+    };
+    let axis = if args.axis == "col" {
+        Axis::Col
+    } else {
+        Axis::Row
+    };
+    // An insert or delete applies to a row index or a column index, whichever
+    // axis it names.
+    let line = match axis {
+        Axis::Row => args.row,
+        Axis::Col => args.col,
+    };
+
+    let mut table = Table::read(md, &spec);
+    let changed = match op {
+        "setCell" => {
+            table.set_cell(args.col, args.row, &args.text);
+            true
+        }
+        "insert" => {
+            table.insert(axis, line);
+            true
+        }
+        "delete" => table.delete(axis, line),
+        "merge" => table.merge(args.col, args.row, args.col2, args.row2),
+        "split" => table.split(args.col, args.row),
+        "format" => {
+            table.format_cell(args.col, args.row, |format| {
+                // An explicit `null` clears the field; an absent one leaves it.
+                if let Some(align) = args.align.clone() {
+                    format.align = (!align.is_empty()).then_some(align);
+                }
+                if let Some(valign) = args.valign.clone() {
+                    format.valign = (!valign.is_empty()).then_some(valign);
+                }
+                if let Some(fill) = args.fill.clone() {
+                    format.fill = (!fill.is_empty()).then_some(fill);
+                }
+                if let Some(color) = args.color.clone() {
+                    format.color = (!color.is_empty()).then_some(color);
+                }
+            });
+            true
+        }
+        other => return Err(JsValue::from_str(&format!("알 수 없는 표 편집: {other}"))),
+    };
+
+    let (md, spec) = table.write();
+    to_js(&serde_json::json!({
+        "md": md,
+        "table": spec,
+        "changed": changed,
+        "columns": table.columns(),
+        "rows": table.rows(),
+    }))
+}
+
+/// A table's shape and navigation, without editing it.
+#[wasm_bindgen(js_name = tableInfo)]
+pub fn table_info(md: &str, spec: JsValue) -> Result<JsValue, JsValue> {
+    use ai_format::table::{Table, TableSpec};
+
+    let spec: TableSpec = if spec.is_null() || spec.is_undefined() {
+        TableSpec::default()
+    } else {
+        from_js(spec)?
+    };
+    let table = Table::read(md, &spec);
+    to_js(&serde_json::json!({
+        "columns": table.columns(),
+        "rows": table.rows(),
+        "cells": table.cells,
+    }))
+}
+
+/// Where the cursor goes for a key, as `{ col, row, addRow }`.
+///
+/// `addRow` marks a `Tab` from the last cell, which is where Office adds a row.
+#[wasm_bindgen(js_name = tableMove)]
+pub fn table_move(
+    md: &str,
+    spec: JsValue,
+    col: usize,
+    row: usize,
+    key: &str,
+    backwards: bool,
+) -> Result<JsValue, JsValue> {
+    use ai_format::table::{Table, TableSpec};
+
+    let spec: TableSpec = if spec.is_null() || spec.is_undefined() {
+        TableSpec::default()
+    } else {
+        from_js(spec)?
+    };
+    let table = Table::read(md, &spec);
+
+    let (target, add_row) = match key {
+        "Tab" if backwards => (table.previous_cell(col, row), false),
+        "Tab" => match table.next_cell(col, row) {
+            Some(next) => (Some(next), false),
+            None => (None, true),
+        },
+        "ArrowLeft" => (Some(table.step(col, row, -1, 0)), false),
+        "ArrowRight" => (Some(table.step(col, row, 1, 0)), false),
+        "ArrowUp" => (Some(table.step(col, row, 0, -1)), false),
+        "ArrowDown" | "Enter" => (Some(table.step(col, row, 0, 1)), false),
+        _ => (Some((col, row)), false),
+    };
+
+    let (next_col, next_row) = target.unwrap_or((col, row));
+    to_js(&serde_json::json!({
+        "col": next_col,
+        "row": next_row,
+        "addRow": add_row,
+    }))
+}
+
 #[wasm_bindgen(js_name = slideLayouts)]
 pub fn slide_layouts() -> Vec<String> {
     ai_format::model::SLIDE_LAYOUTS
@@ -417,26 +690,68 @@ pub fn slide_layouts() -> Vec<String> {
         .collect()
 }
 
+/// The named papers, portrait, as `{ A4: { w, h }, ... }`.
 #[wasm_bindgen(js_name = pageSizes)]
 pub fn page_sizes() -> Result<JsValue, JsValue> {
-    let sizes: Json = ["A4", "Letter", "A5"]
+    let sizes: Json = ai_format::model::PAPERS
         .iter()
-        .map(|name| {
-            let page = ai_format::model::Page {
-                size: name.to_string(),
-                ..ai_format::model::Page::default()
-            };
-            let (w, h) = page.dimensions();
-            (name.to_string(), serde_json::json!({ "w": w, "h": h }))
-        })
+        .map(|(name, w, h)| (name.to_string(), serde_json::json!({ "w": w, "h": h })))
         .collect::<serde_json::Map<String, Json>>()
         .into();
     to_js(&sizes)
 }
 
+/// A page's real size, which an explicit width and height override the name.
+///
+/// The editor asks rather than looking the name up itself, because a landscape
+/// or hand-typed page has no name to look up and the resolution order belongs in
+/// one place.
+#[wasm_bindgen(js_name = pageDims)]
+pub fn page_dims(page: JsValue) -> Result<JsValue, JsValue> {
+    let page: ai_format::model::Page = from_js(page)?;
+    let (w, h) = page.dimensions();
+    to_js(&serde_json::json!({
+        "w": w,
+        "h": h,
+        "landscape": page.landscape(),
+        "name": page.size,
+    }))
+}
+
+/// A page resized, keeping its margins and columns: the paper name if the size
+/// is one, and explicit dimensions when it is not.
+#[wasm_bindgen(js_name = pageResize)]
+pub fn page_resize(page: JsValue, w: f64, h: f64) -> Result<JsValue, JsValue> {
+    let page: ai_format::model::Page = from_js(page)?;
+    to_js(&page.resized(w.round(), h.round()))
+}
+
+/// A header or footer's three slots with `{PAGE}`, `{PAGES}` and `{DATE}`
+/// filled in.
+///
+/// The editor asks rather than substituting itself, so the tokens are defined in
+/// one place — the same place the exporter turns them into Word fields.
+#[wasm_bindgen(js_name = resolveRunning)]
+pub fn resolve_running(
+    running: JsValue,
+    page: usize,
+    pages: usize,
+    today: String,
+) -> Result<JsValue, JsValue> {
+    let running: ai_format::model::Running = from_js(running)?;
+    to_js(&running.resolved(page, pages, &today))
+}
+
+/// The label a page of no named size carries.
+#[wasm_bindgen(js_name = customPaperLabel)]
+pub fn custom_paper_label() -> String {
+    ai_format::model::CUSTOM_PAPER.to_string()
+}
+
 #[wasm_bindgen(js_name = gridDefaults)]
 pub fn grid_defaults() -> Result<JsValue, JsValue> {
     to_js(&serde_json::json!({
+        "cellPx": ai_format::grid::CELL_PX,
         "colWidth": ai_format::grid::DEFAULT_COL_WIDTH,
         "rowHeight": ai_format::grid::DEFAULT_ROW_HEIGHT,
         "dims": ai_format::model::Dims::default(),

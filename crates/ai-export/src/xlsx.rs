@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use serde_json::Value as Json;
 
 use ai_format::chart::{describe_chart, resolve_spec, CellSource};
-use ai_format::grid::{recalculated, used_range};
+use ai_format::grid::used_range;
 use ai_format::model::{Project, Sheet};
 use ai_formula::evaluate::Cell;
 use ai_formula::refs::{index_to_col, parse_ref, to_ref};
@@ -38,6 +38,36 @@ struct Xf {
     fill: usize,
     border: usize,
     align: Option<Alignment>,
+    /// Vertical alignment, and whether the cell wraps. Excel's default is
+    /// bottom-aligned and unwrapped, which is why both are optional here.
+    valign: Option<VAlignment>,
+    wrap: bool,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum VAlignment {
+    Top,
+    Middle,
+    Bottom,
+}
+
+impl VAlignment {
+    fn as_str(self) -> &'static str {
+        match self {
+            VAlignment::Top => "top",
+            VAlignment::Middle => "center",
+            VAlignment::Bottom => "bottom",
+        }
+    }
+
+    fn parse(s: &str) -> Option<VAlignment> {
+        Some(match s {
+            "top" => VAlignment::Top,
+            "middle" | "center" => VAlignment::Middle,
+            "bottom" => VAlignment::Bottom,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -71,7 +101,10 @@ impl Styles {
         Styles {
             num_fmts: Vec::new(),
             // The default font and the two fills Excel requires in slots 0 and 1.
-            fonts: vec!["<font><sz val=\"11\"/><name val=\"Calibri\"/></font>".to_string()],
+            fonts: vec![format!(
+                "<font><sz val=\"11\"/><name val=\"{}\"/></font>",
+                ai_format::font::FAMILY
+            )],
             fills: vec![
                 "<fill><patternFill patternType=\"none\"/></fill>".to_string(),
                 "<fill><patternFill patternType=\"gray125\"/></fill>".to_string(),
@@ -103,8 +136,15 @@ impl Styles {
         }
     }
 
-    fn font(&mut self, bold: bool, italic: bool, underline: bool, color: Option<&str>) -> usize {
-        if !bold && !italic && !underline && color.is_none() {
+    fn font(
+        &mut self,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        color: Option<&str>,
+        size_px: Option<f64>,
+    ) -> usize {
+        if !bold && !italic && !underline && color.is_none() && size_px.is_none() {
             return 0;
         }
         let mut xml = String::from("<font>");
@@ -120,7 +160,16 @@ impl Styles {
         if let Some(color) = color {
             xml.push_str(&format!("<color rgb=\"FF{}\"/>", hex(color)));
         }
-        xml.push_str("<sz val=\"11\"/><name val=\"Calibri\"/></font>");
+        // Excel works in points and the editor in px at 96dpi. Trailing zeros
+        // are trimmed so 11pt is written as `11`, the way Excel writes it.
+        let points = size_px.unwrap_or(ai_format::grid::CELL_PX) * 0.75;
+        xml.push_str(&format!(
+            "<sz val=\"{}\"/><name val=\"{}\"/></font>",
+            format!("{:.2}", points)
+                .trim_end_matches('0')
+                .trim_end_matches('.'),
+            ai_format::font::FAMILY
+        ));
         Self::intern(&mut self.fonts, xml)
     }
 
@@ -185,10 +234,16 @@ impl Styles {
                 get_bool("italic"),
                 get_bool("underline"),
                 get_str("color"),
+                style
+                    .and_then(|s| s.get("fontSize"))
+                    .and_then(|v| v.as_f64())
+                    .filter(|px| *px > 0.0),
             ),
             fill: self.fill(get_str("bg")),
             border: self.border(style.and_then(|s| s.get("border"))),
             align: get_str("align").and_then(Alignment::parse),
+            valign: get_str("valign").and_then(VAlignment::parse),
+            wrap: get_bool("wrap"),
         };
         if xf == Xf::default() {
             return 0;
@@ -239,12 +294,23 @@ impl Styles {
                 if xf.fill != 0 { " applyFill=\"1\"" } else { "" },
                 if xf.border != 0 { " applyBorder=\"1\"" } else { "" },
             ));
-            match xf.align {
-                Some(align) => out.push_str(&format!(
-                    " applyAlignment=\"1\"><alignment horizontal=\"{}\"/></xf>",
-                    align.as_str()
-                )),
-                None => out.push_str("/>"),
+            // One `<alignment>` carries all three; writing the element at all
+            // needs applyAlignment, or Excel ignores it.
+            if xf.align.is_some() || xf.valign.is_some() || xf.wrap {
+                let horizontal = xf
+                    .align
+                    .map(|a| format!(" horizontal=\"{}\"", a.as_str()))
+                    .unwrap_or_default();
+                let vertical = xf
+                    .valign
+                    .map(|a| format!(" vertical=\"{}\"", a.as_str()))
+                    .unwrap_or_default();
+                let wrap = if xf.wrap { " wrapText=\"1\"" } else { "" };
+                out.push_str(&format!(
+                    " applyAlignment=\"1\"><alignment{horizontal}{vertical}{wrap}/></xf>"
+                ));
+            } else {
+                out.push_str("/>");
             }
         }
         out.push_str("</cellXfs>");
@@ -639,7 +705,7 @@ fn safe_defined_name(name: &str) -> Option<String> {
 
 /// Export a workbook to `.xlsx`.
 pub fn export(project: &Project) -> Result<Vec<u8>> {
-    let sheets: Vec<Sheet> = project.sheets().iter().map(recalculated).collect();
+    let sheets: Vec<Sheet> = ai_format::grid::recalculated_all(project.sheets());
     let names: Vec<String> = sheets
         .iter()
         .enumerate()

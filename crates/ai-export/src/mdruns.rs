@@ -54,7 +54,7 @@ static FENCE: Lazy<Regex> =
 static HR: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(?:---+|\*\*\*+|___+)$").unwrap());
 static BLOCK_IMAGE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$"#).unwrap());
-static TABLE_RULE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\|[\s:|-]+\|?$").unwrap());
+static TABLE_RULE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\|[\s:|-]*-[\s:|-]*\|?$").unwrap());
 static QUOTE_PREFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[ \t]*>[ \t]?").unwrap());
 static LIST_START: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([-+*]|\d+[.)])[ \t]+").unwrap());
 static LIST_ITEM: Lazy<Regex> =

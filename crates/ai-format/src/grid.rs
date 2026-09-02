@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value as Json};
 
-use ai_formula::evaluate::{display_value, parse_cell_input, recalc_sheet, Cell, Names};
+use ai_formula::evaluate::{display_value, parse_cell_input, recalc_sheet, Book, Cell, Names};
 use ai_formula::jsnum;
 use ai_formula::refs::{index_to_col, parse_ref, to_ref};
 
@@ -15,6 +15,13 @@ use crate::chart::{
 use crate::frontmatter::{meta_str, parse_frontmatter, serialize_frontmatter, Meta};
 use crate::ids::{new_block_id, new_sheet_id};
 use crate::model::{Dims, Frozen, Sheet, SheetChart};
+
+/// The size a cell's text is drawn at when it says nothing, in px.
+///
+/// Excel's own default is 11pt, which is 14.67px at 96dpi. Import compares
+/// against this, and the stylesheet draws it, so a sheet that says 11pt carries
+/// no per-cell size at all.
+pub const CELL_PX: f64 = 15.0;
 
 pub const DEFAULT_COL_WIDTH: i64 = 104;
 pub const DEFAULT_ROW_HEIGHT: i64 = 28;
@@ -262,6 +269,29 @@ pub fn recalculated(sheet: &Sheet) -> Sheet {
     }
 }
 
+/// The same, with the workbook's other sheets available to cross-sheet formulas.
+///
+/// `=요약!B4` is most of what a summary sheet contains, and a reader that
+/// recalculates one sheet in isolation cannot resolve it.
+pub fn recalculated_in(sheet: &Sheet, book: &Book<'_>) -> Sheet {
+    let out = ai_formula::evaluate::recalc_sheet_in(&sheet.cells, &sheet.names, &sheet.name, book);
+    Sheet {
+        cells: out.cells,
+        ..sheet.clone()
+    }
+}
+
+/// Every sheet in a workbook, addressable by name.
+pub fn book(sheets: &[Sheet]) -> Book<'_> {
+    ai_formula::evaluate::book_of(sheets.iter().map(|s| (s.name.as_str(), &s.cells)))
+}
+
+/// Recalculate a whole workbook, each sheet seeing the others.
+pub fn recalculated_all(sheets: &[Sheet]) -> Vec<Sheet> {
+    let book = book(sheets);
+    sheets.iter().map(|s| recalculated_in(s, &book)).collect()
+}
+
 pub struct SheetFiles {
     pub md: String,
     pub cells: Json,
@@ -269,8 +299,15 @@ pub struct SheetFiles {
 
 /// Split a sheet into the cells JSON (source) + markdown projection pair.
 pub fn write_sheet(sheet: &Sheet) -> SheetFiles {
+    static EMPTY: std::sync::LazyLock<Book<'static>> = std::sync::LazyLock::new(Book::new);
+    write_sheet_in(sheet, &EMPTY)
+}
+
+/// The same, with the workbook's other sheets available, so the markdown
+/// projection of a cross-sheet formula carries its real value.
+pub fn write_sheet_in(sheet: &Sheet, book: &Book<'_>) -> SheetFiles {
     let s = normalize_sheet(sheet);
-    let with_values = recalculated(&s);
+    let with_values = recalculated_in(&s, book);
 
     let mut cells = serde_json::Map::new();
     cells.insert("id".into(), json!(s.id));
@@ -737,7 +774,9 @@ fn split_unescaped_pipes(row: &str) -> Vec<String> {
 }
 
 static TABLE_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[ \t]*\|").unwrap());
-static TABLE_RULE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\|[\s:|-]+\|$").unwrap());
+/// The alignment row of a markdown table. It must contain a dash: `|   |   |`
+/// is a row of empty cells, and accepting it here deleted a blank sheet row.
+static TABLE_RULE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\|[\s:|-]*-[\s:|-]*\|$").unwrap());
 static COL_LETTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Z]{1,3}$").unwrap());
 
 /// Import a markdown table into cells.
@@ -1052,6 +1091,17 @@ mod tests {
             Some(&json!({ "bold": true })),
             "bold markers in the table survive"
         );
+    }
+
+    #[test]
+    fn a_blank_row_in_a_projection_is_not_swallowed() {
+        // `|   |   |` used to match the alignment-rule pattern, so re-importing a
+        // sheet with an empty row shifted every row below it up by one.
+        let cells = import_markdown_table(
+            "|     | A | B |\n|---|---|---|\n| **1** | 머리글 | 값 |\n| **2** |   |   |\n| **3** | 자료 | 7 |\n",
+        );
+        assert_eq!(display_value(cells.get("A3").unwrap()), "자료");
+        assert_eq!(display_value(cells.get("B3").unwrap()), "7");
     }
 
     #[test]

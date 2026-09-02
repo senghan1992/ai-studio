@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
+import ShortcutHelp from './ShortcutHelp.jsx';
+
 const APP_META = {
   deck: { name: 'AI Deck', short: 'D', color: 'var(--deck)' },
   doc: { name: 'AI Doc', short: 'W', color: 'var(--doc)' },
@@ -19,8 +21,21 @@ export default function Shell({
 }) {
   const app = APP_META[type] ?? APP_META.doc;
   const [draft, setDraft] = useState(title ?? '');
+  const [help, setHelp] = useState(false);
 
   useEffect(() => setDraft(title ?? ''), [title]);
+
+  // F1 is the first key an Office user presses in a program they do not know.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'F1' || ((e.ctrlKey || e.metaKey) && e.key === '/')) {
+        e.preventDefault();
+        setHelp(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <div className="app" style={{ '--accent': app.color }}>
@@ -44,12 +59,27 @@ export default function Shell({
             }}
             aria-label="문서 제목"
           />
-          <span className="titlebar__badge">
-            {saving ? '저장 중…' : dirty ? '저장되지 않음' : '저장됨'}
+          {/* The badge says what autosave is about to do, not only what it did:
+              "저장되지 않음" on a document that saves itself in two seconds
+              reads like a warning it is not. */}
+          <span
+            className="titlebar__badge"
+            title={
+              saving
+                ? '디스크에 쓰는 중입니다'
+                : dirty
+                ? '편집을 멈추면 몇 초 안에 자동 저장됩니다. Ctrl+S로 바로 저장할 수 있습니다'
+                : '모든 변경이 폴더에 기록되었습니다'
+            }
+          >
+            {saving ? '저장 중…' : dirty ? '자동 저장 대기' : '저장됨'}
           </span>
         </div>
 
         <div className="titlebar__actions">
+          <button className="tbtn tbtn--ghost" onClick={() => setHelp(true)} title="키보드 단축키 (F1)">
+            ?
+          </button>
           <button
             className={`tbtn tbtn--ghost${inspectorOpen ? ' tbtn--on' : ''}`}
             onClick={onToggleInspector}
@@ -66,6 +96,8 @@ export default function Shell({
       {ribbon}
 
       <div className="workarea">{children}</div>
+
+      {help && <ShortcutHelp type={type} onClose={() => setHelp(false)} />}
 
       <footer className="statusbar">
         {status}

@@ -14,88 +14,124 @@ use crate::values::{
 
 /// Every function name, sorted — what the formula bar autocompletes from.
 pub static FUNCTION_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
-    let mut names = vec![
-        "ABS",
-        "AND",
-        "AVERAGE",
-        "AVERAGEIF",
-        "CEILING",
-        "COLUMNS",
-        "CONCAT",
-        "CONCATENATE",
-        "COUNT",
-        "COUNTA",
-        "COUNTBLANK",
-        "COUNTIF",
-        "DATE",
-        "DAY",
-        "DAYS",
-        "EXP",
-        "FALSE",
-        "FIND",
-        "FLOOR",
-        "HLOOKUP",
-        "IF",
-        "IFERROR",
-        "IFNA",
-        "IFS",
-        "INDEX",
-        "INT",
-        "ISBLANK",
-        "ISERROR",
-        "ISNUMBER",
-        "ISTEXT",
-        "LEFT",
-        "LEN",
-        "LN",
-        "LOG10",
-        "LOWER",
-        "MATCH",
-        "MAX",
-        "MEDIAN",
-        "MID",
-        "MIN",
-        "MOD",
-        "MONTH",
-        "NA",
-        "NOT",
-        "NOW",
-        "OR",
-        "PI",
-        "POWER",
-        "PRODUCT",
-        "PROPER",
-        "RAND",
-        "RIGHT",
-        "ROUND",
-        "ROUNDDOWN",
-        "ROUNDUP",
-        "ROWS",
-        "SIGN",
-        "SQRT",
-        "STDEV",
-        "SUBSTITUTE",
-        "SUM",
-        "SUMIF",
-        "SUMPRODUCT",
-        "TEXT",
-        "TEXTJOIN",
-        "TODAY",
-        "TRIM",
-        "TRUE",
-        "TRUNC",
-        "UPPER",
-        "VALUE",
-        "VLOOKUP",
-        "WEEKDAY",
-        "YEAR",
-    ];
+    let mut names = CORE_NAMES.to_vec();
+    // The families in `crate::library` — statistics, finance, dates, the newer
+    // lookups — register themselves rather than being listed twice.
+    names.extend(crate::library::names());
     names.sort_unstable();
+    names.dedup();
     names
 });
 
+/// The functions this file answers to. `crate::library` holds the rest.
+static CORE_NAMES: &[&str] = &[
+    "ABS",
+    "AND",
+    "AVERAGE",
+    "AVERAGEIF",
+    "CEILING",
+    "COLUMNS",
+    "CONCAT",
+    "CONCATENATE",
+    "COUNT",
+    "COUNTA",
+    "COUNTBLANK",
+    "COUNTIF",
+    "DATE",
+    "DAY",
+    "DAYS",
+    "EXP",
+    "FALSE",
+    "FIND",
+    "FLOOR",
+    "HLOOKUP",
+    "IF",
+    "IFERROR",
+    "IFNA",
+    "IFS",
+    "INDEX",
+    "INT",
+    "ISBLANK",
+    "ISERROR",
+    "ISNUMBER",
+    "ISTEXT",
+    "LEFT",
+    "LEN",
+    "LN",
+    "LOG10",
+    "LOWER",
+    "MATCH",
+    "MAX",
+    "MEDIAN",
+    "MID",
+    "MIN",
+    "MOD",
+    "MONTH",
+    "NA",
+    "NOT",
+    "NOW",
+    "OR",
+    "PI",
+    "POWER",
+    "PRODUCT",
+    "PROPER",
+    "RAND",
+    "RIGHT",
+    "ROUND",
+    "ROUNDDOWN",
+    "ROUNDUP",
+    "ROWS",
+    "SIGN",
+    "SQRT",
+    "STDEV",
+    "SUBSTITUTE",
+    "SUM",
+    "SUMIF",
+    "SUMPRODUCT",
+    "TEXT",
+    "TEXTJOIN",
+    "TODAY",
+    "TRIM",
+    "TRUE",
+    "TRUNC",
+    "UPPER",
+    "VALUE",
+    "VLOOKUP",
+    "WEEKDAY",
+    "YEAR",
+];
+
 pub fn is_function(name: &str) -> bool {
     FUNCTION_NAMES.binary_search(&name).is_ok()
+}
+
+/// The function names a formula calls, uppercased and in order of appearance.
+///
+/// Lexed rather than pattern-matched, so a cell containing the text `"SUM(x)"`
+/// is not mistaken for a call.
+pub fn called_functions(formula: &str) -> Vec<String> {
+    use crate::parse::{tokenize, Token};
+    let Ok(tokens) = tokenize(formula.trim_start_matches('=')) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pair in tokens.windows(2) {
+        if let (Token::Name(name), Token::LParen) = (&pair[0], &pair[1]) {
+            let upper = name.to_uppercase();
+            if !out.contains(&upper) {
+                out.push(upper);
+            }
+        }
+    }
+    out
+}
+
+/// The functions in a formula that this build cannot evaluate.
+pub fn unsupported_functions(formula: &str) -> Vec<String> {
+    called_functions(formula)
+        .into_iter()
+        .filter(|name| !is_function(name))
+        .collect()
 }
 
 /* --------------------------------------------------------- criteria match */
@@ -272,6 +308,11 @@ enum RoundMode {
     Down,
 }
 
+/// `ROUND`'s rounding, for the parts of the library that format numbers.
+pub fn round_half_away(value: f64, digits: f64) -> f64 {
+    round_to(value, digits, RoundMode::Half)
+}
+
 fn round_to(value: f64, digits: f64, mode: RoundMode) -> f64 {
     let d = digits.trunc();
     let f = 10f64.powf(d);
@@ -302,7 +343,11 @@ pub fn call(name: &str, args: &[Value]) -> Option<Value> {
     if !is_function(name) {
         return None;
     }
-    Some(dispatch(name, args))
+    // The core dispatch first, so a name in both places resolves here.
+    if let Some(value) = dispatch_core(name, args) {
+        return Some(value);
+    }
+    crate::library::call(name, args)
 }
 
 /// Short-circuit on the first error anywhere in the arguments — the `guard`
@@ -316,6 +361,11 @@ fn guarded(args: &[Value], f: impl FnOnce(&[Value]) -> Value) -> Value {
 
 fn sum_of(nums: Vec<f64>) -> f64 {
     nums.iter().sum()
+}
+
+/// The core library. `None` hands the name on to [`crate::library`].
+fn dispatch_core(name: &str, args: &[Value]) -> Option<Value> {
+    CORE_NAMES.contains(&name).then(|| dispatch(name, args))
 }
 
 fn dispatch(name: &str, args: &[Value]) -> Value {
@@ -430,6 +480,9 @@ fn dispatch(name: &str, args: &[Value]) -> Value {
                 .iter()
                 .map(|v| match v {
                     Value::Range(r) => r.values().cloned().collect(),
+                    // An array counts as a column too: `(A:A="서울")*B:B` is how
+                    // conditional sums were written before SUMIFS existed.
+                    Value::Array(items) => items.clone(),
                     other => vec![other.clone()],
                 })
                 .collect();
@@ -719,7 +772,9 @@ fn dispatch(name: &str, args: &[Value]) -> Value {
             )
         }
         "INDEX" => {
-            let Some(Value::Range(range)) = args.first() else {
+            // An array works as a one-column range, so `INDEX(SORT(...), 1)`
+            // means what it looks like.
+            let Some(range) = args.first().and_then(crate::values::as_range) else {
                 return err(VALUE_ERR);
             };
             let grid = range.grid();
@@ -927,6 +982,11 @@ fn now_serial() -> f64 {
 
 /// `Math.random()`. A tiny xorshift keeps the crate dependency-free; RAND is
 /// not used for anything that needs cryptographic quality.
+/// A uniform number in `[0, 1)`, shared with the rest of the library.
+pub fn random() -> f64 {
+    pseudo_random()
+}
+
 fn pseudo_random() -> f64 {
     use std::cell::Cell;
     thread_local! {

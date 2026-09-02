@@ -8,11 +8,13 @@ import { loadCore } from './core.mjs';
 await loadCore();
 const { toRef, displayValue } = await import('../src/core/index.js');
 const {
-  setCellInput, patchCells, clearRange, structuralEdit,
+  setCellInput, patchCells, paintFormat, clearRange, structuralEdit,
   fillTarget, fillRange, mergeSelection, unmergeSelection, mergeCovering,
   applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn,
   resolveTarget, findCells, replaceInCells,
   rangeToTsv, rangeToFormulaTsv, pasteTsv, normalizeRange, selectionStats,
+  edgeOf, currentRegion, fillWithin, cycleRefLocks,
+  sortRange, looksLikeHeader, stepDecimals, autoFitRow,
 } = await import('../src/grid/gridOps.js');
 
 const sheetOf = (cells, extra = {}) => ({
@@ -368,4 +370,169 @@ test('clearRange can wipe styles too', () => {
   let sheet = sheetOf({ A1: { v: 1, style: { bold: true } } });
   sheet = clearRange(sheet, ['A1'], { keepStyle: false });
   assert.equal(at(sheet, 'A1'), undefined);
+});
+
+/* ------------------------------------------------------- Excel navigation */
+
+test('Ctrl+Arrow runs to the end of the block it is standing in', () => {
+  const sheet = sheetOf({
+    A1: { v: '항목', t: 's' }, A2: { v: 1, t: 'n' }, A3: { v: 2, t: 'n' }, A4: { v: 3, t: 'n' },
+    A9: { v: '합계', t: 's' },
+  });
+  assert.deepEqual(edgeOf(sheet, 0, 0, 'down'), { row: 3, col: 0 }, 'A1 -> A4, the last filled cell');
+});
+
+test('Ctrl+Arrow from the edge of a block skips the blanks', () => {
+  const sheet = sheetOf({
+    A1: { v: '항목', t: 's' }, A2: { v: 1, t: 'n' }, A3: { v: 2, t: 'n' }, A4: { v: 3, t: 'n' },
+    A9: { v: '합계', t: 's' },
+  });
+  assert.deepEqual(edgeOf(sheet, 3, 0, 'down'), { row: 8, col: 0 }, 'A4 -> A9 across the gap');
+});
+
+test('Ctrl+Arrow with nothing ahead stops at the sheet edge', () => {
+  const sheet = sheetOf({ A1: { v: 1, t: 'n' } }, { dims: { rows: 50, cols: 26 } });
+  assert.deepEqual(edgeOf(sheet, 0, 0, 'up'), { row: 0, col: 0 }, 'already at the top');
+  assert.deepEqual(edgeOf(sheet, 0, 0, 'down'), { row: 49, col: 0 }, 'to the last row');
+});
+
+test('the current region is the contiguous block around the cursor', () => {
+  const sheet = sheetOf({
+    B2: { v: 'a', t: 's' }, C2: { v: 'b', t: 's' },
+    B3: { v: 1, t: 'n' }, C3: { v: 2, t: 'n' },
+    F9: { v: '따로', t: 's' },
+  });
+  assert.deepEqual(currentRegion(sheet, 2, 1), { r1: 1, r2: 2, c1: 1, c2: 2 });
+  assert.deepEqual(currentRegion(sheet, 0, 0), { r1: 0, r2: 0, c1: 0, c2: 0 }, 'an empty cell is its own region');
+});
+
+test('Ctrl+D fills the first row of the selection down, shifting references', () => {
+  let sheet = sheetOf({
+    A1: { v: 2, t: 'n' }, A2: { v: 3, t: 'n' }, A3: { v: 4, t: 'n' },
+    B1: { f: '=A1*10', v: 20, t: 'n' },
+  });
+  sheet = fillWithin(sheet, { r1: 0, r2: 2, c1: 1, c2: 1 }, 'down');
+  assert.equal(at(sheet, 'B2').f, '=A2*10');
+  assert.equal(at(sheet, 'B3').v, 40, 'the filled formula was recalculated');
+});
+
+test('Ctrl+R fills the first column of the selection right', () => {
+  let sheet = sheetOf({
+    A1: { v: 5, t: 'n' }, B1: { v: 6, t: 'n' }, C1: { v: 7, t: 'n' },
+    A2: { f: '=A1+1', v: 6, t: 'n' },
+  });
+  sheet = fillWithin(sheet, { r1: 1, r2: 1, c1: 0, c2: 2 }, 'right');
+  assert.equal(at(sheet, 'C2').f, '=C1+1');
+  assert.equal(at(sheet, 'C2').v, 8);
+});
+
+test('F4 cycles a reference through Excel\'s four lock states', () => {
+  const one = cycleRefLocks('=A1+B2', 2);
+  assert.equal(one.value, '=$A$1+B2');
+  assert.equal(cycleRefLocks(one.value, 3).value, '=A$1+B2');
+  assert.equal(cycleRefLocks('=A$1+B2', 2).value, '=$A1+B2');
+  assert.equal(cycleRefLocks('=$A1+B2', 3).value, '=A1+B2');
+});
+
+test('F4 leaves a plain value alone', () => {
+  assert.equal(cycleRefLocks('1234', 1), null);
+  assert.equal(cycleRefLocks('=SUM()', 4), null, 'no reference to lock');
+});
+
+/* ------------------------------------------------------------------- sort */
+
+const tableSheet = () =>
+  sheetOf({
+    A1: { v: '이름', t: 's' }, B1: { v: '매출', t: 's' },
+    A2: { v: '다', t: 's' }, B2: { v: 30, t: 'n' },
+    A3: { v: '가', t: 's' }, B3: { v: 10, t: 'n' },
+    A4: { v: '나', t: 's' }, B4: { v: 20, t: 'n' },
+  });
+
+test('a text row over numbers is recognised as a header', () => {
+  assert.equal(looksLikeHeader(tableSheet(), { r1: 0, r2: 3, c1: 0, c2: 1 }), true);
+});
+
+test('sorting keeps the header row in place', () => {
+  const sorted = sortRange(tableSheet(), { r1: 0, r2: 3, c1: 0, c2: 1 }, true, { by: 0, hasHeader: true });
+  assert.equal(shown(sorted, 'A1'), '이름', 'the title stayed on top');
+  assert.deepEqual(
+    ['A2', 'A3', 'A4'].map((r) => shown(sorted, r)),
+    ['가', '나', '다']
+  );
+});
+
+test('sorting carries the whole row, not just the sorted column', () => {
+  const sorted = sortRange(tableSheet(), { r1: 0, r2: 3, c1: 0, c2: 1 }, true, { by: 0, hasHeader: true });
+  assert.equal(at(sorted, 'B2').v, 10, '가 kept its own 매출');
+  assert.equal(at(sorted, 'B4').v, 30);
+});
+
+test('sorting by the cursor column, not always the first', () => {
+  const sorted = sortRange(tableSheet(), { r1: 0, r2: 3, c1: 0, c2: 1 }, false, { by: 1, hasHeader: true });
+  assert.deepEqual(['B2', 'B3', 'B4'].map((r) => at(sorted, r).v), [30, 20, 10]);
+});
+
+test('blanks sink to the bottom in either direction', () => {
+  const sheet = sheetOf({
+    A1: { v: 2, t: 'n' }, A2: { v: null }, A3: { v: 1, t: 'n' },
+  });
+  const up = sortRange(sheet, { r1: 0, r2: 2, c1: 0, c2: 0 }, true, { by: 0 });
+  assert.equal(at(up, 'A1').v, 1);
+  const down = sortRange(sheet, { r1: 0, r2: 2, c1: 0, c2: 0 }, false, { by: 0 });
+  assert.equal(at(down, 'A1').v, 2);
+});
+
+/* --------------------------------------------------------- number formats */
+
+test('자릿수 늘림 keeps the currency prefix', () => {
+  assert.equal(stepDecimals('₩#,##0', 1), '₩#,##0.0');
+  assert.equal(stepDecimals('₩#,##0.00', -1), '₩#,##0.0');
+  assert.equal(stepDecimals('0%', 1), '0.0%', 'the percent sign stays a suffix');
+  assert.equal(stepDecimals('', 1), '#,##0.0', 'an unformatted cell starts from the default');
+  assert.equal(stepDecimals('#,##0', -1), '#,##0', 'never goes below zero decimals');
+});
+
+/* ----------------------------------------------- inserting several at once */
+
+test('inserting three rows shifts the formulas by three', () => {
+  let sheet = sheetOf({ A1: { v: 1, t: 'n' }, A5: { f: '=A1*2', v: 2, t: 'n' } });
+  sheet = structuralEdit(sheet, 'row', 1, 3);
+  assert.equal(at(sheet, 'A8').f, '=A1*2', 'the formula moved down three rows');
+  assert.equal(at(sheet, 'A5'), undefined, 'and left nothing behind');
+});
+
+test('a wrapped cell asks for a taller row', () => {
+  const sheet = sheetOf(
+    { A1: { v: '아주 긴 열 제목이 들어 있는 셀입니다', t: 's', style: { wrap: true } } },
+    { colWidths: { A: 60 } }
+  );
+  assert.ok(autoFitRow(sheet, 0, 1) > 22, 'more than one line');
+  const plain = sheetOf({ A1: { v: '짧다', t: 's' } });
+  assert.equal(autoFitRow(plain, 0, 1), 0, 'an unwrapped row goes back to the default');
+});
+
+/* ----------------------------------------------------------- 서식 복사 */
+
+test('the format painter replaces the target formatting rather than adding to it', () => {
+  const sheet = sheetOf({
+    A1: { v: '제목', t: 's', style: { bold: true, bg: '#eeeeee' }, fmt: '' },
+    A2: { v: 5, t: 'n', style: { italic: true, underline: true }, fmt: '0%' },
+  });
+  const painted = paintFormat(sheet, ['A2'], { style: { bold: true, bg: '#eeeeee' }, fmt: '' });
+  assert.deepEqual(at(painted, 'A2').style, { bold: true, bg: '#eeeeee' }, 'italic and underline are gone');
+  assert.equal(at(painted, 'A2').fmt, undefined, 'and so is the percent format');
+  assert.equal(at(painted, 'A2').v, 5, 'the value is untouched');
+});
+
+test('the format painter keeps a formula intact', () => {
+  const sheet = sheetOf({ B1: { f: '=1+1', v: 2, t: 'n' } });
+  const painted = paintFormat(sheet, ['B1'], { style: { bold: true }, fmt: '#,##0' });
+  assert.equal(at(painted, 'B1').f, '=1+1');
+  assert.equal(at(painted, 'B1').style.bold, true);
+});
+
+test('painting nothing onto an empty cell leaves the file alone', () => {
+  const painted = paintFormat(sheetOf({}), ['C3'], { style: null, fmt: '' });
+  assert.equal(at(painted, 'C3'), undefined);
 });

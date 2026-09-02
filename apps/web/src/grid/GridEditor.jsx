@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  makeSheet, usedRange, newBlockId, toRef, editValue, FUNCTION_NAMES,
+  makeSheet, usedRange, newBlockId, toRef, parseRef, editValue, applyNumFmt, FUNCTION_NAMES, LIMITS,
 } from '../core/index.js';
 
 import Shell from '../components/Shell.jsx';
@@ -9,17 +9,19 @@ import FileMenu from '../components/FileMenu.jsx';
 import FindBar from '../components/FindBar.jsx';
 import ChartDialog from '../components/ChartDialog.jsx';
 import {
-  Ribbon, Group, Btn, Select, ColorRow, Dialog, Field,
+  Ribbon, Group, Btn, Select, NumInput, ColorPicker, Check, Dialog, Field,
   ContextMenu, useContextMenu, ZoomSlider,
 } from '../components/ui.jsx';
 import SheetView from './Sheet.jsx';
 import {
-  setCellInput, patchCells, clearRange, structuralEdit,
+  setCellInput, patchCells, paintFormat, clearRange, structuralEdit,
   rangeToTsv, rangeToFormulaTsv, pasteTsv,
   normalizeRange, rangeRefs, rangeLabel, selectionStats, withRecalc,
   fillRange, mergeSelection, unmergeSelection, mergeCovering,
-  applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn,
+  applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn, autoFitRow,
   resolveTarget, findCells, replaceInCells,
+  edgeOf, currentRegion, fillWithin, cycleRefLocks,
+  sortRange, looksLikeHeader, stepDecimals,
 } from './gridOps.js';
 
 const TABS = ['파일', '홈', '삽입', '수식', '데이터', 'AI'];
@@ -35,8 +37,6 @@ const FORMATS = [
   { value: 'yyyy-mm-dd', label: '2026-09-01' },
 ];
 
-const FILLS = ['#f1f5f9', '#dbeafe', '#dcfce7', '#fee2e2', '#fef3c7', '#ede9fe'];
-const TEXT_COLORS = ['#201f1e', '#107c41', '#c43e1c', '#185abd', '#7719aa', '#605e5c'];
 
 const QUICK_FORMULAS = [
   { label: '합계', build: (r) => `=SUM(${r})` },
@@ -46,15 +46,57 @@ const QUICK_FORMULAS = [
   { label: '최소', build: (r) => `=MIN(${r})` },
 ];
 
+/**
+ * The 수식 tab's categories, in Excel's own order and under its own names.
+ *
+ * A subset per category, not the whole library — Excel's menus are the same
+ * shape, and the formula bar autocompletes from all 200-odd. Every name here is
+ * checked against the core, so the list cannot drift from what is implemented.
+ */
 const FUNCTION_GROUPS = [
-  { label: '수학', names: ['SUM', 'ROUND', 'ABS', 'SQRT', 'POWER', 'MOD', 'SUMPRODUCT'] },
-  { label: '통계', names: ['AVERAGE', 'MEDIAN', 'MIN', 'MAX', 'COUNT', 'COUNTA', 'STDEV'] },
-  { label: '논리', names: ['IF', 'IFS', 'IFERROR', 'AND', 'OR', 'NOT'] },
-  { label: '텍스트', names: ['CONCAT', 'TEXTJOIN', 'LEFT', 'RIGHT', 'MID', 'LEN', 'TRIM', 'SUBSTITUTE', 'TEXT'] },
-  { label: '찾기', names: ['VLOOKUP', 'HLOOKUP', 'INDEX', 'MATCH'] },
-  { label: '날짜', names: ['TODAY', 'NOW', 'DATE', 'YEAR', 'MONTH', 'DAY', 'DAYS'] },
-  { label: '조건부', names: ['SUMIF', 'COUNTIF', 'AVERAGEIF'] },
+  {
+    label: '재무',
+    names: ['PMT', 'FV', 'PV', 'NPER', 'RATE', 'NPV', 'IRR', 'IPMT', 'PPMT', 'SLN', 'SYD', 'DDB'],
+  },
+  { label: '논리', names: ['IF', 'IFS', 'IFERROR', 'IFNA', 'SWITCH', 'AND', 'OR', 'NOT', 'XOR'] },
+  {
+    label: '텍스트',
+    names: ['CONCAT', 'TEXTJOIN', 'LEFT', 'RIGHT', 'MID', 'LEN', 'TRIM', 'SUBSTITUTE', 'REPLACE',
+            'SEARCH', 'FIND', 'REPT', 'TEXT', 'TEXTBEFORE', 'TEXTAFTER', 'EXACT', 'VALUE'],
+  },
+  {
+    label: '날짜 및 시간',
+    names: ['TODAY', 'NOW', 'DATE', 'YEAR', 'MONTH', 'DAY', 'DAYS', 'EDATE', 'EOMONTH', 'DATEDIF',
+            'YEARFRAC', 'NETWORKDAYS', 'WORKDAY', 'WEEKDAY', 'WEEKNUM', 'TIME', 'HOUR', 'MINUTE'],
+  },
+  {
+    label: '찾기/참조',
+    names: ['VLOOKUP', 'HLOOKUP', 'XLOOKUP', 'XMATCH', 'INDEX', 'MATCH', 'LOOKUP', 'CHOOSE',
+            'OFFSET', 'INDIRECT', 'ROW', 'COLUMN', 'ROWS', 'COLUMNS', 'ADDRESS', 'TRANSPOSE',
+            'UNIQUE', 'SORT', 'FILTER', 'SEQUENCE'],
+  },
+  {
+    label: '수학/삼각',
+    names: ['SUM', 'SUMIF', 'SUMIFS', 'SUMPRODUCT', 'ROUND', 'ROUNDUP', 'ROUNDDOWN', 'MROUND',
+            'ABS', 'SQRT', 'POWER', 'EXP', 'LN', 'LOG', 'MOD', 'QUOTIENT', 'INT', 'TRUNC',
+            'CEILING', 'FLOOR', 'EVEN', 'ODD', 'GCD', 'LCM', 'FACT', 'COMBIN', 'PI', 'SIN',
+            'COS', 'TAN', 'ATAN2', 'DEGREES', 'RADIANS', 'RAND', 'RANDBETWEEN', 'SUBTOTAL',
+            'AGGREGATE'],
+  },
+  {
+    label: '통계',
+    names: ['AVERAGE', 'AVERAGEIF', 'AVERAGEIFS', 'MEDIAN', 'MODE', 'MIN', 'MAX', 'MINIFS',
+            'MAXIFS', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'COUNTIFS', 'LARGE', 'SMALL',
+            'RANK', 'PERCENTILE', 'QUARTILE', 'STDEV.S', 'STDEV.P', 'VAR.S', 'VAR.P', 'CORREL',
+            'SLOPE', 'INTERCEPT', 'FORECAST', 'TRIMMEAN'],
+  },
 ];
+
+/** How far PageDown moves — about a screenful of rows, as Excel does. */
+const PAGE_ROWS = 24;
+/** Excel's Ctrl+Shift number-row formats. */
+const NUMBER_FORMAT_KEYS = { 1: '#,##0.00', 3: 'yyyy-mm-dd', 4: '₩#,##0', 5: '0%' };
+const pad2 = (n) => String(n).padStart(2, '0');
 
 const emptyFind = { query: '', replacement: '', matchCase: false, inFormulas: false, at: null, replace: false };
 
@@ -71,6 +113,12 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   const [nameDialog, setNameDialog] = useState(null);
   const [renameDialog, setRenameDialog] = useState(null);
   const [nameBox, setNameBox] = useState(null);
+  /** Ctrl+1: `{ fmt }` while the 셀 서식 dialog is open. */
+  const [formatDialog, setFormatDialog] = useState(null);
+  /** Whether 정렬 should leave the first row alone; guessed, then remembered. */
+  const [headerChoice, setHeaderChoice] = useState(null);
+  const [tabDragFrom, setTabDragFrom] = useState(null);
+  const [tabDragOver, setTabDragOver] = useState(null);
   const [find, setFind] = useState(null);
   const [chartDialog, setChartDialog] = useState(null);
   const [selectedChartId, setSelectedChartId] = useState(null);
@@ -79,9 +127,28 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   const index = Math.min(sheetIndex, Math.max(0, sheets.length - 1));
   const sheet = sheets[index];
   const range = normalizeRange(sel);
+  // Declared up here because Ctrl+End and the 데이터 tab both read it, and the
+  // keyboard effect is defined before the render body.
+  const used = useMemo(() => (sheet ? usedRange(sheet.cells) : null), [sheet]);
 
+  /**
+   * Apply an edit to the active sheet, then recalculate it against the whole
+   * workbook.
+   *
+   * The individual operations recalculate too, but only against the sheet they
+   * were handed; a formula reaching another sheet is left at its stored value
+   * there. This pass is the one that resolves those, so a summary sheet updates
+   * when the sheet it summarises changes.
+   */
   const patchSheet = useCallback(
-    (updater, options) => setItems((list) => list.map((s, i) => (i === index ? updater(s) : s)), options),
+    (updater, options) =>
+      setItems(
+        (list) =>
+          list.map((s, i) =>
+            i === index ? withRecalc(updater(s), list.filter((_, j) => j !== index)) : s
+          ),
+        options
+      ),
     [setItems, index]
   );
 
@@ -106,6 +173,26 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       return { row, col, row2: row, col2: col };
     });
   }, []);
+
+  /**
+   * Ctrl+Arrow: move (or extend) to the edge of the data in that direction.
+   *
+   * Extending keeps the anchor where it was, so Ctrl+Shift+Down from the top of
+   * a column selects the whole column of values — the gesture that precedes
+   * almost every sum.
+   */
+  const jumpTo = useCallback(
+    (direction, extend) => {
+      setSel((current) => {
+        const fromRow = extend ? current.row2 ?? current.row : current.row;
+        const fromCol = extend ? current.col2 ?? current.col : current.col;
+        const edge = edgeOf(sheet, fromRow, fromCol, direction);
+        if (extend) return { ...current, row2: edge.row, col2: edge.col };
+        return { row: edge.row, col: edge.col, row2: edge.row, col2: edge.col };
+      });
+    },
+    [sheet]
+  );
 
   const commitCell = useCallback(
     (value, direction) => {
@@ -159,6 +246,23 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const applyFormat = useCallback((fmt) => patchSheet((s) => patchCells(s, rangeRefs(range), { fmt })), [patchSheet, range]);
   const applyStyle = useCallback((style) => patchSheet((s) => patchCells(s, rangeRefs(range), { style })), [patchSheet, range]);
+
+  /**
+   * 텍스트 줄바꿈, and the row height that has to come with it.
+   *
+   * Excel auto-fits the rows when wrapping is turned on. Without that the
+   * second line is simply hidden, which reads as the text having been lost.
+   */
+  const toggleWrapText = useCallback(() => {
+    const on = !activeCell?.style?.wrap;
+    patchSheet((s) => {
+      let next = patchCells(s, rangeRefs(range), { style: { wrap: on ? true : null } });
+      for (let r = range.r1; r <= range.r2; r++) {
+        next = setRowHeight(next, r, on ? autoFitRow(next, r, used?.maxCol ?? 12) : 0);
+      }
+      return next;
+    });
+  }, [activeCell, patchSheet, range, used]);
   const setBorders = useCallback((preset) => patchSheet((s) => applyBorders(s, range, preset)), [patchSheet, range]);
 
   const merged = sheet ? mergeCovering(sheet, sel.row, sel.col) : null;
@@ -178,6 +282,33 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   );
 
   const doFill = useCallback((source, target) => patchSheet((s) => fillRange(s, source, target)), [patchSheet]);
+
+  /* -------------------------------------------------------- format painter */
+
+  /**
+   * 서식 복사 — pick up one cell's look, then paint it onto a selection.
+   *
+   * Two clicks in Excel and one of the buttons people reach for most: it is how
+   * a heading row gets copied onto the row below without redoing six controls.
+   * Values and formulas are never touched, only `style` and `fmt`.
+   */
+  const [painter, setPainter] = useState(null);
+
+  const pickUpFormat = useCallback(() => {
+    if (painter) {
+      setPainter(null);
+      return;
+    }
+    setPainter({ style: activeCell?.style ?? null, fmt: activeCell?.fmt ?? '' });
+    notify(`${activeRef}의 서식을 집었습니다 — 붙일 곳을 선택하세요`);
+  }, [painter, activeCell, activeRef, notify]);
+
+  const paintSelection = useCallback(() => {
+    if (!painter) return;
+    patchSheet((s) => paintFormat(s, rangeRefs(range), painter));
+    setPainter(null);
+    notify(`${rangeLabel(range)}에 서식을 붙였습니다`);
+  }, [painter, patchSheet, range, notify]);
 
   /* ---------------------------------------------------------------- charts */
 
@@ -214,6 +345,32 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     },
     [patchSheet]
   );
+
+  /*
+   * 정렬 — by the cursor's column, over the whole block the cursor is in.
+   *
+   * Sorting only the highlighted cells is what a spreadsheet must never do:
+   * it separates a row's values from each other. Excel expands the selection to
+   * the surrounding block first, and says which column it sorted by.
+   */
+  const sortHasHeader = headerChoice ?? (sheet ? looksLikeHeader(sheet, currentRegion(sheet, sel.row, sel.col)) : false);
+
+  const doSort = useCallback(
+    (ascending) => {
+      const block = range.r1 === range.r2 && range.c1 === range.c2
+        ? currentRegion(sheet, sel.row, sel.col)
+        : range;
+      patchSheet((s) => sortRange(s, block, ascending, { by: sel.col, hasHeader: sortHasHeader }));
+      notify(
+        `${rangeLabel(block)}을 ${toRef(sel.col, 0).replace(/\d+/, '')}열 기준 ${
+          ascending ? '오름차순' : '내림차순'
+        }으로 정렬했습니다${sortHasHeader ? ' (머리글 행 유지)' : ''}`
+      );
+    },
+    [sheet, range, sel.row, sel.col, sortHasHeader, patchSheet, notify]
+  );
+
+  const setSortHasHeader = useCallback((v) => setHeaderChoice(v), []);
 
   const goTo = useCallback(
     (input) => {
@@ -301,7 +458,10 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       const arrows = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
       if (arrows[e.key]) {
         e.preventDefault();
-        move(arrows[e.key], e.shiftKey);
+        // Ctrl+Arrow jumps to the edge of the data; adding Shift drags the
+        // selection there. Between them they are how a big sheet is navigated.
+        if (mod) jumpTo(arrows[e.key], e.shiftKey);
+        else move(arrows[e.key], e.shiftKey);
         return;
       }
       if (e.key === 'Tab') {
@@ -309,9 +469,28 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         move(e.shiftKey ? 'left' : 'right', false);
         return;
       }
-      if (e.key === 'Enter' || e.key === 'F2') {
+      // A bare Enter opens the cell; Ctrl+Enter is the fill-the-selection
+      // command further down, so it must not be swallowed here.
+      if ((e.key === 'Enter' && !mod) || e.key === 'F2') {
         e.preventDefault();
         setEditing({ value: editValue(activeCell) });
+        return;
+      }
+      // PageDown / PageUp move a screenful, as they do in Excel.
+      if (e.key === 'PageDown' || e.key === 'PageUp') {
+        e.preventDefault();
+        // Ctrl+PageDown is the next sheet — the tab bar without the mouse.
+        if (mod) {
+          setSheetIndex((i) =>
+            Math.min(sheets.length - 1, Math.max(0, i + (e.key === 'PageDown' ? 1 : -1)))
+          );
+          return;
+        }
+        const step = e.key === 'PageDown' ? PAGE_ROWS : -PAGE_ROWS;
+        setSel((c) => {
+          const row = Math.max(0, c.row + step);
+          return e.shiftKey ? { ...c, row2: Math.max(0, (c.row2 ?? c.row) + step) } : { row, col: c.col, row2: row, col2: c.col };
+        });
         return;
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -324,8 +503,91 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         setSel(mod ? { row: 0, col: 0, row2: 0, col2: 0 } : { row: sel.row, col: 0, row2: sel.row, col2: 0 });
         return;
       }
+      // End goes to the last used column of the row; Ctrl+End to the last used
+      // cell of the sheet — the pair Excel uses to find the end of a table.
+      if (e.key === 'End') {
+        e.preventDefault();
+        if (mod) {
+          const bounds = used ?? { maxRow: 0, maxCol: 0 };
+          setSel({ row: bounds.maxRow, col: bounds.maxCol, row2: bounds.maxRow, col2: bounds.maxCol });
+        } else {
+          const edge = edgeOf(sheet, sel.row, sheet.dims?.cols ?? 26, 'left');
+          setSel({ row: sel.row, col: edge.col, row2: sel.row, col2: edge.col });
+        }
+        return;
+      }
       if (e.key === 'Escape' && find) {
         setFind(null);
+        return;
+      }
+      /*
+       * Ctrl+A selects the block the cursor is in, and again the whole sheet —
+       * Excel's two-step, which is what makes it safe to press before a sort.
+       */
+      if (mod && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        const region = currentRegion(sheet, sel.row, sel.col);
+        const same =
+          region.r1 === range.r1 && region.r2 === range.r2 &&
+          region.c1 === range.c1 && region.c2 === range.c2;
+        const target = same
+          ? { r1: 0, r2: Math.max(0, (sheet.dims?.rows ?? 200) - 1), c1: 0, c2: Math.max(0, (sheet.dims?.cols ?? 26) - 1) }
+          : region;
+        setSel({ row: target.r1, col: target.c1, row2: target.r2, col2: target.c2 });
+        return;
+      }
+      // Ctrl+Space selects the columns, Shift+Space the rows.
+      if (e.key === ' ' && (mod || e.shiftKey)) {
+        e.preventDefault();
+        if (mod) {
+          setSel({ row: 0, col: range.c1, row2: Math.max(0, (sheet.dims?.rows ?? 200) - 1), col2: range.c2 });
+        } else {
+          setSel({ row: range.r1, col: 0, row2: range.r2, col2: Math.max(0, (sheet.dims?.cols ?? 26) - 1) });
+        }
+        return;
+      }
+      // Ctrl+Enter — put what is in the active cell into the whole selection,
+      // which is Excel's way of filling a block with one constant.
+      if (mod && e.key === 'Enter') {
+        e.preventDefault();
+        const source = editValue(activeCell);
+        patchSheet((s) => {
+          let next = s;
+          for (const ref of rangeRefs(range)) {
+            const p = parseRef(ref);
+            if (p) next = setCellInput(next, p.row, p.col, source);
+          }
+          return next;
+        });
+        return;
+      }
+      // Ctrl+D / Ctrl+R — 아래로 채우기 · 오른쪽으로 채우기.
+      if (mod && (e.key.toLowerCase() === 'd' || e.key.toLowerCase() === 'r')) {
+        e.preventDefault();
+        patchSheet((s) => fillWithin(s, range, e.key.toLowerCase() === 'd' ? 'down' : 'right'));
+        return;
+      }
+      // Ctrl+; 오늘 날짜, Ctrl+Shift+; 지금 시각 — Excel's own pair.
+      if (mod && (e.key === ';' || e.key === ':')) {
+        e.preventDefault();
+        const now = new Date();
+        const stamp = e.shiftKey
+          ? `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+          : `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+        patchSheet((s) => setCellInput(s, sel.row, sel.col, stamp));
+        return;
+      }
+      // Ctrl+1 — 셀 서식.
+      if (mod && e.key === '1' && !e.shiftKey) {
+        e.preventDefault();
+        setFormatDialog({ fmt: activeCell?.fmt ?? '' });
+        return;
+      }
+      // Ctrl+Shift+1 / 4 / 5 — 쉼표 · 통화 · 백분율, the number formats Excel
+      // puts on the number row.
+      if (mod && e.shiftKey && NUMBER_FORMAT_KEYS[e.key]) {
+        e.preventDefault();
+        applyFormat(NUMBER_FORMAT_KEYS[e.key]);
         return;
       }
       if (mod && e.key.toLowerCase() === 'c') {
@@ -356,7 +618,8 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editing, activeCell, range, sel.row, move, patchSheet, copySelection, cutSelection, toggleStyle, find]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, activeCell, range, sel.row, sel.col, move, jumpTo, patchSheet, copySelection, cutSelection, toggleStyle, find, sheet, used, sheets.length, applyFormat]);
 
   // Native paste so Ctrl+V from Excel or a markdown table works.
   useEffect(() => {
@@ -410,7 +673,6 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   };
 
   const stats = useMemo(() => (sheet ? selectionStats(sheet, range) : null), [sheet, range]);
-  const used = useMemo(() => (sheet ? usedRange(sheet.cells) : null), [sheet]);
 
   if (!sheet) return <div className="center-note">시트를 불러오는 중…</div>;
 
@@ -424,10 +686,12 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     { label: '수식 복사', shortcut: 'Ctrl+Shift+C', onClick: () => copySelection(true) },
     { label: '붙여넣기', shortcut: 'Ctrl+V', onClick: pasteFromClipboard },
     '-',
-    { label: '행 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'row', sel.row, 1)) },
-    { label: '열 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'col', sel.col, 1)) },
-    { label: '행 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'row', sel.row, -1)) },
-    { label: '열 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'col', sel.col, -1)) },
+    // Excel inserts as many rows as are selected, which is the only way to make
+    // room for a block of data without repeating the command.
+    { label: selectedRows > 1 ? `${selectedRows}행 삽입` : '행 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'row', range.r1, selectedRows)) },
+    { label: selectedCols > 1 ? `${selectedCols}열 삽입` : '열 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'col', range.c1, selectedCols)) },
+    { label: selectedRows > 1 ? `${selectedRows}행 삭제` : '행 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'row', range.r1, -selectedRows)) },
+    { label: selectedCols > 1 ? `${selectedCols}열 삭제` : '열 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'col', range.c1, -selectedCols)) },
     '-',
     { label: '이 범위로 차트 만들기', onClick: () => setChartDialog({ mode: 'insert', rangeHint: rangeLabel(range) }), disabled: singleCell },
     '-',
@@ -448,17 +712,34 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   ];
 
   const colMenu = (c) => [
-    { label: '왼쪽에 열 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'col', c, 1)) },
-    { label: '열 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'col', c, -1)) },
+    {
+      label: selectedCols > 1 ? `왼쪽에 ${selectedCols}열 삽입` : '왼쪽에 열 삽입',
+      onClick: () => patchSheet((s) => structuralEdit(s, 'col', c, selectedCols)),
+    },
+    {
+      label: selectedCols > 1 ? `${selectedCols}열 삭제` : '열 삭제',
+      onClick: () => patchSheet((s) => structuralEdit(s, 'col', c, -selectedCols)),
+    },
     '-',
     { label: '너비 자동 맞춤', onClick: () => patchSheet((s) => setColWidth(s, c, autoFitColumn(s, c, used?.maxRow ?? 20))) },
     { label: '기본 너비로', onClick: () => patchSheet((s) => setColWidth(s, c, 0)) },
   ];
 
+  /** How many rows or columns the selection covers — Excel inserts that many. */
+  const selectedRows = range.r2 - range.r1 + 1;
+  const selectedCols = range.c2 - range.c1 + 1;
+
   const rowMenu = (r) => [
-    { label: '위에 행 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'row', r, 1)) },
-    { label: '행 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'row', r, -1)) },
+    {
+      label: selectedRows > 1 ? `위에 ${selectedRows}행 삽입` : '위에 행 삽입',
+      onClick: () => patchSheet((s) => structuralEdit(s, 'row', r, selectedRows)),
+    },
+    {
+      label: selectedRows > 1 ? `${selectedRows}행 삭제` : '행 삭제',
+      onClick: () => patchSheet((s) => structuralEdit(s, 'row', r, -selectedRows)),
+    },
     '-',
+    { label: '높이 자동 맞춤', onClick: () => patchSheet((s) => setRowHeight(s, r, autoFitRow(s, r, used?.maxCol ?? 12))) },
     { label: '기본 높이로', onClick: () => patchSheet((s) => setRowHeight(s, r, 0)) },
   ];
 
@@ -505,25 +786,52 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
             <div className="rcol">
               <Btn small icon="⧉" label="복사" onClick={() => copySelection(false)} title="Ctrl+C" />
               <Btn small icon="✂" label="잘라내기" onClick={cutSelection} title="Ctrl+X" />
+              <Btn
+                small
+                icon="🖌"
+                label={painter ? '여기에 붙이기' : '서식 복사'}
+                title="한 셀의 서식만 다른 셀에 옮깁니다 (값은 그대로)"
+                pressed={!!painter}
+                onClick={painter ? paintSelection : pickUpFormat}
+              />
             </div>
           </Group>
 
           <Group label="글꼴">
             <div className="rcol">
               <div className="rrow">
+                <NumInput
+                  value={activeCell?.style?.fontSize ?? LIMITS.cellPx}
+                  onChange={(v) => applyStyle({ fontSize: v === LIMITS.cellPx ? null : v })}
+                  title="글꼴 크기"
+                  min={6}
+                  max={96}
+                  step={1}
+                />
                 <Btn small icon="B" label="" title="굵게 (Ctrl+B)" pressed={!!activeCell?.style?.bold} onClick={() => toggleStyle('bold')} />
                 <Btn small icon="I" label="" title="기울임 (Ctrl+I)" pressed={!!activeCell?.style?.italic} onClick={() => toggleStyle('italic')} />
                 <Btn small icon="U" label="" title="밑줄 (Ctrl+U)" pressed={!!activeCell?.style?.underline} onClick={() => toggleStyle('underline')} />
               </div>
-              <ColorRow colors={TEXT_COLORS} value={activeCell?.style?.color} onChange={(color) => applyStyle({ color })} title="글자 색" />
+              <ColorPicker
+                value={activeCell?.style?.color}
+                onChange={(color) => applyStyle({ color })}
+                title="글자 색"
+                none="자동"
+                accent={project.manifest?.theme?.accent}
+              />
             </div>
           </Group>
 
           <Group label="채우기 · 테두리">
             <div className="rcol">
               <div className="rrow">
-                <ColorRow colors={FILLS} value={activeCell?.style?.bg} onChange={(bg) => applyStyle({ bg })} title="채우기 색" />
-                <Btn small icon="⌫" label="" title="채우기 지우기" onClick={() => applyStyle({ bg: null })} />
+                <ColorPicker
+                  value={activeCell?.style?.bg}
+                  onChange={(bg) => applyStyle({ bg })}
+                  title="채우기 색"
+                  none="채우기 없음"
+                  accent={project.manifest?.theme?.accent}
+                />
               </div>
               <div className="rrow">
                 <Btn small icon="⊞" label="모두" title="모든 테두리" onClick={() => setBorders(BORDER_PRESETS.all)} />
@@ -553,6 +861,33 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
                   />
                 ))}
               </div>
+              <div className="rrow">
+                {[
+                  ['top', '⤒', '위쪽'],
+                  ['middle', '⇕', '가운데'],
+                  ['bottom', '⤓', '아래쪽'],
+                ].map(([value, icon, title]) => (
+                  <Btn
+                    key={value}
+                    small
+                    icon={icon}
+                    label=""
+                    title={`${title} 맞춤`}
+                    pressed={activeCell?.style?.valign === value}
+                    onClick={() => applyStyle({ valign: value })}
+                  />
+                ))}
+                {/* 텍스트 줄바꿈 — a long label in a narrow column is either
+                    wrapped or lost, and Excel puts this button right here. */}
+                <Btn
+                  small
+                  icon="↵"
+                  label="줄바꿈"
+                  title="텍스트 줄바꿈 — 행 높이도 함께 맞춥니다"
+                  pressed={!!activeCell?.style?.wrap}
+                  onClick={toggleWrapText}
+                />
+              </div>
               <Btn
                 small
                 icon="⿴"
@@ -568,9 +903,15 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
             <div className="rcol">
               <Select value={activeCell?.fmt ?? ''} onChange={applyFormat} options={FORMATS} title="표시 형식" width={128} />
               <div className="rrow">
-                <Btn small label="1,000" title="천 단위 구분" onClick={() => applyFormat('#,##0')} />
-                <Btn small label="%" title="백분율" onClick={() => applyFormat('0.0%')} />
-                <Btn small label="₩" title="통화" onClick={() => applyFormat('₩#,##0')} />
+                <Btn small label="1,000" title="천 단위 구분 (Ctrl+Shift+1)" onClick={() => applyFormat('#,##0')} />
+                <Btn small label="%" title="백분율 (Ctrl+Shift+5)" onClick={() => applyFormat('0.0%')} />
+                <Btn small label="₩" title="통화 (Ctrl+Shift+4)" onClick={() => applyFormat('₩#,##0')} />
+                {/* 자릿수 늘림 · 줄임 — the two buttons beside the format box in
+                    Excel, and the fastest way to make a column of numbers line
+                    up without writing a pattern by hand. */}
+                <Btn small label=".00" title="소수 자릿수 늘림" onClick={() => applyFormat(stepDecimals(activeCell?.fmt, 1))} />
+                <Btn small label=".0" title="소수 자릿수 줄임" onClick={() => applyFormat(stepDecimals(activeCell?.fmt, -1))} />
+                <Btn small icon="⚙" label="" title="셀 서식 (Ctrl+1)" onClick={() => setFormatDialog({ fmt: activeCell?.fmt ?? '' })} />
               </div>
             </div>
           </Group>
@@ -589,7 +930,22 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           </Group>
 
           <Group label="편집">
-            <Btn icon="Σ" label="자동 합계" onClick={() => insertFormula(QUICK_FORMULAS[0].build)} />
+            <div className="rcol">
+              <Btn icon="Σ" label="자동 합계" title="위쪽 또는 왼쪽의 연속 범위를 더합니다" onClick={() => insertFormula(QUICK_FORMULAS[0].build)} />
+              {/* Excel's Σ is a split button: the arrow offers 평균·개수·최대·최소.
+                  Without it those live in another tab, which is one click too
+                  many for the thing people do straight after a sum. */}
+              <Select
+                value=""
+                onChange={(label) => {
+                  const pick = QUICK_FORMULAS.find((f) => f.label === label);
+                  if (pick) insertFormula(pick.build);
+                }}
+                options={[{ value: '', label: '다른 계산…' }, ...QUICK_FORMULAS.map((f) => ({ value: f.label, label: f.label }))]}
+                title="자동 합계 목록"
+                width={92}
+              />
+            </div>
             <Btn icon="🔍" label="찾기" title="Ctrl+F" onClick={() => setFind((f) => f ?? { ...emptyFind })} />
             <Btn
               icon="⌦"
@@ -674,8 +1030,24 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       {tab === '데이터' && (
         <>
           <Group label="정렬">
-            <Btn icon="↑" label="오름차순" title="선택 범위를 첫 열 기준으로 정렬" onClick={() => patchSheet((s) => sortRange(s, range, true))} />
-            <Btn icon="↓" label="내림차순" onClick={() => patchSheet((s) => sortRange(s, range, false))} />
+            <Btn
+              icon="↑"
+              label="오름차순"
+              title={`${toRef(sel.col, 0).replace(/\d+/, '')}열 기준으로 정렬${sortHasHeader ? ' (머리글 행 제외)' : ''}`}
+              onClick={() => doSort(true)}
+            />
+            <Btn
+              icon="↓"
+              label="내림차순"
+              title={`${toRef(sel.col, 0).replace(/\d+/, '')}열 기준으로 내려 정렬${sortHasHeader ? ' (머리글 행 제외)' : ''}`}
+              onClick={() => doSort(false)}
+            />
+            <Check
+              label="머리글 행"
+              title="첫 행을 제목으로 보고 정렬에서 제외합니다"
+              checked={sortHasHeader}
+              onChange={setSortHasHeader}
+            />
           </Group>
           <Group label="틀 고정">
             <Select
@@ -837,6 +1209,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           onResizeCol={(c, width) => patchSheet((s) => setColWidth(s, c, width))}
           onResizeRow={(r, height) => patchSheet((s) => setRowHeight(s, r, height))}
           onAutoFitCol={(c) => patchSheet((s) => setColWidth(s, c, autoFitColumn(s, c, used?.maxRow ?? 20)))}
+          onAutoFitRow={(r) => patchSheet((s) => setRowHeight(s, r, autoFitRow(s, r, used?.maxCol ?? 12)))}
           onContextMenu={(e, info) =>
             ctx.open(
               e,
@@ -854,7 +1227,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           {sheets.map((s, i) => (
             <button
               key={s.id ?? i}
-              className="sheettab"
+              className={`sheettab${tabDragOver === i && tabDragFrom !== i ? ' is-drop' : ''}`}
               aria-current={i === index}
               onClick={() => setSheetIndex(i)}
               onDoubleClick={() => {
@@ -862,7 +1235,26 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
                 setRenameDialog({ name: s.name });
               }}
               onContextMenu={(e) => ctx.open(e, sheetTabMenu(i))}
-              title={`${s.name} — 두 번 누르면 이름 변경, 우클릭으로 메뉴`}
+              /* Dragging a sheet tab is how a workbook gets reordered in Excel;
+                 the right-click menu is the fallback, not the way. */
+              draggable
+              onDragStart={() => setTabDragFrom(i)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setTabDragOver(i);
+              }}
+              onDragLeave={() => setTabDragOver((v) => (v === i ? null : v))}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (tabDragFrom !== null && tabDragFrom !== i) moveSheet(tabDragFrom, i);
+                setTabDragFrom(null);
+                setTabDragOver(null);
+              }}
+              onDragEnd={() => {
+                setTabDragFrom(null);
+                setTabDragOver(null);
+              }}
+              title={`${s.name} — 두 번 누르면 이름 변경, 끌어서 순서 변경, 우클릭으로 메뉴`}
             >
               {s.name}
             </button>
@@ -923,6 +1315,46 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         />
       )}
 
+      {formatDialog && (
+        <Dialog
+          title={`셀 서식 — ${rangeLabel(range)}`}
+          confirmLabel="적용"
+          onCancel={() => setFormatDialog(null)}
+          onConfirm={() => {
+            applyFormat(formatDialog.fmt);
+            setFormatDialog(null);
+          }}
+        >
+          <p>
+            표시 형식은 값을 바꾸지 않고 보이는 모양만 바꿉니다. <code>.cells.json</code>의{' '}
+            <code>fmt</code>에 이 패턴이 그대로 기록되고, Excel로 내보낼 때도 같은 패턴이 됩니다.
+          </p>
+          <Field label="범주">
+            <select
+              value={FORMATS.some((f) => f.value === formatDialog.fmt) ? formatDialog.fmt : ''}
+              onChange={(e) => setFormatDialog({ ...formatDialog, fmt: e.target.value })}
+            >
+              {FORMATS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="형식 코드">
+            <input
+              value={formatDialog.fmt}
+              onChange={(e) => setFormatDialog({ ...formatDialog, fmt: e.target.value })}
+              placeholder="#,##0.00"
+              spellCheck={false}
+            />
+          </Field>
+          <p className="hint">
+            보기: <code>{applyNumFmt(1234.5, formatDialog.fmt) || '1234.5'}</code>
+          </p>
+        </Dialog>
+      )}
+
       {renameDialog && (
         <Dialog
           title="시트 이름 변경"
@@ -972,6 +1404,15 @@ function FormulaInput({ value, onCommit }) {
             setDraft(value ?? '');
             setHint(null);
             e.currentTarget.blur();
+          } else if (e.key === 'F4') {
+            // Same $ cycle as in the cell, because half of formula writing
+            // happens up here.
+            const next = cycleRefLocks(draft, e.currentTarget.selectionStart);
+            if (!next) return;
+            e.preventDefault();
+            setDraft(next.value);
+            const el = e.currentTarget;
+            requestAnimationFrame(() => el.setSelectionRange(next.caret, next.caret));
           }
         }}
         onBlur={() => setHint(null)}
@@ -1007,38 +1448,6 @@ function suggestRange(sheet, row, col) {
   if (cstart <= col - 1) return `${toRef(cstart, row)}:${toRef(col - 1, row)}`;
 
   return toRef(col, Math.max(0, row - 1));
-}
-
-/** Sort the selected block by its first column, carrying whole rows along. */
-function sortRange(sheet, range, ascending) {
-  const rows = [];
-  for (let r = range.r1; r <= range.r2; r++) {
-    const cells = [];
-    for (let c = range.c1; c <= range.c2; c++) cells.push(sheet.cells[toRef(c, r)] ?? null);
-    rows.push(cells);
-  }
-
-  const key = (cells) => {
-    const v = cells[0]?.v;
-    return v === null || v === undefined ? '' : v;
-  };
-  rows.sort((a, b) => {
-    const av = key(a);
-    const bv = key(b);
-    const numeric = typeof av === 'number' && typeof bv === 'number';
-    const cmp = numeric ? av - bv : String(av).localeCompare(String(bv), 'ko');
-    return ascending ? cmp : -cmp;
-  });
-
-  const cells = { ...sheet.cells };
-  rows.forEach((rowCells, i) => {
-    rowCells.forEach((cell, j) => {
-      const ref = toRef(range.c1 + j, range.r1 + i);
-      if (cell) cells[ref] = cell;
-      else delete cells[ref];
-    });
-  });
-  return withRecalc({ ...sheet, cells });
 }
 
 function uniqueSheetName(list) {

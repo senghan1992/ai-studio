@@ -1,3 +1,14 @@
+/* The one font the documents are drawn in. Bundled rather than fetched, so the
+   app opens the same on Windows, macOS and Linux and with no network at all.
+   Pretendard, SIL Open Font License 1.1 — src/fonts/OFL.txt. */
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("./fonts/PretendardVariable.woff2") format("woff2-variations");
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ============================================================ foundations */
 
 :root {
@@ -23,7 +34,11 @@
   --radius: 4px;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, .08), 0 2px 6px rgba(0, 0, 0, .06);
   --shadow-2: 0 4px 12px rgba(0, 0, 0, .12), 0 12px 28px rgba(0, 0, 0, .12);
-  --font: "Segoe UI", -apple-system, "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --font: "Pretendard Variable", Pretendard, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif;
+  /* What a document, slide or sheet is drawn in. The same family as the chrome
+     today, named separately because an imported file's fonts all resolve to it
+     and the ribbon's own font is not part of the document. */
+  --doc-font: var(--font);
   --mono: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 
@@ -284,6 +299,7 @@ button { font: inherit; color: inherit; }
 }
 .sorter-item__no { width: 16px; font-size: 11px; color: var(--ink-3); padding-top: 4px; flex: none; }
 .sorter-item__thumb {
+  /* The ratio comes from the slide itself; this is only the fallback. */
   flex: 1; aspect-ratio: 16 / 9; background: #fff; position: relative;
   border: 2px solid var(--line); border-radius: 3px; overflow: hidden;
 }
@@ -308,6 +324,7 @@ button { font: inherit; color: inherit; }
 .canvas {
   position: relative; background: #fff; box-shadow: var(--shadow-2);
   flex: none; transform-origin: center center;
+  font-family: var(--doc-font);
 }
 
 .block {
@@ -360,6 +377,7 @@ button { font: inherit; color: inherit; }
 .page {
   background: #fff; box-shadow: var(--shadow-2); position: relative;
   flex: none;
+  font-family: var(--doc-font);
 }
 .page__inner { height: 100%; overflow: hidden; }
 
@@ -443,15 +461,21 @@ button { font: inherit; color: inherit; }
 .cell--n { justify-content: flex-end; }
 .cell--e { color: var(--danger); justify-content: flex-end; }
 .cell--b { justify-content: center; text-transform: uppercase; }
+/* 텍스트 줄바꿈: the label wraps inside the column instead of running under the
+   neighbour, which is what makes a narrow header column readable. */
+.cell--wrap { white-space: pre-wrap; word-break: break-word; align-items: flex-start; padding-top: 3px; }
 
 td.is-selected { box-shadow: inset 0 0 0 2px var(--grid); }
 td.is-inrange { background: rgba(16, 124, 65, .08); }
 td.is-dep { box-shadow: inset 0 0 0 1px #8764b8; }
 
+/* A textarea so Alt+Enter can put a newline in the cell, styled to look and
+   behave like the single-line box it replaces. */
 .cell__editor {
   width: 100%; height: 100%; border: 0; outline: 2px solid var(--grid);
-  font-family: var(--mono); font-size: 13px; padding: 0 4px;
+  font-family: var(--mono); font-size: 13px; padding: 1px 4px;
   background: #fff; color: var(--ink);
+  display: block; resize: none; overflow: hidden; line-height: 1.5;
 }
 
 .sheettabs {
@@ -468,6 +492,7 @@ td.is-dep { box-shadow: inset 0 0 0 1px #8764b8; }
   background: var(--surface); border-color: var(--line); border-bottom-color: var(--surface);
   font-weight: 600; color: var(--grid);
 }
+.sheettab.is-drop { box-shadow: inset 2px 0 0 var(--grid); }
 .sheettab__add { border: 0; background: none; cursor: pointer; padding: 5px 10px; color: var(--ink-2); font-size: 15px; }
 .sheettab__add:hover { background: var(--hover); border-radius: 4px; }
 
@@ -512,7 +537,16 @@ td.is-dep { box-shadow: inset 0 0 0 1px #8764b8; }
 .md h3 { font-size: 1.2em; }
 .md h4 { font-size: 1.05em; }
 .md p { margin: .35em 0; }
+/* A block that states its own text size means that size, heading or not: the
+   imported 19px of a Word `Heading 1` is 19px, not 19 times the heading step.
+   Without this the stylesheet's own scale would win and the ribbon's font-size
+   box would have no effect on a heading. */
+.md--sized h1, .md--sized h2, .md--sized h3, .md--sized h4,
+.md--sized h5, .md--sized h6 { font-size: 1em; }
 .md ul, .md ol { margin: .35em 0; padding-left: 1.35em; }
+/* PowerPoint steps a body placeholder 32 - 28 - 24pt, so a sub-bullet on a slide
+   is smaller than its parent. Word does not, which is why this is slide-only. */
+.md--slide ul ul, .md--slide ol ol, .md--slide ul ol, .md--slide ol ul { font-size: .875em; }
 .md li { margin: .18em 0; }
 .md li::marker { color: var(--accent); }
 .md a { color: var(--focus); }
@@ -564,6 +598,33 @@ td.is-dep { box-shadow: inset 0 0 0 1px #8764b8; }
 .dialog__foot {
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 12px 20px 18px;
+}
+
+/* ------------------------------------------------------- shortcut sheet */
+
+.dialog--wide { width: min(880px, 100%); display: flex; flex-direction: column; max-height: min(86vh, 900px); }
+.dialog--wide .dialog__body { overflow: auto; }
+
+.shortcuts { columns: 2; column-gap: 26px; }
+@media (max-width: 700px) { .shortcuts { columns: 1; } }
+
+.shortcuts__group { break-inside: avoid; margin: 0 0 14px; }
+.shortcuts__group h3 {
+  margin: 0 0 5px; font-size: 12px; font-weight: 700; color: var(--accent);
+  text-transform: none; letter-spacing: .01em;
+}
+.shortcuts__list {
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 10px;
+  margin: 0; align-items: baseline;
+}
+.shortcuts__list dt { white-space: nowrap; }
+.shortcuts__list dd { margin: 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+.shortcuts__or { color: var(--ink-3); font-size: 11px; }
+.shortcuts kbd {
+  display: inline-block; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid var(--line); border-bottom-width: 2px;
+  background: var(--surface-2); font-family: var(--mono); font-size: 11px;
+  color: var(--ink); white-space: nowrap;
 }
 
 .btn {
@@ -831,10 +892,74 @@ mark.findhit.is-current { background: #fb923c; color: #fff; }
   padding: 12px 20px; color: #e5e7eb; font-size: 14px; line-height: 1.6;
   background: rgba(0,0,0,.8); white-space: pre-wrap;
 }
+/* B / W blank the whole screen, above the stage and the notes but below the
+   control bar so there is still a way out with the mouse. */
+.slideshow__blank { position: absolute; inset: 0; z-index: 10; cursor: pointer; }
+/* A shape's geometry sits behind its text, exactly as on the canvas. */
+.slideshow__block > .shape { position: absolute; inset: 0; width: 100%; height: 100%; }
 
 /* ============================================================ doc pages */
 
 .page + .page { margin-top: 20px; }
+
+/* ------------------------------------------------------- colour picker */
+
+.colorbtn {
+  display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 5px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 3px;
+  cursor: pointer; font: inherit;
+}
+.colorbtn:hover:not(:disabled) { background: var(--hover); }
+.colorbtn:disabled { opacity: .45; cursor: default; }
+.colorbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.colorbtn--sm { height: 22px; }
+.colorbtn__swatch {
+  width: 16px; height: 16px; border-radius: 2px; border: 1px solid rgba(0, 0, 0, .18);
+  display: inline-block; flex: none;
+}
+/* "No fill" is drawn the way Office draws it: a red slash across white. */
+.colorbtn__swatch.is-none {
+  background:
+    linear-gradient(to bottom right, transparent calc(50% - 1px), var(--danger) calc(50% - 1px),
+      var(--danger) calc(50% + 1px), transparent calc(50% + 1px)),
+    #fff;
+}
+.colorbtn__caret { font-size: 9px; color: var(--ink-3); }
+
+.palette { padding: 8px; width: 214px; }
+.palette__label {
+  margin: 2px 0 5px; font-size: 10.5px; font-weight: 600; color: var(--ink-3);
+}
+.palette__grid {
+  display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; margin-bottom: 8px;
+}
+.palette .swatch { width: 100%; height: 16px; border-radius: 2px; }
+.palette__foot { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line-2); padding-top: 6px; }
+.palette__item {
+  display: flex; align-items: center; gap: 7px; padding: 4px 5px; border: 0; border-radius: 3px;
+  background: none; font: inherit; font-size: 12px; color: var(--ink); cursor: pointer; text-align: left;
+}
+.palette__item:hover { background: var(--hover); }
+.palette__item input[type="color"] {
+  width: 0; height: 0; opacity: 0; position: absolute; pointer-events: none;
+}
+
+/* What an import converted, listed before the project opens. */
+.importnotes {
+  margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px;
+  font-size: 12.5px; color: var(--ink); line-height: 1.5; max-height: 40vh; overflow: auto;
+}
+.importnotes li::marker { color: var(--accent); }
+
+/* Running heads. Part of the document, so they print; the page counter beside
+   them is an editing aid and does not. */
+.running {
+  position: absolute; display: flex; align-items: baseline;
+  color: var(--ink-2); pointer-events: none;
+}
+.running__slot { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; }
+.running__slot:nth-child(2) { text-align: center; }
+.running__slot:nth-child(3) { text-align: right; }
 
 .pagenum {
   position: absolute; bottom: 10px; left: 0; right: 0; text-align: center;
@@ -873,7 +998,66 @@ mark.findhit.is-current { background: #fb923c; color: #fff; }
   .page:last-child { break-after: auto; page-break-after: auto; }
   .docblock:hover, .docblock.is-selected { background: none !important; box-shadow: none !important; }
   .docblock__badge, .pagebreak, .outline-item { display: none !important; }
-  .pagenum { color: #6b7280 !important; }
+  /* ------------------------------------------------------- colour picker */
+
+.colorbtn {
+  display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 5px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 3px;
+  cursor: pointer; font: inherit;
+}
+.colorbtn:hover:not(:disabled) { background: var(--hover); }
+.colorbtn:disabled { opacity: .45; cursor: default; }
+.colorbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.colorbtn--sm { height: 22px; }
+.colorbtn__swatch {
+  width: 16px; height: 16px; border-radius: 2px; border: 1px solid rgba(0, 0, 0, .18);
+  display: inline-block; flex: none;
+}
+/* "No fill" is drawn the way Office draws it: a red slash across white. */
+.colorbtn__swatch.is-none {
+  background:
+    linear-gradient(to bottom right, transparent calc(50% - 1px), var(--danger) calc(50% - 1px),
+      var(--danger) calc(50% + 1px), transparent calc(50% + 1px)),
+    #fff;
+}
+.colorbtn__caret { font-size: 9px; color: var(--ink-3); }
+
+.palette { padding: 8px; width: 214px; }
+.palette__label {
+  margin: 2px 0 5px; font-size: 10.5px; font-weight: 600; color: var(--ink-3);
+}
+.palette__grid {
+  display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; margin-bottom: 8px;
+}
+.palette .swatch { width: 100%; height: 16px; border-radius: 2px; }
+.palette__foot { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line-2); padding-top: 6px; }
+.palette__item {
+  display: flex; align-items: center; gap: 7px; padding: 4px 5px; border: 0; border-radius: 3px;
+  background: none; font: inherit; font-size: 12px; color: var(--ink); cursor: pointer; text-align: left;
+}
+.palette__item:hover { background: var(--hover); }
+.palette__item input[type="color"] {
+  width: 0; height: 0; opacity: 0; position: absolute; pointer-events: none;
+}
+
+/* What an import converted, listed before the project opens. */
+.importnotes {
+  margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px;
+  font-size: 12.5px; color: var(--ink); line-height: 1.5; max-height: 40vh; overflow: auto;
+}
+.importnotes li::marker { color: var(--accent); }
+
+/* Running heads. Part of the document, so they print; the page counter beside
+   them is an editing aid and does not. */
+.running {
+  position: absolute; display: flex; align-items: baseline;
+  color: var(--ink-2); pointer-events: none;
+}
+.running__slot { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; }
+.running__slot:nth-child(2) { text-align: center; }
+.running__slot:nth-child(3) { text-align: right; }
+
+.pagenum { color: #6b7280 !important; }
 }
 
 /* The core failed to load — the app cannot run without it, so this replaces the
@@ -903,4 +1087,363 @@ mark.findhit.is-current { background: #fb923c; color: #fff; }
   background: var(--surface-2, #f1f5f9);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.9em;
+}
+
+/* ---------------------------------------------------------------- shapes */
+
+/* A shape's geometry is an SVG behind its text, filling the block exactly. The
+   text sits on top in the normal flow, so a shape with a caption behaves like
+   one in Office: the caption is centred in the geometry, not beside it. */
+.shape {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- tables */
+
+.tableblock {
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: .95em;
+}
+.tableblock th,
+.tableblock td {
+  border: 1px solid var(--line, #d1d5db);
+  padding: .28em .5em;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.tableblock th {
+  background: var(--surface-2, #f1f5f9);
+  font-weight: 700;
+}
+.tableblock td.is-banded {
+  background: var(--surface-1, #f8fafc);
+}
+/* Cell markdown renders as inline content; a stray margin would break the row
+   height the layout asked for. */
+.tableblock th > :first-child,
+.tableblock td > :first-child { margin-top: 0; }
+.tableblock th > :last-child,
+.tableblock td > :last-child { margin-bottom: 0; }
+.tableblock p { margin: 0; }
+
+.tableblock--borderless th,
+.tableblock--borderless td {
+  border: none;
+}
+.tableblock--borderless th {
+  background: none;
+  border-bottom: 2px solid var(--line, #d1d5db);
+}
+.tableblock--plain td.is-banded {
+  background: none;
+}
+
+/* ------------------------------------------------------------ file import */
+
+.newcard--open {
+  border-style: dashed;
+}
+.newcard__icon--open {
+  background: var(--surface-2, #f1f5f9);
+  color: var(--ink-muted, #6b7280);
+  font-size: 1.25em;
+}
+/* The whole launcher is a drop target, so the cue belongs on the launcher. */
+.launcher.is-dropping {
+  outline: 2px dashed var(--accent, #4f46e5);
+  outline-offset: -10px;
+}
+.launcher.is-dropping .newcard--open {
+  border-color: var(--accent, #4f46e5);
+  background: var(--surface-1, #f8fafc);
+}
+
+/* ------------------------------------------------- ribbon pop-out galleries */
+
+/* Office anchors a gallery under its ribbon button, so the button stays visible
+   as the pressed state while the gallery is open. */
+.ribbon__popholder {
+  position: relative;
+}
+
+/* A menu lives in `document.body`, not in the toolbar that opened it — the
+   ribbon scrolls sideways and would otherwise cut it off at its own edge. */
+.popover {
+  position: fixed;
+  z-index: 300;
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #d1d5db);
+  border-radius: 6px;
+  box-shadow: var(--shadow-2, 0 8px 24px rgb(0 0 0 / 18%));
+  /* Set by the component from the room left below the control. */
+  max-height: var(--popover-max, 70vh);
+  overflow: auto;
+}
+
+.gallery {
+  width: 340px;
+  max-height: min(60vh, var(--popover-max, 60vh));
+  display: flex;
+  flex-direction: column;
+}
+.gallery__head {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line, #e5e7eb);
+}
+.gallery__search {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line, #d1d5db);
+  border-radius: 4px;
+  font: inherit;
+}
+.gallery__close {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0 4px;
+  color: var(--ink-muted, #6b7280);
+}
+.gallery__body {
+  overflow-y: auto;
+  padding: 4px 8px 10px;
+}
+.gallery__group h3 {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-muted, #6b7280);
+}
+.gallery__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+  gap: 2px;
+}
+.gallery__item {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+  color: var(--accent, #4f46e5);
+  padding: 0;
+}
+.gallery__item:hover,
+.gallery__item:focus-visible {
+  border-color: var(--accent, #4f46e5);
+  background: var(--surface-1, #f8fafc);
+}
+/* The name is the tooltip; showing it in the cell would leave room for four
+   shapes a row instead of eight. */
+.gallery__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.gallery__empty {
+  padding: 12px 4px;
+  color: var(--ink-muted, #6b7280);
+}
+
+.tablepicker {
+  padding: 8px;
+}
+.tablepicker__row {
+  display: flex;
+  gap: 2px;
+}
+.tablepicker__row + .tablepicker__row {
+  margin-top: 2px;
+}
+.tablepicker__cell {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--line, #d1d5db);
+  background: var(--surface, #fff);
+  cursor: pointer;
+}
+.tablepicker__cell.is-on {
+  border-color: var(--accent, #4f46e5);
+  background: color-mix(in srgb, var(--accent, #4f46e5) 22%, transparent);
+}
+.tablepicker__caption {
+  margin-top: 6px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-muted, #6b7280);
+}
+
+/* ------------------------------------------------- rotate & adjust handles */
+
+/* The rotate handle rides a short stem above the top edge, as in Office. */
+.handle--rotate {
+  left: 50%;
+  top: -26px;
+  margin-left: -5px;
+  border-radius: 50%;
+  cursor: grab;
+  background: var(--surface, #fff);
+  border: 1.5px solid var(--accent, #4f46e5);
+}
+.handle--rotate::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: 16px;
+  margin-left: -0.5px;
+  background: var(--accent, #4f46e5);
+}
+.handle--rotate::after {
+  content: '⟳';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--accent, #4f46e5);
+}
+
+/* A yellow diamond, which is what Office uses for a geometry adjust. */
+.handle--adjust {
+  width: 9px;
+  height: 9px;
+  background: #ffc000;
+  border: 1px solid #7a5c00;
+  border-radius: 1px;
+  cursor: pointer;
+}
+
+/* The rubber band while drawing a new shape. */
+.drawband {
+  position: absolute;
+  border: 1px dashed var(--accent, #4f46e5);
+  background: color-mix(in srgb, var(--accent, #4f46e5) 8%, transparent);
+  pointer-events: none;
+}
+
+/* ----------------------------------------------------------- table editing */
+
+.tableblock.is-editable th,
+.tableblock.is-editable td {
+  cursor: cell;
+}
+.tableblock td.is-active,
+.tableblock th.is-active {
+  outline: 2px solid var(--accent, #4f46e5);
+  outline-offset: -2px;
+}
+.tableblock__editor {
+  display: block;
+  width: 100%;
+  min-height: 1.4em;
+  margin: -0.28em -0.5em;
+  padding: 0.28em 0.5em;
+  border: none;
+  background: var(--surface, #fff);
+  font: inherit;
+  color: inherit;
+  resize: none;
+  overflow: hidden;
+}
+.tableblock__editor:focus {
+  outline: none;
+}
+
+/* --------------------------------------------------------- contextual tabs */
+
+/* Office sets contextual tabs apart to the right of the fixed ones, under a
+   heading that names what they act on. */
+.ribbon__context {
+  display: inline-flex;
+  align-items: flex-end;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line, #d1d5db);
+}
+.ribbon__contextlabel {
+  align-self: center;
+  margin-right: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--accent, #4f46e5);
+  text-transform: none;
+}
+.ribbon__tab--context[aria-selected='true'] {
+  color: var(--accent, #4f46e5);
+}
+
+/* -------------------------------------------------- ribbon layout helpers */
+
+/* Contextual groups stack two or three controls where Office stacks them. */
+.ribbon__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ribbon__row {
+  display: flex;
+  gap: 3px;
+}
+.ribbon__field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-muted, #6b7280);
+}
+.ribbon__field input {
+  width: 62px;
+  padding: 2px 4px;
+  border: 1px solid var(--line, #d1d5db);
+  border-radius: 3px;
+  font: inherit;
+}
+.ribbon__field input:disabled {
+  opacity: 0.5;
+}
+.ribbon__note {
+  align-self: center;
+  font-size: 11px;
+  color: var(--ink-muted, #6b7280);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.ribbon__check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ribbon__check.is-disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ribbon__check input {
+  margin: 0;
+}
+
+/* A table sits inset inside its block, so the ring around it stays grabbable —
+   that ring is how a table is moved, as its border is in Office. */
+.block[aria-label^='table'] .tableblock,
+.tableblock.is-editable {
+  margin: 4px;
 }

@@ -55,6 +55,16 @@ jobs:
       - name: web tests
         run: npm run test:web
 
+      - name: import fixtures
+        # Real files from other implementations, so the importers are checked
+        # against something this project did not write.
+        run: |
+          python3 -m pip install --quiet openpyxl python-pptx python-docx
+          python3 scripts/make-fixtures.py /tmp/office-fixtures
+          cargo run -q -p ai-import --example probe -- "/tmp/office-fixtures/excel.xlsx"
+          cargo run -q -p ai-import --example probe-deck -- "/tmp/office-fixtures/deck.pptx"
+          cargo run -q -p ai-import --example probe-doc -- "/tmp/office-fixtures/doc.docx"
+
       - name: end to end
         run: |
           cargo build --release -p ai-studio-serve

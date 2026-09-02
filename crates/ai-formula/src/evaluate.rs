@@ -86,18 +86,49 @@ pub fn value_to_json(v: &Value) -> Json {
 /// Named ranges: a name maps to a reference string, a range string, or a literal.
 pub type Names = IndexMap<String, Json>;
 
+/// The other sheets a formula can reach, by lower-cased name.
+///
+/// Borrowed rather than owned: recalculation reads the sibling sheets and never
+/// writes to them.
+pub type Book<'a> = HashMap<String, &'a IndexMap<String, Cell>>;
+
+/// A workbook's sheets as a `Book`, keyed for case-insensitive lookup.
+pub fn book_of<'a, I>(sheets: I) -> Book<'a>
+where
+    I: IntoIterator<Item = (&'a str, &'a IndexMap<String, Cell>)>,
+{
+    sheets
+        .into_iter()
+        .map(|(name, cells)| (name.to_lowercase(), cells))
+        .collect()
+}
+
 /// What the evaluator needs from its surroundings.
 pub trait Context {
     fn get_value(&self, reference: &str) -> Value;
 
+    /// The address of the cell being evaluated, for `ROW()` and `COLUMN()` with
+    /// no argument. `None` when the caller is evaluating a loose formula.
+    fn current_ref(&self) -> Option<String> {
+        None
+    }
+
+    /// Called when something in the formula could not be resolved: a sheet this
+    /// context does not have, or a function this build does not implement.
+    ///
+    /// The point is not the error — that is already the returned value — but that
+    /// the *caller* can decide not to overwrite a cached value it cannot beat.
+    fn note_unresolved(&self) {}
+
     fn get_range(&self, range: &str) -> Value {
-        let Some(r) = parse_range(range) else {
+        let (sheet, local) = crate::refs::split_sheet(range);
+        let Some(r) = parse_range(local) else {
             return err(REF_ERR);
         };
         let cells: Vec<(String, Value)> = expand_range(&r)
             .into_iter()
             .map(|reference| {
-                let v = self.get_value(&reference);
+                let v = self.get_value(&crate::refs::with_sheet(sheet, &reference));
                 (reference, v)
             })
             .collect();
@@ -117,14 +148,39 @@ pub trait Context {
 pub struct MapContext<'a> {
     pub cells: &'a IndexMap<String, Cell>,
     pub names: &'a Names,
+    /// The sheet `cells` belongs to, so `Q3!A1` written on sheet Q3 resolves
+    /// locally. Empty when the caller has only one anonymous sheet.
+    pub sheet: &'a str,
+    pub book: &'a Book<'a>,
+}
+
+impl<'a> MapContext<'a> {
+    /// A context with no sibling sheets, which is what most callers have.
+    pub fn new(cells: &'a IndexMap<String, Cell>, names: &'a Names) -> MapContext<'a> {
+        static EMPTY: std::sync::LazyLock<Book<'static>> = std::sync::LazyLock::new(Book::new);
+        MapContext {
+            cells,
+            names,
+            sheet: "",
+            book: &EMPTY,
+        }
+    }
 }
 
 impl Context for MapContext<'_> {
     fn get_value(&self, reference: &str) -> Value {
-        self.cells
-            .get(&bare_ref(reference))
-            .map(|c| c.value())
-            .unwrap_or(Value::Blank)
+        let key = bare_ref(reference);
+        let (sheet, local) = crate::refs::split_sheet(&key);
+        let cells = match sheet {
+            None => Some(self.cells),
+            Some(name) if name.eq_ignore_ascii_case(self.sheet) => Some(self.cells),
+            Some(name) => self.book.get(&name.to_lowercase()).copied(),
+        };
+        let Some(cells) = cells else {
+            self.note_unresolved();
+            return err(REF_ERR);
+        };
+        cells.get(local).map(|c| c.value()).unwrap_or(Value::Blank)
     }
 
     fn get_name(&self, name: &str) -> Option<Json> {
@@ -151,11 +207,16 @@ pub fn evaluate(ast: &Node, ctx: &dyn Context) -> Value {
         Node::Name(name) => match ctx.get_name(name) {
             None => err(NAME_ERR),
             Some(Json::String(target)) => {
-                if parse_range(&target).is_some() {
-                    ctx.get_range(&target)
-                } else if parse_ref(&target).is_some() {
+                // A name can point into another sheet — `데이터!A1:D5` — so the
+                // sheet part is set aside before the shape is recognised and put
+                // back before the lookup.
+                let (sheet, local) = crate::refs::split_sheet(&target);
+                if parse_range(local).is_some() {
+                    ctx.get_range(&bare_ref(&target))
+                } else if parse_ref(local).is_some() {
                     ctx.get_value(&bare_ref(&target))
                 } else {
+                    let _ = sheet;
                     Value::Text(target)
                 }
             }
@@ -173,13 +234,142 @@ pub fn evaluate(ast: &Node, ctx: &dyn Context) -> Value {
             binary(*op, &evaluate(left, ctx), &evaluate(right, ctx))
         }
         Node::Call { name, args } => {
+            // A few functions need the *reference* an argument is, not the value
+            // it holds: `ROW(A5)` is 5 whatever A5 contains. Those are answered
+            // here, where the syntax tree is still in hand.
+            if let Some(value) = reference_call(name, args, ctx) {
+                return value;
+            }
             let args: Vec<Value> = args.iter().map(|a| evaluate(a, ctx)).collect();
-            functions::call(name, &args).unwrap_or_else(|| err(NAME_ERR))
+            functions::call(name, &args).unwrap_or_else(|| {
+                // A function this build does not have. The formula's own text is
+                // kept either way; what the context decides is whether the value
+                // beside it is worth overwriting with `#NAME?`.
+                ctx.note_unresolved();
+                err(NAME_ERR)
+            })
         }
     }
 }
 
+/// The functions whose arguments are references rather than values.
+///
+/// `None` means this is not one of them. Everything here would be impossible in
+/// [`functions`], which sees only the evaluated arguments — by then `A5` is the
+/// number 42 and its address is gone.
+fn reference_call(name: &str, args: &[Node], ctx: &dyn Context) -> Option<Value> {
+    /// The address an argument names, if it names one.
+    fn address(node: &Node) -> Option<String> {
+        match node {
+            Node::Ref(r) => Some(bare_ref(r)),
+            Node::Range(r) => Some(bare_ref(r)),
+            _ => None,
+        }
+    }
+
+    match name {
+        "ROW" | "COLUMN" => {
+            let reference = match args.first() {
+                None => ctx.current_ref()?,
+                Some(node) => address(node)?,
+            };
+            let (_, local) = crate::refs::split_sheet(&reference);
+            // A range answers with its top-left, which is what Excel does when
+            // the result cannot spill.
+            let first = local.split(':').next().unwrap_or(local);
+            let cell = parse_ref(first)?;
+            Some(Value::Number(if name == "ROW" {
+                cell.row as f64 + 1.0
+            } else {
+                cell.col as f64 + 1.0
+            }))
+        }
+        "INDIRECT" => {
+            let target = crate::values::to_text(&evaluate(args.first()?, ctx));
+            let (_, local) = crate::refs::split_sheet(&target);
+            let bare: String = local.chars().filter(|c| *c != '$').collect();
+            Some(if bare.contains(':') {
+                ctx.get_range(&bare_ref(&target))
+            } else if parse_ref(&bare).is_some() {
+                ctx.get_value(&bare_ref(&target))
+            } else {
+                err(REF_ERR)
+            })
+        }
+        "OFFSET" => {
+            let base = address(args.first()?)?;
+            let (sheet, local) = crate::refs::split_sheet(&base);
+            let start = parse_ref(local.split(':').next().unwrap_or(local))?;
+            let number = |i: usize, default: f64| -> Option<f64> {
+                match args.get(i) {
+                    None => Some(default),
+                    Some(node) => match crate::values::num_of(&evaluate(node, ctx)) {
+                        Ok(n) => Some(n.trunc()),
+                        Err(_) => None,
+                    },
+                }
+            };
+            let (dr, dc) = (number(1, 0.0)?, number(2, 0.0)?);
+            // Height and width default to the shape of the reference, which for
+            // a single cell is 1x1.
+            let (height, width) = (number(3, 1.0)?.max(1.0), number(4, 1.0)?.max(1.0));
+            let row = start.row as f64 + dr;
+            let col = start.col as f64 + dc;
+            if row < 0.0 || col < 0.0 {
+                return Some(err(REF_ERR));
+            }
+            let top = crate::refs::to_ref(col as usize, row as usize);
+            Some(if height == 1.0 && width == 1.0 {
+                ctx.get_value(&crate::refs::with_sheet(sheet, &top))
+            } else {
+                let bottom = crate::refs::to_ref(
+                    (col + width - 1.0) as usize,
+                    (row + height - 1.0) as usize,
+                );
+                ctx.get_range(&crate::refs::with_sheet(sheet, &format!("{top}:{bottom}")))
+            })
+        }
+        _ => None,
+    }
+}
+
 fn binary(op: Op, left: &Value, right: &Value) -> Value {
+    // A range or array on either side applies the operator element by element.
+    // `SUMPRODUCT((A2:A7="서울")*C2:C7)` is how spreadsheets did conditional sums
+    // for twenty years, and it needs exactly this.
+    let width = |v: &Value| match v {
+        Value::Range(r) => Some(r.cells.len()),
+        Value::Array(items) => Some(items.len()),
+        _ => None,
+    };
+    if let (true, Some(len)) = (
+        !matches!(op, Op::Percent),
+        width(left).or_else(|| width(right)),
+    ) {
+        if width(left).zip(width(right)).map(|(a, b)| a != b) == Some(true) {
+            // Excel pads mismatched shapes with #N/A; this engine has no spilling
+            // to show that in, so the mismatch itself is the answer.
+            return err(crate::values::NA_ERR);
+        }
+        let at = |v: &Value, i: usize| match v {
+            Value::Range(r) => r
+                .cells
+                .get(i)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::Blank),
+            Value::Array(items) => items.get(i).cloned().unwrap_or(Value::Blank),
+            other => other.clone(),
+        };
+        return Value::Array(
+            (0..len)
+                .map(|i| binary_scalar(op, &at(left, i), &at(right, i)))
+                .collect(),
+        );
+    }
+    binary_scalar(op, left, right)
+}
+
+fn binary_scalar(op: Op, left: &Value, right: &Value) -> Value {
     use std::cmp::Ordering;
 
     let l = left.scalar();
@@ -245,18 +435,57 @@ pub struct Recalc {
     pub cells: IndexMap<String, Cell>,
     pub changed: Vec<String>,
     pub errors: IndexMap<String, String>,
+    /// Cells whose formula could not be recalculated here, and whose stored
+    /// value was therefore left alone.
+    pub unresolved: Vec<String>,
 }
 
 struct RecalcCtx<'a> {
     source: &'a IndexMap<String, Cell>,
     names: &'a Names,
+    /// The name of the sheet being recalculated, so a formula that names its own
+    /// sheet resolves locally.
+    sheet: &'a str,
+    book: &'a Book<'a>,
     memo: RefCell<HashMap<String, Value>>,
     visiting: RefCell<HashSet<String>>,
     asts: RefCell<HashMap<String, Rc<Node>>>,
     steps: RefCell<usize>,
+    /// Set while evaluating a cell whose formula reached something this build
+    /// cannot resolve.
+    unresolved: std::cell::Cell<bool>,
+    /// The cell currently being evaluated, for `ROW()` with no argument.
+    current: RefCell<Option<String>>,
+}
+
+impl<'a> RecalcCtx<'a> {
+    /// The cells a reference points into, and the key inside them.
+    ///
+    /// `None` for the sheet means "this one". A named sheet we do not have is
+    /// not an error the caller should act on by writing `#REF!` over the file's
+    /// own value — see `note_unresolved`.
+    fn locate(&self, key: &'a str) -> Option<(&'a IndexMap<String, Cell>, &'a str)> {
+        let (sheet, local) = crate::refs::split_sheet(key);
+        match sheet {
+            None => Some((self.source, local)),
+            Some(name) if name.eq_ignore_ascii_case(self.sheet) => Some((self.source, local)),
+            Some(name) => self
+                .book
+                .get(&name.to_lowercase())
+                .map(|cells| (*cells, local)),
+        }
+    }
 }
 
 impl Context for RecalcCtx<'_> {
+    fn note_unresolved(&self) {
+        self.unresolved.set(true);
+    }
+
+    fn current_ref(&self) -> Option<String> {
+        self.current.borrow().clone()
+    }
+
     fn get_value(&self, reference: &str) -> Value {
         let key = bare_ref(reference);
         if let Some(v) = self.memo.borrow().get(&key) {
@@ -268,6 +497,27 @@ impl Context for RecalcCtx<'_> {
             if *steps > MAX_STEPS {
                 return err(NUM_ERR);
             }
+        }
+
+        // A reference into a sheet this context was not given: the formula
+        // cannot be recalculated, and the value already in the cell is the best
+        // answer available.
+        let Some((cells, local)) = self.locate(&key) else {
+            self.note_unresolved();
+            return err(REF_ERR);
+        };
+        // Another sheet's cell is read at its cached value rather than
+        // recursively recalculated: each sheet is recalculated on its own, and
+        // cross-sheet recursion would need the whole workbook's dependency graph
+        // to stay cycle-free.
+        if !std::ptr::eq(cells, self.source) {
+            let value = cells.get(local).map(|c| c.value()).unwrap_or(Value::Blank);
+            self.memo.borrow_mut().insert(key, value.clone());
+            return value;
+        }
+        let key = local.to_string();
+        if let Some(v) = self.memo.borrow().get(&key) {
+            return v.clone();
         }
 
         let Some(cell) = self.source.get(&key) else {
@@ -295,7 +545,9 @@ impl Context for RecalcCtx<'_> {
                 }
             };
 
+            let previous = self.current.replace(Some(key.clone()));
             let mut value = evaluate(&ast, self);
+            *self.current.borrow_mut() = previous;
             self.visiting.borrow_mut().remove(&key);
             if let Value::Range(r) = &value {
                 value = r.first();
@@ -323,21 +575,51 @@ impl Context for RecalcCtx<'_> {
 /// evaluation stack yields `#CIRC!` instead of recursing forever. Literal cells
 /// are returned untouched, so a sheet with no formulas costs one pass.
 pub fn recalc_sheet(cells: &IndexMap<String, Cell>, names: &Names) -> Recalc {
+    static EMPTY: std::sync::LazyLock<Book<'static>> = std::sync::LazyLock::new(Book::new);
+    recalc_sheet_in(cells, names, "", &EMPTY)
+}
+
+/// The same, with the workbook's other sheets available.
+///
+/// A formula that reaches a sheet the book does not have — or calls a function
+/// this build does not implement — **keeps the value already in the cell**.
+/// Opening someone's workbook and replacing their numbers with `#REF!` is worse
+/// than showing a number we could not re-derive: the file said it, and the file
+/// is what the reader came for.
+pub fn recalc_sheet_in(
+    cells: &IndexMap<String, Cell>,
+    names: &Names,
+    sheet: &str,
+    book: &Book<'_>,
+) -> Recalc {
     let ctx = RecalcCtx {
         source: cells,
         names,
+        sheet,
+        book,
         memo: RefCell::new(HashMap::new()),
         visiting: RefCell::new(HashSet::new()),
         asts: RefCell::new(HashMap::new()),
         steps: RefCell::new(0),
+        unresolved: std::cell::Cell::new(false),
+        current: RefCell::new(None),
     };
 
     let mut out = Recalc::default();
     for (reference, cell) in cells {
         let key = reference.to_uppercase();
         if cell.formula().is_some() {
+            ctx.unresolved.set(false);
             let value = ctx.get_value(&key);
+            if ctx.unresolved.get() && !cell.v.is_null() {
+                // Cannot be recalculated here; leave the file's own value and
+                // report which cell it was.
+                out.unresolved.push(key.clone());
+                out.cells.insert(key, cell.clone());
+                continue;
+            }
             let (v, t) = typed(&value);
+            let t = keep_date_tag(cell, t);
             let mut next = cell.clone();
             let changed = next.v != v || next.t.as_deref() != Some(t);
             next.v = v;
@@ -351,6 +633,7 @@ pub fn recalc_sheet(cells: &IndexMap<String, Cell>, names: &Names) -> Recalc {
             out.cells.insert(key, next);
         } else {
             let (v, t) = typed(&cell.value());
+            let t = keep_date_tag(cell, t);
             let mut next = cell.clone();
             next.v = v;
             next.t = Some(t.to_string());
@@ -358,6 +641,20 @@ pub fn recalc_sheet(cells: &IndexMap<String, Cell>, names: &Names) -> Recalc {
         }
     }
     out
+}
+
+/// Keep a `d` tag that the value alone cannot carry.
+///
+/// A date is a number plus the knowledge that it is a date, and only `t` holds
+/// that. Recomputing the tag from the value turns every date back into a plain
+/// number, which made the column summary add date serials into a total — a sum
+/// no reader could reconcile with the sheet.
+fn keep_date_tag(cell: &Cell, computed: &'static str) -> &'static str {
+    if computed == "n" && cell.t.as_deref() == Some("d") {
+        "d"
+    } else {
+        computed
+    }
 }
 
 /// Convert an evaluated value into the stored `(v, t)` pair.
@@ -566,6 +863,86 @@ pub fn dependencies(formula: &str) -> Vec<String> {
 pub fn evaluate_in(formula: &str, cells: &IndexMap<String, Cell>, names: &Names) -> Value {
     match parse(formula) {
         Err(e) => err(&e.code),
-        Ok(ast) => evaluate(&ast, &MapContext { cells, names }),
+        Ok(ast) => evaluate(&ast, &MapContext::new(cells, names)),
+    }
+}
+
+#[cfg(test)]
+mod date_tag_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sheet(pairs: &[(&str, Cell)]) -> IndexMap<String, Cell> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn recalculating_keeps_a_date_a_date() {
+        let out = recalc_sheet(
+            &sheet(&[(
+                "A1",
+                Cell {
+                    v: json!(46296.0),
+                    t: Some("d".into()),
+                    fmt: Some("yyyy-mm-dd".into()),
+                    ..Cell::default()
+                },
+            )]),
+            &Names::new(),
+        );
+        assert_eq!(out.cells["A1"].t.as_deref(), Some("d"));
+        assert_eq!(display_value(&out.cells["A1"]), "2026-10-01");
+    }
+
+    #[test]
+    fn a_formula_that_produced_a_date_keeps_the_tag() {
+        let out = recalc_sheet(
+            &sheet(&[(
+                "A1",
+                Cell {
+                    f: Some("=DATE(2026,10,1)".into()),
+                    t: Some("d".into()),
+                    fmt: Some("yyyy-mm-dd".into()),
+                    ..Cell::default()
+                },
+            )]),
+            &Names::new(),
+        );
+        assert_eq!(out.cells["A1"].t.as_deref(), Some("d"));
+        assert_eq!(display_value(&out.cells["A1"]), "2026-10-01");
+    }
+
+    #[test]
+    fn a_plain_number_is_not_promoted_to_a_date() {
+        let out = recalc_sheet(
+            &sheet(&[(
+                "A1",
+                Cell {
+                    v: json!(42.0),
+                    ..Cell::default()
+                },
+            )]),
+            &Names::new(),
+        );
+        assert_eq!(out.cells["A1"].t.as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn a_date_cell_that_becomes_text_gives_up_the_tag() {
+        let out = recalc_sheet(
+            &sheet(&[(
+                "A1",
+                Cell {
+                    v: json!("직접 입력"),
+                    t: Some("d".into()),
+                    ..Cell::default()
+                },
+            )]),
+            &Names::new(),
+        );
+        assert_eq!(out.cells["A1"].t.as_deref(), Some("s"));
     }
 }

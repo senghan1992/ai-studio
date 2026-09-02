@@ -16,7 +16,7 @@ use ai_format::model::{
     Items, Manifest, Project, ProjectSummary, ProjectType, Section, Sheet, Slide,
 };
 use ai_format::project as fsproj;
-use ai_formula::evaluate::{recalc_sheet, Cell, Names};
+use ai_formula::evaluate::{Cell, Names};
 
 pub mod preview;
 
@@ -30,6 +30,8 @@ pub enum Error {
     Project(#[from] fsproj::Error),
     #[error(transparent)]
     Export(#[from] ai_export::ExportError),
+    #[error(transparent)]
+    Import(#[from] ai_import::Error),
     #[error("파일을 읽을 수 없습니다: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -45,6 +47,10 @@ impl Error {
             Error::Project(fsproj::Error::UnknownType(_)) => 400,
             Error::Project(fsproj::Error::NotFound(_)) => 404,
             Error::Export(ai_export::ExportError::WrongType(_, _)) => 400,
+            Error::Import(ai_import::Error::UnsupportedFormat(_)) => 400,
+            Error::Import(ai_import::Error::Zip(_)) => 400,
+            Error::Import(ai_import::Error::Xml(_)) => 400,
+            Error::Import(ai_import::Error::MissingPart(_)) => 400,
             _ => 500,
         }
     }
@@ -211,12 +217,45 @@ pub struct RenameRequest {
     pub title: String,
 }
 
+/// An Office file handed over for import.
+#[derive(Debug, Deserialize)]
+pub struct ImportRequest {
+    /// The original filename; its extension picks the reader and its stem the
+    /// document title.
+    pub name: String,
+    /// The file contents as a `data:` URL or bare base64.
+    pub data: String,
+}
+
+/// What an import produced.
+#[derive(Debug, Serialize)]
+pub struct ImportResponse {
+    pub folder: String,
+    pub project: ProjectPayload,
+    /// What could not be carried across, for the UI to show plainly.
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecalcRequest {
     #[serde(default)]
     pub cells: IndexMap<String, Cell>,
     #[serde(default)]
     pub names: Names,
+    /// The sheet's own name, so a formula that qualifies its own sheet resolves.
+    #[serde(default)]
+    pub name: String,
+    /// The workbook's other sheets, for cross-sheet formulas.
+    #[serde(default)]
+    pub others: Vec<SheetCells>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct SheetCells {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub cells: IndexMap<String, Cell>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +263,9 @@ pub struct RecalcResponse {
     pub cells: IndexMap<String, Cell>,
     pub changed: Vec<String>,
     pub errors: IndexMap<String, String>,
+    /// Cells whose formula could not be recalculated with what was sent, and
+    /// whose stored value was left alone.
+    pub unresolved: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -395,6 +437,62 @@ impl Studio {
         })
     }
 
+    /// Convert an Office file into a project folder in the workspace.
+    ///
+    /// The original file is never touched and never written here: a `.pptx`
+    /// becomes a `.aideck` folder, and the way back out is the export path. That
+    /// is the whole point — editing in place and saving `.pptx` again would give
+    /// up the markdown, the JSON and `AI.md`.
+    pub fn import(&self, request: ImportRequest) -> Result<ImportResponse> {
+        let bytes = decode_payload(&request.data)?;
+        self.import_bytes(&bytes, &request.name)
+    }
+
+    /// The same, from bytes already in hand — the desktop app reads the file
+    /// itself, so nothing is ever base64-encoded there.
+    pub fn import_bytes(&self, bytes: &[u8], name: &str) -> Result<ImportResponse> {
+        if bytes.len() > 128 * 1024 * 1024 {
+            return Err(Error::BadRequest("파일이 너무 큽니다 (최대 128MB)".into()));
+        }
+
+        let imported = ai_import::read(bytes, name)?;
+        let project_type = imported.project_type;
+
+        // Create the folder through the normal path so naming, uniqueness and
+        // the assets directory all behave exactly as they do for a new document.
+        let created =
+            fsproj::create_project(&self.workspace, project_type, &imported.title, false)?;
+        let dir = created.dir.clone();
+
+        for asset in &imported.assets {
+            let target = dir.join("assets").join(&asset.name);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, &asset.bytes)?;
+        }
+
+        let project = Project {
+            project_type,
+            dir: dir.clone(),
+            manifest: Manifest {
+                title: imported.title,
+                ..created.manifest
+            },
+            items: imported.items,
+        };
+        let saved = fsproj::save_project(&project)?;
+
+        Ok(ImportResponse {
+            folder: dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            project: ProjectPayload::of(&saved),
+            warnings: imported.warnings,
+        })
+    }
+
     /* ------------------------------------------------------------- assets */
 
     pub fn list_assets(&self, folder: &str) -> Result<AssetList> {
@@ -474,11 +572,24 @@ impl Studio {
     /// Recalculate a sheet without touching disk — what the grid editor calls
     /// after an edit that the client cannot resolve locally.
     pub fn recalc(&self, request: RecalcRequest) -> RecalcResponse {
-        let out = recalc_sheet(&request.cells, &request.names);
+        let book = ai_formula::evaluate::book_of(
+            request
+                .others
+                .iter()
+                .map(|s| (s.name.as_str(), &s.cells))
+                .collect::<Vec<_>>(),
+        );
+        let out = ai_formula::evaluate::recalc_sheet_in(
+            &request.cells,
+            &request.names,
+            &request.name,
+            &book,
+        );
         RecalcResponse {
             cells: out.cells,
             changed: out.changed,
             errors: out.errors,
+            unresolved: out.unresolved,
         }
     }
 
@@ -493,6 +604,17 @@ impl Studio {
         let project = payload.into_project(dir, project_type, base)?;
         Ok(preview::of(&project))
     }
+}
+
+/// Bytes from a `data:` URL or bare base64 — the two shapes a browser and a
+/// desktop file picker respectively produce.
+fn decode_payload(data: &str) -> Result<Vec<u8>> {
+    if data.starts_with("data:") {
+        return Ok(decode_data_url(data)?.1);
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|_| Error::BadRequest("base64를 해석할 수 없습니다".into()))
 }
 
 /// `data:image/png;base64,iVBOR…` -> `("image/png", bytes)`

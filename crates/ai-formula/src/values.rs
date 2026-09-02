@@ -102,6 +102,24 @@ impl Value {
 }
 
 /// Flatten args, expanding ranges and arrays, dropping nothing.
+/// A value as a range, so a function written for ranges also accepts the array
+/// a `SORT` or `UNIQUE` produced.
+pub fn as_range(v: &Value) -> Option<Rc<RangeValue>> {
+    match v {
+        Value::Range(r) => Some(r.clone()),
+        Value::Array(items) => Some(Rc::new(RangeValue {
+            cells: items
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (format!("A{}", i + 1), v.clone()))
+                .collect(),
+            rows: items.len(),
+            cols: 1,
+        })),
+        _ => None,
+    }
+}
+
 pub fn flatten(args: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     fn walk(v: &Value, out: &mut Vec<Value>) {

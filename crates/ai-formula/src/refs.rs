@@ -122,13 +122,45 @@ pub fn expand_range_str(range: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Split `Sheet2!A1` or `'2분기 실적'!A1:B4` into the sheet name and the rest.
+///
+/// A workbook's formulas reach across sheets constantly — a summary sheet is
+/// nothing but cross-sheet references — so the sheet name travels with the
+/// reference rather than being stripped somewhere and lost.
+pub fn split_sheet(reference: &str) -> (Option<&str>, &str) {
+    match reference.rsplit_once('!') {
+        Some((sheet, rest)) => {
+            let name = sheet.trim().trim_matches('\'');
+            if name.is_empty() {
+                (None, rest)
+            } else {
+                (Some(name), rest)
+            }
+        }
+        None => (None, reference),
+    }
+}
+
+/// Attach a sheet name to a local reference, if there is one.
+pub fn with_sheet(sheet: Option<&str>, reference: &str) -> String {
+    match sheet {
+        Some(name) => format!("{name}!{reference}"),
+        None => reference.to_string(),
+    }
+}
+
 /// `$E$7 -> E7`. The stored key form for a cell.
+///
+/// A sheet name keeps its own case — sheet names are compared case-insensitively
+/// but shown as written, and upper-casing 'Q3 실적' would be a different label.
 pub fn bare_ref(reference: &str) -> String {
-    reference
+    let (sheet, local) = split_sheet(reference);
+    let bare = local
         .chars()
         .filter(|c| *c != '$')
         .collect::<String>()
-        .to_uppercase()
+        .to_uppercase();
+    with_sheet(sheet, &bare)
 }
 
 static ANCHORED_REF_RE: Lazy<Regex> =

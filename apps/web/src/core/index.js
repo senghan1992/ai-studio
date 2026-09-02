@@ -58,9 +58,19 @@ export const adjustRefs = (formula, axis, at, delta) =>
 
 /* --------------------------------------------------------------- formulas */
 
-export function recalcSheet(sheet) {
+/**
+ * Recalculate one sheet.
+ *
+ * `others` are the workbook's remaining sheets; without them a formula that
+ * reaches `=요약!B4` cannot be resolved, and the core then leaves the value the
+ * file already had rather than writing `#REF!` over it.
+ */
+export function recalcSheet(sheet, others = []) {
   assertReady();
-  return wasm.recalcSheet({ cells: sheet?.cells ?? {}, names: sheet?.names ?? {} });
+  return wasm.recalcSheet(
+    { cells: sheet?.cells ?? {}, names: sheet?.names ?? {}, name: sheet?.name ?? '' },
+    others.map((s) => ({ cells: s?.cells ?? {}, names: {}, name: s?.name ?? '' }))
+  );
 }
 
 export const parseCellInput = (raw) => wasm.parseCellInput(raw === null || raw === undefined ? '' : String(raw));
@@ -90,6 +100,16 @@ export function readingOrder(blocks, rowTolerance = 40) {
   });
 }
 
+/* ------------------------------------------------------------------- page */
+
+/** A page's real size in px. Explicit dimensions win over the paper name. */
+export const pageDims = (page) => wasm.pageDims(page ?? {});
+/** The same page at a new size, named if the size has a name. */
+export const pageResize = (page, w, h) => wasm.pageResize(page ?? {}, w, h);
+/** A header or footer's three slots, with the page tokens filled in. */
+export const resolveRunning = (running, page, pages, today = '') =>
+  wasm.resolveRunning(running ?? {}, page, pages, today);
+
 /* --------------------------------------------------------------- markdown */
 
 export const headingLevel = (md) => wasm.headingLevel(String(md ?? ''));
@@ -107,6 +127,36 @@ export const serializeChartBlock = (spec) => wasm.serializeChartBlock(spec ?? {}
 export const resolveChartSpec = (spec, sheet) => wasm.resolveChartSpec(spec ?? {}, sheet ?? null);
 export const chartToMarkdownTable = (spec) => wasm.chartToMarkdownTable(spec ?? {});
 export const describeChart = (spec) => wasm.describeChart(spec ?? {});
+
+/* ----------------------------------------------------------------- shapes */
+
+/** The shape gallery, grouped as Office's picker groups it. */
+export const shapeGallery = () => wasm.shapeGallery();
+
+export const makeShape = (preset, box = {}) => wasm.makeShape(preset, box);
+export const makeTable = (columns, rows, box = {}) => wasm.makeTable(columns, rows, box);
+export const blankTable = (columns, rows) => wasm.blankTable(columns, rows);
+
+/* ------------------------------------------------------------- table edits */
+
+/**
+ * One structural edit to a table, applied by the Rust core.
+ *
+ * Merges have to move when a row is inserted or a column deleted, and getting
+ * that wrong draws a table with holes. It is the same class of problem as
+ * adjusting a formula's references, so it lives with the format rather than in
+ * the editor.
+ *
+ * `op` is one of `setCell` · `insert` · `delete` · `merge` · `split` · `format`.
+ */
+export const tableEdit = (md, spec, op, args = {}) => wasm.tableEdit(md, spec ?? null, op, args);
+
+/** A table's shape and its cells, without editing it. */
+export const tableInfo = (md, spec) => wasm.tableInfo(md, spec ?? null);
+
+/** Where the cursor goes for a navigation key. `addRow` marks Tab at the end. */
+export const tableMove = (md, spec, col, row, key, backwards = false) =>
+  wasm.tableMove(md, spec ?? null, col, row, key, backwards);
 
 /* ----------------------------------------------------------- new documents */
 
@@ -138,6 +188,8 @@ export const CHART_TYPES = [];
 export const CHART_TYPE_LABELS = {};
 export const SLIDE_LAYOUTS = [];
 export const PAGE_SIZES = {};
+/** What the page-size dropdown calls a size that is not a named paper. */
+export const CUSTOM_PAPER = { label: '사용자 지정' };
 export const CHART_PALETTE = { light: [], dark: [] };
 /** Sorted function names, for the formula bar's autocomplete. */
 export const FUNCTION_NAMES = [];
@@ -150,6 +202,7 @@ export const FUNCTION_NAMES = [];
  */
 export const LIMITS = {
   maxSeries: 8,
+  cellPx: 15,
   colWidth: 104,
   rowHeight: 28,
   dims: { rows: 200, cols: 26 },
@@ -162,6 +215,7 @@ function hydrateConstants() {
   }
   SLIDE_LAYOUTS.push(...wasm.slideLayouts());
   Object.assign(PAGE_SIZES, wasm.pageSizes());
+  CUSTOM_PAPER.label = wasm.customPaperLabel();
   FUNCTION_NAMES.push(...wasm.functionNames());
 
   const palette = wasm.chartPalette();
@@ -170,6 +224,7 @@ function hydrateConstants() {
   LIMITS.maxSeries = palette.maxSeries;
 
   const grid = wasm.gridDefaults();
+  LIMITS.cellPx = grid.cellPx;
   LIMITS.colWidth = grid.colWidth;
   LIMITS.rowHeight = grid.rowHeight;
   LIMITS.dims = grid.dims;

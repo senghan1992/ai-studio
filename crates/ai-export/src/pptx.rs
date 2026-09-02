@@ -6,11 +6,11 @@ use std::path::Path;
 use ai_format::blocks::Kind;
 use ai_format::chart::{parse_chart_block, ChartSpec, ChartType, PALETTE_LIGHT};
 use ai_format::model::{Project, Slide, SlideBlock};
+use ai_format::shape::ShapeSpec;
+use ai_format::table::{parse_markdown_table, TableSpec, TableStyle};
 use serde_json::Value as Json;
 
-use crate::mdruns::{
-    image_alt, image_source, parse_markdown, runs_to_text, table_rows, Block, Run,
-};
+use crate::mdruns::{image_alt, image_source, parse_markdown, runs_to_text, Block, Run};
 use crate::ooxml::{
     emu, esc, font_size_100, hex, image_content_type, image_size, relationships,
     relationships_with_modes, Package, Result,
@@ -20,9 +20,6 @@ const NS_P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
-
-/// Heading font sizes in px, matching the editor's own scale.
-const HEADING_SIZE: [f64; 6] = [40.0, 32.0, 26.0, 22.0, 19.0, 17.0];
 
 /// One slide's parts: its XML plus the relationships it needs.
 struct SlidePart {
@@ -165,7 +162,9 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::Heading { level, runs } => out.push(Paragraph {
                 bullet: None,
                 align,
-                size_px: base_size.max(HEADING_SIZE[level.saturating_sub(1).min(5)]),
+                // The editor draws a heading as a multiple of the block's own
+                // size, so the export has to as well or every title shrinks.
+                size_px: base_size * ai_format::mdblocks::heading_em(level),
                 bold: true,
                 runs,
             }),
@@ -181,7 +180,8 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                     out.push(Paragraph {
                         bullet: Some((item.level, ordered)),
                         align,
-                        size_px: base_size,
+                        size_px: base_size
+                            * ai_format::mdblocks::NESTED_LIST_EM.powi(item.level as i32),
                         bold: base_bold,
                         runs: item.runs,
                     });
@@ -257,6 +257,33 @@ fn xfrm(block: &SlideBlock) -> String {
     )
 }
 
+/// The same, plus a shape's rotation and flips.
+///
+/// `rot` is in 60,000ths of a degree, and negative values are legal — Office
+/// normalises them, so pass the angle through rather than clamping it.
+fn xfrm_with(block: &SlideBlock, spec: &ShapeSpec) -> String {
+    let mut attrs = String::new();
+    if spec.rotation != 0.0 {
+        attrs.push_str(&format!(
+            " rot=\"{}\"",
+            (spec.rotation * 60_000.0).round() as i64
+        ));
+    }
+    if spec.flip_h {
+        attrs.push_str(" flipH=\"1\"");
+    }
+    if spec.flip_v {
+        attrs.push_str(" flipV=\"1\"");
+    }
+    format!(
+        "<a:xfrm{attrs}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
+        emu(block.x),
+        emu(block.y),
+        emu(block.w.max(1.0)),
+        emu(block.h.max(1.0)),
+    )
+}
+
 fn text_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String {
     let paragraphs = block_paragraphs(&block.md, &block.style);
     if paragraphs.is_empty() {
@@ -282,15 +309,91 @@ fn text_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String 
     )
 }
 
-fn rect_shape(id: usize, block: &SlideBlock) -> String {
-    let fill = style_str(&block.style, "fill").unwrap_or("#e5e7eb");
+/// A shape, with the preset geometry it was drawn or imported as.
+///
+/// The `prstGeom` name goes across verbatim, including one this renderer cannot
+/// draw — PowerPoint knows them all, so an unfamiliar preset survives the trip
+/// out even when the editor showed it as a rectangle.
+fn shape_element(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String {
+    let spec = block.shape.clone().unwrap_or_default();
+
+    let mut geom = format!("<a:prstGeom prst=\"{}\">", esc(&spec.preset));
+    if spec.adjust.is_empty() {
+        geom.push_str("<a:avLst/>");
+    } else {
+        geom.push_str("<a:avLst>");
+        for (name, value) in &spec.adjust {
+            geom.push_str(&format!(
+                "<a:gd name=\"{}\" fmla=\"val {}\"/>",
+                esc(name),
+                value.round() as i64
+            ));
+        }
+        geom.push_str("</a:avLst>");
+    }
+    geom.push_str("</a:prstGeom>");
+
+    let fill = match &spec.fill {
+        None => "<a:noFill/>".to_string(),
+        Some(fill) if fill.opacity >= 100.0 => {
+            format!(
+                "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+                hex(&fill.color)
+            )
+        }
+        Some(fill) => format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"><a:alpha val=\"{}\"/></a:srgbClr></a:solidFill>",
+            hex(&fill.color),
+            (fill.opacity.clamp(0.0, 100.0) * 1000.0).round() as i64
+        ),
+    };
+
+    let line = match &spec.line {
+        None => "<a:ln><a:noFill/></a:ln>".to_string(),
+        Some(line) => {
+            let dash = if line.dash == ai_format::shape::Dash::Solid {
+                String::new()
+            } else {
+                format!("<a:prstDash val=\"{}\"/>", line.dash.as_ooxml())
+            };
+            format!(
+                "<a:ln w=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>{dash}</a:ln>",
+                emu(line.width.max(0.25)),
+                hex(&line.color)
+            )
+        }
+    };
+
+    // A shape can hold text, and in this format that text is the block's markdown.
+    let body = shape_text_body(block, links);
+
     format!(
-        "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Shape {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>\
-<p:spPr>{}<a:prstGeom prst=\"roundRect\"><a:avLst><a:gd name=\"adj\" fmla=\"val 6000\"/></a:avLst></a:prstGeom>\
-<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>\
-<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>",
-        xfrm(block),
-        hex(fill)
+        "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{} {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>\
+<p:spPr>{}{geom}{fill}{line}</p:spPr>{body}</p:sp>",
+        esc(spec.label()),
+        xfrm_with(block, &spec),
+    )
+}
+
+/// The text inside a shape, or an empty body when it has none.
+fn shape_text_body(block: &SlideBlock, links: &mut Vec<String>) -> String {
+    let paragraphs = block_paragraphs(&block.md, &block.style);
+    if paragraphs.is_empty() {
+        return "<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>".to_string();
+    }
+    let color = style_str(&block.style, "color").unwrap_or("#1f2937");
+    let line_height = style_num(&block.style, "lineHeight").unwrap_or(1.3);
+    let anchor = match style_str(&block.style, "valign") {
+        Some("middle") => "ctr",
+        Some("bottom") => "b",
+        _ => "t",
+    };
+    let body: String = paragraphs
+        .iter()
+        .map(|p| paragraph_xml(p, color, line_height, links))
+        .collect();
+    format!(
+        "<p:txBody><a:bodyPr wrap=\"square\" anchor=\"{anchor}\" lIns=\"45720\" tIns=\"45720\" rIns=\"45720\" bIns=\"45720\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody>"
     )
 }
 
@@ -315,32 +418,108 @@ fn picture_shape(id: usize, block: &SlideBlock, rel_id: &str, natural: (f64, f64
     )
 }
 
-fn table_shape(id: usize, block: &SlideBlock, rows: &[Vec<String>]) -> String {
-    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1);
-    let col_width = emu(block.w / cols as f64);
-    let row_height = emu(block.h / rows.len() as f64);
-    let size = font_size_100(style_num(&block.style, "fontSize").unwrap_or(16.0)).max(800);
+/// A table PowerPoint can edit: a real `a:tbl`, with the spans and banding the
+/// layout JSON recorded.
+///
+/// The previous exporter flattened a table into a grid of plain strings, which
+/// lost merges and any cell formatting. Because a table's text is markdown here,
+/// each cell's emphasis also has to become runs rather than literal asterisks.
+fn table_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String {
+    let cells = parse_markdown_table(&block.md);
+    let spec = block.table.clone().unwrap_or_default();
+    let columns = cells.iter().map(|r| r.len()).max().unwrap_or(1);
+    let row_count = cells.len().max(1);
+
+    let base_size = style_num(&block.style, "fontSize").unwrap_or(16.0);
 
     let mut grid = String::from("<a:tblGrid>");
-    for _ in 0..cols {
-        grid.push_str(&format!("<a:gridCol w=\"{col_width}\"/>"));
+    for c in 0..columns {
+        grid.push_str(&format!(
+            "<a:gridCol w=\"{}\"/>",
+            emu(spec.col_width(c, columns, block.w))
+        ));
     }
     grid.push_str("</a:tblGrid>");
 
     let mut body = String::new();
-    for (r, row) in rows.iter().enumerate() {
-        body.push_str(&format!("<a:tr h=\"{row_height}\">"));
-        for c in 0..cols {
-            let text = row.get(c).map(String::as_str).unwrap_or("");
-            let bold = if r == 0 { " b=\"1\"" } else { "" };
-            let fill = if r == 0 {
-                "<a:solidFill><a:srgbClr val=\"F1F5F9\"/></a:solidFill>"
-            } else {
-                ""
+    for (r, row) in cells.iter().enumerate() {
+        let height = spec
+            .rows
+            .get(r)
+            .copied()
+            .filter(|h| *h > 0.0)
+            .unwrap_or(block.h / row_count as f64);
+        body.push_str(&format!("<a:tr h=\"{}\">", emu(height)));
+
+        for c in 0..columns {
+            let span = spec.span_at(c, r);
+            // A covered cell is emitted as a merge continuation, never as content.
+            let attrs = match &span {
+                Some(span) if span.is_anchor() => {
+                    let mut a = String::new();
+                    if span.cols > 1 {
+                        a.push_str(&format!(" gridSpan=\"{}\"", span.cols));
+                    }
+                    if span.rows > 1 {
+                        a.push_str(&format!(" rowSpan=\"{}\"", span.rows));
+                    }
+                    a
+                }
+                Some(span) => {
+                    let mut a = String::new();
+                    if span.continues_row {
+                        a.push_str(" hMerge=\"1\"");
+                    }
+                    if span.continues_col {
+                        a.push_str(" vMerge=\"1\"");
+                    }
+                    a
+                }
+                None => String::new(),
             };
+            let covered = span.as_ref().is_some_and(|s| !s.is_anchor());
+
+            let text = row.get(c).map(String::as_str).unwrap_or("");
+            let format = spec.cells.get(&ai_formula::refs::to_ref(c, r));
+            let is_header = spec.header_row && r == 0;
+            let is_first_col = spec.first_col && c == 0;
+
+            let content = if covered || text.is_empty() {
+                "<a:p/>".to_string()
+            } else {
+                let align = match format.and_then(|f| f.align.as_deref()) {
+                    Some("center") => "ctr",
+                    Some("right") => "r",
+                    _ => "l",
+                };
+                let color = format
+                    .and_then(|f| f.color.as_deref())
+                    .unwrap_or(if is_header { "#ffffff" } else { "#1f2937" });
+                let mut runs = String::new();
+                for run in crate::mdruns::inline_runs(text) {
+                    if run.text.is_empty() {
+                        continue;
+                    }
+                    runs.push_str(&format!(
+                        "<a:r>{}<a:t>{}</a:t></a:r>",
+                        run_props(&run, base_size, color, is_header || is_first_col, links),
+                        esc(&run.text)
+                    ));
+                }
+                format!("<a:p><a:pPr algn=\"{align}\"/>{runs}</a:p>")
+            };
+
+            let valign = match format.and_then(|f| f.valign.as_deref()) {
+                Some("top") => "t",
+                Some("bottom") => "b",
+                _ => "ctr",
+            };
+            let fill = cell_fill(&spec, format, r, c);
+
             body.push_str(&format!(
-                "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"ko-KR\" sz=\"{size}\"{bold}/><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr marL=\"36000\" marR=\"36000\" marT=\"18000\" marB=\"18000\">{fill}</a:tcPr></a:tc>",
-                esc(text)
+                "<a:tc{attrs}><a:txBody><a:bodyPr/><a:lstStyle/>{content}</a:txBody>\
+<a:tcPr marL=\"45720\" marR=\"45720\" marT=\"27432\" marB=\"27432\" anchor=\"{valign}\">{}{fill}</a:tcPr></a:tc>",
+                cell_borders(&spec)
             ));
         }
         body.push_str("</a:tr>");
@@ -350,12 +529,61 @@ fn table_shape(id: usize, block: &SlideBlock, rows: &[Vec<String>]) -> String {
         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"Table {id}\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>\
 <p:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></p:xfrm>\
 <a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\">\
-<a:tbl><a:tblPr firstRow=\"1\" bandRow=\"1\"/>{grid}{body}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>",
+<a:tbl><a:tblPr firstRow=\"{}\" firstCol=\"{}\" bandRow=\"{}\"/>{grid}{body}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>",
         emu(block.x),
         emu(block.y),
         emu(block.w),
         emu(block.h),
+        i32::from(spec.header_row),
+        i32::from(spec.first_col),
+        i32::from(spec.banded_rows),
     )
+}
+
+/// The header band, the row banding, and any explicit per-cell colour.
+fn cell_fill(
+    spec: &TableSpec,
+    format: Option<&ai_format::table::CellFormat>,
+    row: usize,
+    _col: usize,
+) -> String {
+    if let Some(color) = format.and_then(|f| f.fill.as_deref()) {
+        return format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            hex(color)
+        );
+    }
+    if spec.header_row && row == 0 {
+        return format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            hex(PALETTE_LIGHT[0])
+        );
+    }
+    if spec.banded_rows && spec.style != TableStyle::Borderless {
+        let body_row = if spec.header_row {
+            row.saturating_sub(1)
+        } else {
+            row
+        };
+        if body_row % 2 == 1 {
+            return "<a:solidFill><a:srgbClr val=\"F1F5F9\"/></a:solidFill>".to_string();
+        }
+    }
+    "<a:noFill/>".to_string()
+}
+
+fn cell_borders(spec: &TableSpec) -> String {
+    if spec.style == TableStyle::Borderless {
+        return String::new();
+    }
+    ["lnL", "lnR", "lnT", "lnB"]
+        .iter()
+        .map(|edge| {
+            format!(
+                "<a:{edge} w=\"9525\"><a:solidFill><a:srgbClr val=\"D1D5DB\"/></a:solidFill></a:{edge}>"
+            )
+        })
+        .collect()
 }
 
 fn chart_frame(id: usize, block: &SlideBlock, rel_id: &str) -> String {
@@ -575,7 +803,7 @@ fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets) -> SlidePart {
     // Shape ids start at 2: the group shape holding them all is 1.
     for (id, block) in (2usize..).zip(ordered) {
         match block.kind {
-            Kind::Shape => shapes.push_str(&rect_shape(id, block)),
+            Kind::Shape => shapes.push_str(&shape_element(id, block, &mut links)),
             Kind::Image => {
                 let embedded = image_source(&block.md)
                     .and_then(|src| read_asset(dir, &src))
@@ -620,11 +848,10 @@ fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets) -> SlidePart {
                 _ => shapes.push_str(&placeholder_text(id, block, "(차트 정의를 읽을 수 없음)")),
             },
             Kind::Table => {
-                let rows = table_rows(&block.md);
-                if rows.is_empty() {
+                if parse_markdown_table(&block.md).is_empty() {
                     shapes.push_str(&text_shape(id, block, &mut links));
                 } else {
-                    shapes.push_str(&table_shape(id, block, &rows));
+                    shapes.push_str(&table_shape(id, block, &mut links));
                 }
             }
             Kind::Text => shapes.push_str(&text_shape(id, block, &mut links)),
@@ -999,8 +1226,8 @@ fn theme_xml(accent: &str) -> String {
         "<a:theme xmlns:a=\"{NS_A}\" name=\"AI Studio\"><a:themeElements>\
 <a:clrScheme name=\"AI Studio\">{scheme}</a:clrScheme>\
 <a:fontScheme name=\"AI Studio\">\
-<a:majorFont><a:latin typeface=\"Calibri Light\"/><a:ea typeface=\"Malgun Gothic\"/><a:cs typeface=\"\"/></a:majorFont>\
-<a:minorFont><a:latin typeface=\"Calibri\"/><a:ea typeface=\"Malgun Gothic\"/><a:cs typeface=\"\"/></a:minorFont>\
+<a:majorFont><a:latin typeface=\"Pretendard\"/><a:ea typeface=\"Pretendard\"/><a:cs typeface=\"\"/></a:majorFont>\
+<a:minorFont><a:latin typeface=\"Pretendard\"/><a:ea typeface=\"Pretendard\"/><a:cs typeface=\"\"/></a:minorFont>\
 </a:fontScheme>\
 <a:fmtScheme name=\"AI Studio\">\
 <a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst>\
@@ -1092,6 +1319,8 @@ mod tests {
             h: 70.0,
             z: 1.0,
             style: Default::default(),
+            shape: None,
+            table: None,
             locked: false,
         };
         let xml = text_shape(2, &block, &mut Vec::new());
@@ -1116,6 +1345,8 @@ mod tests {
             h: 200.0,
             z: 1.0,
             style: Default::default(),
+            shape: None,
+            table: None,
             locked: false,
         };
         let xml = text_shape(2, &block, &mut Vec::new());

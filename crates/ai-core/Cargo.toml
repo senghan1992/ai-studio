@@ -10,6 +10,7 @@ license.workspace = true
 ai-formula = { workspace = true }
 ai-format = { workspace = true }
 ai-export = { workspace = true }
+ai-import = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true }

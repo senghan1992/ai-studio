@@ -2,9 +2,14 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { renderMarkdown, toggleWrap, continueList } from '../lib/markdown.js';
 import { assetUrl, isProjectAsset } from '../api.js';
 import ChartView from '../components/ChartView.jsx';
+import ShapeView from '../components/ShapeView.jsx';
+import TableView from '../components/TableView.jsx';
+import { adjustHandles, adjustValueAt } from '../lib/shapeAdjust.js';
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const SNAP = 7;
+/** Office snaps rotation to 15° while Shift is held. */
+const ROTATE_SNAP = 15;
 const MIN_W = 48;
 const MIN_H = 28;
 
@@ -20,10 +25,17 @@ export default function SlideCanvas({
   slide, scale, selectedId, editingId, folder,
   onSelect, onEdit, onChangeBlock, onChangeBlockMd, onAddBlock, onDeleteBlock,
   onContextMenu, onOpenBlock,
+  // A shape picked from the gallery: the next drag on the canvas draws it.
+  pendingShape, onDrawShape,
+  // Which table cell has the cursor, so the Layout tab can act on it.
+  activeCell, onActiveCellChange,
+  onChangeTable,
 }) {
   const canvasRef = useRef(null);
   const [drag, setDrag] = useState(null);
   const [guides, setGuides] = useState([]);
+  // The rubber band while drawing a new shape.
+  const [draw, setDraw] = useState(null);
 
   const canvas = slide.canvas ?? { w: 1280, h: 720, bg: '#ffffff' };
   const blocks = [...slide.blocks].sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
@@ -42,6 +54,93 @@ export default function SlideCanvas({
     },
     [slide.blocks, canvas.w, canvas.h]
   );
+
+  /**
+   * Drawing a new shape.
+   *
+   * Office turns the cursor into a crosshair after you pick from the gallery and
+   * lets you drag out the box; a plain click drops it at a default size. Both
+   * paths go through here.
+   */
+  const drawStart = (event) => {
+    if (!pendingShape || event.button !== 0) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.round((event.clientX - rect.left) / scale);
+    const y = Math.round((event.clientY - rect.top) / scale);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDraw({ pointerId: event.pointerId, x0: x, y0: y, x, y });
+  };
+
+  const drawMove = (event) => {
+    if (!draw || event.pointerId !== draw.pointerId) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setDraw((d) => ({
+      ...d,
+      x: Math.round((event.clientX - rect.left) / scale),
+      y: Math.round((event.clientY - rect.top) / scale),
+    }));
+  };
+
+  const drawEnd = (event) => {
+    if (!draw || (event && event.pointerId !== draw.pointerId)) return;
+    const { x0, y0, x, y } = draw;
+    setDraw(null);
+    const w = Math.abs(x - x0);
+    const h = Math.abs(y - y0);
+    // Below a few pixels it was a click, not a drag: use Office's default size,
+    // centred on where the pointer went down.
+    const box =
+      w < 8 || h < 8
+        ? { x: x0 - 120, y: y0 - 70, w: 240, h: 140 }
+        : { x: Math.min(x0, x), y: Math.min(y0, y), w, h };
+    onDrawShape?.(clamp({ ...box, w: Math.max(MIN_W, box.w), h: Math.max(MIN_H, box.h) }, canvas));
+  };
+
+  /**
+   * Rotating a shape.
+   *
+   * The angle is measured from the block's centre to the pointer, with the
+   * handle starting straight up — so the shape follows the pointer rather than
+   * jumping by the offset between them. Shift snaps to 15°, as in Office.
+   */
+  const rotateStart = (event, block) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(block.id);
+    if (block.locked) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDrag({
+      id: block.id,
+      mode: 'rotate',
+      pointerId: event.pointerId,
+      centre: {
+        x: rect.left + (block.x + block.w / 2) * scale,
+        y: rect.top + (block.y + block.h / 2) * scale,
+      },
+      rotation: block.shape?.rotation ?? 0,
+    });
+  };
+
+  /** Dragging one of a preset's adjust handles. */
+  const adjustStart = (event, block, handle) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(block.id);
+    if (block.locked) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDrag({
+      id: block.id,
+      mode: 'adjust',
+      pointerId: event.pointerId,
+      handle,
+      box: { x: block.x, y: block.y, w: block.w, h: block.h },
+      value: handle.value,
+    });
+  };
 
   const pointerStart = (event, block, mode) => {
     if (editingId === block.id) return;
@@ -64,6 +163,31 @@ export default function SlideCanvas({
 
   const pointerMove = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
+
+    if (drag.mode === 'rotate') {
+      const angle =
+        (Math.atan2(event.clientY - drag.centre.y, event.clientX - drag.centre.x) * 180) /
+          Math.PI +
+        90;
+      const snapped = event.shiftKey
+        ? Math.round(angle / ROTATE_SNAP) * ROTATE_SNAP
+        : Math.round(angle);
+      // Keep it in 0..360 so the JSON never carries -725 degrees.
+      setDrag((d) => (d ? { ...d, rotation: ((snapped % 360) + 360) % 360 } : d));
+      return;
+    }
+
+    if (drag.mode === 'adjust') {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const point = {
+        x: ((event.clientX - rect.left) / scale - drag.box.x) / Math.max(1, drag.box.w),
+        y: ((event.clientY - rect.top) / scale - drag.box.y) / Math.max(1, drag.box.h),
+      };
+      setDrag((d) => (d ? { ...d, value: adjustValueAt(d.handle, point) } : d));
+      return;
+    }
+
     const dx = (event.clientX - drag.startX) / scale;
     const dy = (event.clientY - drag.startY) / scale;
 
@@ -84,6 +208,32 @@ export default function SlideCanvas({
   const pointerEnd = (event) => {
     if (!drag) return;
     if (event && event.pointerId !== drag.pointerId) return;
+
+    if (drag.mode === 'rotate') {
+      const { id, rotation } = drag;
+      setDrag(null);
+      const block = slide.blocks.find((b) => b.id === id);
+      if (block && (block.shape?.rotation ?? 0) !== rotation) {
+        onChangeBlock(id, { shape: { ...(block.shape ?? {}), rotation } });
+      }
+      return;
+    }
+
+    if (drag.mode === 'adjust') {
+      const { id, handle, value } = drag;
+      setDrag(null);
+      const block = slide.blocks.find((b) => b.id === id);
+      if (block && (block.shape?.adjust?.[handle.name] ?? handle.value) !== value) {
+        onChangeBlock(id, {
+          shape: {
+            ...(block.shape ?? {}),
+            adjust: { ...(block.shape?.adjust ?? {}), [handle.name]: value },
+          },
+        });
+      }
+      return;
+    }
+
     const { id, box, origin } = drag;
     setDrag(null);
     setGuides([]);
@@ -104,13 +254,21 @@ export default function SlideCanvas({
     return () => window.removeEventListener('keydown', onKey);
   }, [drag]);
 
-  // Arrow-key nudging, Delete, Escape — only when not typing in a block.
+  /*
+   * Arrow-key nudging, Delete, Escape — only when not typing in a block.
+   *
+   * A table with the cursor in one of its cells is driven by the table's own
+   * handler: without stepping aside here, Delete would clear the cell *and*
+   * delete the whole table, and an arrow would move the cursor and drag the
+   * table with it.
+   */
   useEffect(() => {
     const onKey = (e) => {
       if (editingId) return;
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (!selectedId) return;
+      if (activeCell && activeCell.id === selectedId) return;
       const block = slide.blocks.find((b) => b.id === selectedId);
       if (!block) return;
 
@@ -128,11 +286,28 @@ export default function SlideCanvas({
         onEdit(selectedId);
         return;
       }
-      const step = e.shiftKey ? 1 : 8;
+      /*
+       * Arrow nudges by the grid; Ctrl (PowerPoint's modifier) or Shift nudges
+       * by one pixel. Both are accepted because Office teaches Ctrl and the
+       * habit of Shift-for-finer is widespread.
+       *
+       * Alt+arrow resizes instead of moving, which is the other thing the arrow
+       * keys do to a selected shape.
+       */
+      const fine = e.ctrlKey || e.metaKey || e.shiftKey;
+      const step = fine ? 1 : 8;
       const deltas = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
       const delta = deltas[e.key];
       if (!delta) return;
       e.preventDefault();
+      if (e.altKey) {
+        onChangeBlock(
+          selectedId,
+          clamp({ ...block, w: block.w + delta[0], h: block.h + delta[1] }, canvas),
+          { merge: true }
+        );
+        return;
+      }
       onChangeBlock(
         selectedId,
         clamp({ ...block, x: block.x + delta[0], y: block.y + delta[1] }, canvas),
@@ -141,7 +316,7 @@ export default function SlideCanvas({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedId, editingId, slide.blocks, canvas, onChangeBlock, onDeleteBlock, onSelect, onEdit]);
+  }, [selectedId, editingId, activeCell, slide.blocks, canvas, onChangeBlock, onDeleteBlock, onSelect, onEdit]);
 
   return (
     <div className="canvas-scroll" onMouseDown={(e) => e.target === e.currentTarget && onSelect(null)}>
@@ -153,10 +328,21 @@ export default function SlideCanvas({
           height: canvas.h,
           background: canvas.bg ?? '#fff',
           transform: `scale(${scale})`,
+          cursor: pendingShape ? 'crosshair' : undefined,
         }}
-        onPointerMove={pointerMove}
-        onPointerUp={pointerEnd}
-        onPointerCancel={pointerEnd}
+        onPointerDown={drawStart}
+        onPointerMove={(event) => {
+          drawMove(event);
+          pointerMove(event);
+        }}
+        onPointerUp={(event) => {
+          drawEnd(event);
+          pointerEnd(event);
+        }}
+        onPointerCancel={(event) => {
+          setDraw(null);
+          pointerEnd(event);
+        }}
         onDoubleClick={(e) => {
           if (e.target !== e.currentTarget) return;
           const rect = e.currentTarget.getBoundingClientRect();
@@ -168,7 +354,7 @@ export default function SlideCanvas({
         onMouseDown={(e) => e.target === e.currentTarget && onSelect(null)}
       >
         {blocks.map((block) => {
-          const live = drag?.id === block.id ? { ...block, ...drag.box } : block;
+          const live = previewOf(block, drag);
           const selected = selectedId === block.id;
           const editing = editingId === block.id;
           return (
@@ -180,10 +366,23 @@ export default function SlideCanvas({
               scale={scale}
               onPointerDown={(e) => pointerStart(e, live, 'move')}
               onHandleDown={(e, mode) => pointerStart(e, live, mode)}
+              onRotateDown={(e) => rotateStart(e, live)}
+              onAdjustDown={(e, handle) => adjustStart(e, live, handle)}
               onDoubleClick={() => (block.kind === 'chart' || block.kind === 'image' ? onOpenBlock?.(block) : onEdit(block.id))}
               onChangeMd={(md) => onChangeBlockMd(block.id, md)}
               onExit={() => onEdit(null)}
               folder={folder}
+              activeCell={activeCell?.id === block.id ? activeCell : null}
+              onActiveCellChange={(cell) =>
+                onActiveCellChange?.(cell ? { ...cell, id: block.id } : null)
+              }
+              onSelectForCell={() => {
+                onSelect(block.id);
+                if (editingId) onEdit(null);
+              }}
+              onChangeTable={
+                onChangeTable ? (md, table) => onChangeTable(block.id, md, table) : undefined
+              }
               onContextMenu={(e) => {
                 onSelect(block.id);
                 onContextMenu?.(e, block);
@@ -191,6 +390,18 @@ export default function SlideCanvas({
             />
           );
         })}
+
+        {draw && (
+          <div
+            className="drawband"
+            style={{
+              left: Math.min(draw.x0, draw.x),
+              top: Math.min(draw.y0, draw.y),
+              width: Math.abs(draw.x - draw.x0),
+              height: Math.abs(draw.y - draw.y0),
+            }}
+          />
+        )}
 
         {guides.map((g, i) => (
           <div
@@ -204,11 +415,36 @@ export default function SlideCanvas({
   );
 }
 
+/**
+ * The block as it should draw right now, including an in-flight drag.
+ *
+ * A rotate or adjust drag changes the shape spec rather than the box, so it
+ * cannot be a plain spread of `drag.box` over the block.
+ */
+function previewOf(block, drag) {
+  if (drag?.id !== block.id) return block;
+  if (drag.mode === 'rotate') {
+    return { ...block, shape: { ...(block.shape ?? {}), rotation: drag.rotation } };
+  }
+  if (drag.mode === 'adjust') {
+    return {
+      ...block,
+      shape: {
+        ...(block.shape ?? {}),
+        adjust: { ...(block.shape?.adjust ?? {}), [drag.handle.name]: drag.value },
+      },
+    };
+  }
+  return { ...block, ...drag.box };
+}
+
 /* ------------------------------------------------------------------- block */
 
 function Block({
   block, selected, editing, scale, folder,
   onPointerDown, onHandleDown, onDoubleClick, onChangeMd, onExit, onContextMenu,
+  onRotateDown, onAdjustDown,
+  activeCell, onActiveCellChange, onChangeTable, onSelectForCell,
 }) {
   const style = block.style ?? {};
   const isText = block.kind === 'text' || block.kind === 'shape';
@@ -219,8 +455,21 @@ function Block({
     width: block.w,
     height: block.h,
     zIndex: block.z ?? 1,
-    ...(block.kind === 'shape'
-      ? { background: style.fill ?? '#e5e7eb', borderRadius: style.radius ?? 6 }
+    // A shape's fill and outline are drawn by its preset geometry, not by a CSS
+    // background — a diamond with a rectangular background is not a diamond.
+    ...(block.shape?.rotation
+      ? { transform: `rotate(${block.shape.rotation}deg)` }
+      : {}),
+    ...(block.shape?.flipH || block.shape?.flipV
+      ? {
+          transform: [
+            block.shape?.rotation ? `rotate(${block.shape.rotation}deg)` : '',
+            block.shape?.flipH ? 'scaleX(-1)' : '',
+            block.shape?.flipV ? 'scaleY(-1)' : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
+        }
       : {}),
   };
 
@@ -253,8 +502,23 @@ function Block({
       role="group"
       aria-label={`${block.kind} 요소`}
     >
+      {block.kind === 'shape' && (
+        <ShapeView shape={block.shape} width={block.w} height={block.h} />
+      )}
+
       {editing && isText ? (
         <BlockEditor value={block.md} onChange={onChangeMd} onExit={onExit} />
+      ) : block.kind === 'table' ? (
+        <TableView
+          md={block.md}
+          spec={block.table}
+          width={block.w}
+          height={block.h}
+          active={activeCell}
+          onActiveChange={onActiveCellChange}
+          onChange={onChangeTable}
+          onSelectBlock={onSelectForCell}
+        />
       ) : block.kind === 'chart' ? (
         <ChartView
           md={block.md}
@@ -268,7 +532,7 @@ function Block({
         <div className="block__content" style={contentStyle}>
           {block.md?.trim() ? (
             <div
-              className="md"
+              className="md md--slide"
               dangerouslySetInnerHTML={{
                 __html: renderMarkdown(block.md, {
                   assetResolver: (src) => (isProjectAsset(src) ? assetUrl(folder, src) : src),
@@ -291,6 +555,32 @@ function Block({
               onPointerDown={(e) => onHandleDown(e, h)}
             />
           ))}
+
+          {/* Office puts the rotate handle on a stem above the top edge. */}
+          {block.kind === 'shape' && (
+            <div
+              className="handle handle--rotate"
+              title="끌어서 회전 (Shift: 15°씩)"
+              style={{ transform: `scale(${1 / scale})` }}
+              onPointerDown={onRotateDown}
+            />
+          )}
+
+          {/* And the yellow diamonds for whatever the preset can adjust. */}
+          {block.kind === 'shape' &&
+            adjustHandles(block.shape).map((h) => (
+              <div
+                key={h.name}
+                className="handle handle--adjust"
+                title={`끌어서 모양 조절 (${h.name})`}
+                style={{
+                  left: `${h.at.x * 100}%`,
+                  top: `${h.at.y * 100}%`,
+                  transform: `translate(-50%, -50%) scale(${1 / scale}) rotate(45deg)`,
+                }}
+                onPointerDown={(e) => onAdjustDown(e, h)}
+              />
+            ))}
         </>
       )}
     </div>

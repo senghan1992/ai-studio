@@ -7,6 +7,26 @@ use crate::frontmatter::{meta_str, parse_frontmatter, serialize_frontmatter, Met
 use crate::ids::{new_block_id, new_section_id};
 use crate::mdblocks::{count_words, heading_level, plain_text, split_markdown_blocks, BlockType};
 use crate::model::{DocBlock, Override, Page, Section, Spacing};
+use crate::table::{apply_markdown_authority, TableSpec};
+
+/// The text size the editor draws a block at when it carries no override, in px.
+///
+/// Import compares against these: a Word paragraph at 11pt is 14.67px, which is
+/// what the editor already draws, so writing `fontSize: 15` on it would put an
+/// anchor in the markdown and say nothing. A heading at 16pt is not, and has to
+/// be carried. The numbers are the stylesheet's — `.md--doc` and its headings —
+/// and the two have to move together.
+pub const BODY_PX: f64 = 15.0;
+
+pub fn heading_px(level: usize) -> f64 {
+    match level {
+        1 => 25.0,
+        2 => 20.0,
+        3 => 16.5,
+        4 => 15.75,
+        _ => BODY_PX,
+    }
+}
 
 /// Read an override out of meta JSON, dropping anything that equals the default.
 ///
@@ -90,23 +110,27 @@ pub fn read_section(md: &str, meta_json: Option<&Json>) -> Section {
         let parts = split_markdown_blocks(&region.md);
         if region.implicit {
             for part in parts {
+                let table = table_spec(part.block_type, None, &part.md);
                 blocks.push(DocBlock {
                     id: new_block_id(),
                     md: part.md,
                     block_type: part.block_type,
                     format_override: None,
+                    table,
                 });
             }
             continue;
         }
 
-        let saved = normalize_override(overrides.get(&region.id));
+        let entry = overrides.get(&region.id);
+        let saved = normalize_override(entry);
         if parts.is_empty() {
             blocks.push(DocBlock {
                 id: region.id.clone(),
                 md: String::new(),
                 block_type: BlockType::Paragraph,
                 format_override: saved,
+                table: None,
             });
             continue;
         }
@@ -119,6 +143,7 @@ pub fn read_section(md: &str, meta_json: Option<&Json>) -> Section {
                 } else {
                     new_block_id()
                 },
+                table: table_spec(part.block_type, if i == 0 { entry } else { None }, &part.md),
                 md: part.md,
                 block_type: part.block_type,
                 format_override: if i == 0 { saved.clone() } else { None },
@@ -167,7 +192,9 @@ pub fn write_section(section: &Section) -> SectionFiles {
         .map(|b| Joinable {
             id: &b.id,
             md: &b.md,
-            omit_marker: b.format_override.is_none(),
+            // A table's layout is information the markdown cannot hold, so the
+            // block needs an anchor to attach it to — same rule as an override.
+            omit_marker: b.format_override.is_none() && !carries_table(b),
         })
         .collect();
     let body = join_blocks(&joinable);
@@ -179,8 +206,20 @@ pub fn write_section(section: &Section) -> SectionFiles {
 
     let mut blocks = serde_json::Map::new();
     for b in &s.blocks {
-        if let Some(o) = &b.format_override {
-            blocks.insert(b.id.clone(), serde_json::to_value(o).unwrap_or(Json::Null));
+        let mut entry = match &b.format_override {
+            Some(o) => serde_json::to_value(o).unwrap_or(Json::Null),
+            None => Json::Object(serde_json::Map::new()),
+        };
+        if carries_table(b) {
+            if let (Some(map), Some(table)) = (entry.as_object_mut(), &b.table) {
+                map.insert(
+                    "table".into(),
+                    serde_json::to_value(table).unwrap_or(Json::Null),
+                );
+            }
+        }
+        if entry.as_object().is_some_and(|m| !m.is_empty()) {
+            blocks.insert(b.id.clone(), entry);
         }
     }
 
@@ -194,6 +233,30 @@ pub fn write_section(section: &Section) -> SectionFiles {
             "stats": section_stats(&s.blocks),
         }),
     }
+}
+
+/// A table block whose layout differs from what the markdown alone implies.
+///
+/// A plain table needs no JSON at all — the markdown says everything — so it
+/// stays anchor-free and the `.md` reads as pure markdown.
+fn carries_table(block: &DocBlock) -> bool {
+    let Some(table) = &block.table else {
+        return false;
+    };
+    *table != TableSpec::default()
+}
+
+/// A table block's layout, with the markdown's alignment row taking precedence.
+fn table_spec(block_type: BlockType, entry: Option<&Json>, md: &str) -> Option<TableSpec> {
+    if block_type != BlockType::Table {
+        return None;
+    }
+    let mut spec = entry
+        .and_then(|e| e.get("table"))
+        .and_then(|v| serde_json::from_value::<TableSpec>(v.clone()).ok())
+        .unwrap_or_default();
+    apply_markdown_authority(&mut spec, md);
+    Some(spec)
 }
 
 pub fn normalize_section(section: &Section) -> Section {
@@ -211,6 +274,14 @@ pub fn normalize_section(section: &Section) -> Section {
                 id = new_block_id();
             }
             seen.insert(id.clone());
+            let table = match b.block_type {
+                BlockType::Table => {
+                    let mut spec = b.table.clone().unwrap_or_default();
+                    apply_markdown_authority(&mut spec, &b.md);
+                    Some(spec)
+                }
+                _ => None,
+            };
             DocBlock {
                 id,
                 md: b.md.clone(),
@@ -219,6 +290,7 @@ pub fn normalize_section(section: &Section) -> Section {
                     .format_override
                     .as_ref()
                     .and_then(|o| normalize_override(serde_json::to_value(o).ok().as_ref())),
+                table,
             }
         })
         .collect();
@@ -229,6 +301,7 @@ pub fn normalize_section(section: &Section) -> Section {
             md: String::new(),
             block_type: BlockType::Paragraph,
             format_override: None,
+            table: None,
         });
     }
 
@@ -336,6 +409,7 @@ pub fn make_section(name: &str, heading: bool) -> Section {
             md: format!("# {name}"),
             block_type: BlockType::Heading,
             format_override: None,
+            table: None,
         });
     }
     blocks.push(DocBlock {
@@ -343,6 +417,7 @@ pub fn make_section(name: &str, heading: bool) -> Section {
         md: "내용을 입력하세요.".to_string(),
         block_type: BlockType::Paragraph,
         format_override: None,
+        table: None,
     });
     Section {
         id: new_section_id(),
@@ -407,6 +482,7 @@ mod tests {
                 indent: Some(24.0),
                 ..Override::default()
             }),
+            table: None,
         });
         let files = write_section(&section);
         let back = read_section(&files.md, Some(&files.meta));
@@ -464,6 +540,62 @@ mod tests {
         assert_eq!(section.page.columns, 2);
         assert_eq!(section.page.margin.top, 40.0);
         assert_eq!(section.page.dimensions(), (816.0, 1056.0));
+    }
+
+    #[test]
+    fn a_header_and_footer_round_trip_through_the_meta_json() {
+        let page = Page {
+            header: Some(crate::model::Running {
+                center: "AI Studio 제안서".into(),
+                ..Default::default()
+            }),
+            footer: Some(crate::model::Running {
+                left: "{DATE}".into(),
+                center: "{PAGE} / {PAGES}".into(),
+                right: String::new(),
+            }),
+            ..Page::default()
+        };
+        let section = Section {
+            id: "s1".into(),
+            name: "본문".into(),
+            page,
+            blocks: vec![DocBlock {
+                id: "b1".into(),
+                md: "문단".into(),
+                block_type: BlockType::Paragraph,
+                format_override: None,
+                table: None,
+            }],
+            file: None,
+        };
+
+        let files = write_section(&section);
+        let back = read_section(&files.md, Some(&files.meta));
+        assert_eq!(
+            back.page.header.as_ref().map(|r| r.center.clone()),
+            Some("AI Studio 제안서".into())
+        );
+        let footer = back.page.footer.expect("the footer survived");
+        assert_eq!(footer.center, "{PAGE} / {PAGES}");
+        // An empty slot is not written at all, which keeps the JSON quiet.
+        let written = serde_json::to_string(&files.meta["page"]["footer"]).unwrap();
+        assert_eq!(
+            written, r#"{"left":"{DATE}","center":"{PAGE} / {PAGES}"}"#,
+            "an empty slot is omitted"
+        );
+    }
+
+    #[test]
+    fn page_tokens_resolve_per_page() {
+        let running = crate::model::Running {
+            center: "{PAGE} / {PAGES}".into(),
+            right: "{DATE}".into(),
+            ..Default::default()
+        };
+        let slots = running.resolved(2, 7, "2026-09-02");
+        assert_eq!(slots[1], "2 / 7");
+        assert_eq!(slots[2], "2026-09-02");
     }
 
     #[test]

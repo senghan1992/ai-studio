@@ -65,6 +65,8 @@ fn main() {
             commands::digest,
             commands::list_assets,
             commands::upload_asset,
+            commands::import_file,
+            commands::open_office_file,
             commands::recalc,
             commands::workspace_path,
             commands::export_project,

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use ai_format::chart::{chart_to_markdown_table, describe_chart, parse_chart_block};
 use ai_format::model::{Override, Project, Section};
+use ai_format::table::{TableSpec, TableStyle};
 use serde_json::Value as Json;
 
 use crate::mdruns::{parse_markdown, Block, Run};
@@ -19,7 +20,14 @@ const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_PIC: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 
 /// Heading font sizes in px, matching the editor's own scale.
-const HEADING_SIZE: [f64; 6] = [40.0, 32.0, 26.0, 22.0, 19.0, 17.0];
+/// Heading sizes in half-points, from the sizes the editor draws.
+///
+/// `w:sz` is half-points and the editor works in px at 96dpi, so this is
+/// `px * 0.75 * 2`. Keeping the two in one place is what stops a document from
+/// changing size on the way out.
+fn heading_half_points(level: usize) -> i64 {
+    (ai_format::doc::heading_px(level) * 1.5).round() as i64
+}
 
 /// Images embedded so far, as `(part path, content type, rel id)`.
 struct Media {
@@ -80,6 +88,14 @@ fn run_xml(run: &Run, style: Option<&Override>) -> String {
     if let Some(color) = string_of("color") {
         props.push_str(&format!("<w:color w:val=\"{}\"/>", hex(color)));
     }
+    // 형광펜. `w:highlight` only takes Word's sixteen named colours, so an
+    // arbitrary swatch has to go through run shading instead.
+    if let Some(bg) = string_of("bg") {
+        props.push_str(&format!(
+            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
+            hex(bg)
+        ));
+    }
     if let Some(size) = number_of("fontSize") {
         // w:sz is in half-points.
         props.push_str(&format!(
@@ -135,13 +151,40 @@ fn paragraph_props(style: Option<&Override>, extra: &str) -> String {
         if let Some(indent) = o.indent {
             props.push_str(&format!("<w:ind w:left=\"{}\"/>", twip(indent)));
         }
-        if let Some(spacing) = &o.spacing {
-            let before = spacing.before.map(|v| format!(" w:before=\"{}\"", twip(v)));
-            let after = spacing.after.map(|v| format!(" w:after=\"{}\"", twip(v)));
+        // 문단 간격과 줄 간격은 Word에서 같은 `w:spacing` 하나에 들어갑니다.
+        // 따로 쓰면 뒤의 것이 앞의 것을 덮어씁니다.
+        let before = o
+            .spacing
+            .as_ref()
+            .and_then(|s| s.before)
+            .map(|v| format!(" w:before=\"{}\"", twip(v)));
+        let after = o
+            .spacing
+            .as_ref()
+            .and_then(|s| s.after)
+            .map(|v| format!(" w:after=\"{}\"", twip(v)));
+        // `w:line` in auto mode counts 240ths of a line, so single is 240.
+        let line = o
+            .style
+            .get("lineHeight")
+            .and_then(|v| match v {
+                Json::Number(n) => n.as_f64(),
+                Json::String(t) => t.trim().parse().ok(),
+                _ => None,
+            })
+            .filter(|n| *n > 0.0)
+            .map(|n| {
+                format!(
+                    " w:line=\"{}\" w:lineRule=\"auto\"",
+                    (n * 240.0).round() as i64
+                )
+            });
+        if before.is_some() || after.is_some() || line.is_some() {
             props.push_str(&format!(
-                "<w:spacing{}{}/>",
+                "<w:spacing{}{}{}/>",
                 before.unwrap_or_default(),
-                after.unwrap_or_default()
+                after.unwrap_or_default(),
+                line.unwrap_or_default()
             ));
         }
     }
@@ -160,7 +203,12 @@ struct Ctx<'a> {
     hyperlinks: Vec<String>,
 }
 
-fn block_xml(block: &Block, style: Option<&Override>, ctx: &mut Ctx) -> String {
+fn block_xml(
+    block: &Block,
+    style: Option<&Override>,
+    table: Option<&TableSpec>,
+    ctx: &mut Ctx,
+) -> String {
     match block {
         Block::Heading { level, runs } => {
             let props = paragraph_props(
@@ -218,39 +266,106 @@ fn block_xml(block: &Block, style: Option<&Override>, ctx: &mut Ctx) -> String {
             })
             .collect(),
         Block::Table { rows } => {
-            let grid_cols = rows.iter().map(|r| r.len()).max().unwrap_or(1);
+            let spec = table.cloned().unwrap_or_default();
+            let columns = rows.iter().map(|r| r.len()).max().unwrap_or(1);
+            // Word measures a table in twentieths of a point across the printable
+            // width; 9360 twips is A4 less 0.75in margins on each side.
+            const PRINTABLE: f64 = 9360.0;
+            let total_px: f64 = if spec.cols.iter().any(|w| *w > 0.0) {
+                spec.cols.iter().take(columns).sum()
+            } else {
+                0.0
+            };
+            let width_of = |c: usize| -> i64 {
+                if total_px > 0.0 {
+                    let px = spec.col_width(c, columns, total_px);
+                    (px / total_px * PRINTABLE).round() as i64
+                } else {
+                    (PRINTABLE / columns as f64).round() as i64
+                }
+            };
+
             let mut out = String::from(
-                "<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"pct\"/><w:tblBorders>",
+                "<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"pct\"/>",
             );
-            for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
-                out.push_str(&format!(
-                    "<w:{edge} w:val=\"single\" w:sz=\"4\" w:color=\"D1D5DB\"/>"
-                ));
+            if spec.style == TableStyle::Borderless {
+                out.push_str("<w:tblBorders><w:top w:val=\"none\"/><w:left w:val=\"none\"/><w:bottom w:val=\"none\"/><w:right w:val=\"none\"/><w:insideH w:val=\"none\"/><w:insideV w:val=\"none\"/></w:tblBorders>");
+            } else {
+                out.push_str("<w:tblBorders>");
+                for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
+                    out.push_str(&format!(
+                        "<w:{edge} w:val=\"single\" w:sz=\"4\" w:color=\"D1D5DB\"/>"
+                    ));
+                }
+                out.push_str("</w:tblBorders>");
             }
-            out.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
-            for _ in 0..grid_cols {
-                out.push_str(&format!("<w:gridCol w:w=\"{}\"/>", 9360 / grid_cols.max(1)));
+            out.push_str("</w:tblPr><w:tblGrid>");
+            for c in 0..columns {
+                out.push_str(&format!("<w:gridCol w:w=\"{}\"/>", width_of(c)));
             }
             out.push_str("</w:tblGrid>");
 
             for (r, row) in rows.iter().enumerate() {
-                let is_header = r == 0;
+                let is_header = spec.header_row && r == 0;
                 out.push_str("<w:tr>");
-                if is_header {
-                    out.push_str("<w:trPr><w:tblHeader/></w:trPr>");
+                let height = spec.rows.get(r).copied().filter(|h| *h > 0.0);
+                match (is_header, height) {
+                    (true, Some(h)) => out.push_str(&format!(
+                        "<w:trPr><w:tblHeader/><w:trHeight w:val=\"{}\"/></w:trPr>",
+                        twip(h)
+                    )),
+                    (true, None) => out.push_str("<w:trPr><w:tblHeader/></w:trPr>"),
+                    (false, Some(h)) => out.push_str(&format!(
+                        "<w:trPr><w:trHeight w:val=\"{}\"/></w:trPr>",
+                        twip(h)
+                    )),
+                    (false, None) => {}
                 }
-                for cell in row {
-                    let shading = if is_header {
-                        "<w:shd w:val=\"clear\" w:fill=\"F1F5F9\"/>"
-                    } else {
-                        ""
-                    };
+
+                for c in 0..columns {
+                    let span = spec.span_at(c, r);
+                    // Word writes the span on the anchor and marks the cells it
+                    // swallowed, rather than omitting them.
+                    let mut props = format!("<w:tcW w:w=\"{}\" w:type=\"dxa\"/>", width_of(c));
+                    if let Some(span) = &span {
+                        if span.is_anchor() && span.cols > 1 {
+                            props.push_str(&format!("<w:gridSpan w:val=\"{}\"/>", span.cols));
+                        }
+                        if span.rows > 1 {
+                            props.push_str(if span.is_anchor() {
+                                "<w:vMerge w:val=\"restart\"/>"
+                            } else {
+                                "<w:vMerge/>"
+                            });
+                        }
+                    }
+                    // A cell swallowed horizontally is not emitted at all: the
+                    // anchor's gridSpan already accounts for its column.
+                    if span.as_ref().is_some_and(|s| s.continues_row) {
+                        continue;
+                    }
+
+                    let format = spec.cells.get(&ai_formula::refs::to_ref(c, r));
+                    if let Some(fill) = cell_fill(&spec, format, r) {
+                        props.push_str(&format!("<w:shd w:val=\"clear\" w:fill=\"{fill}\"/>"));
+                    }
+
+                    let empty: Vec<Run> = Vec::new();
+                    let cell = row.get(c).unwrap_or(&empty);
                     let mut cell_style = Override::default();
-                    if is_header {
+                    if is_header || (spec.first_col && c == 0) {
                         cell_style.style.insert("bold".into(), Json::Bool(true));
                     }
+                    if let Some(color) = format.and_then(|f| f.color.as_deref()) {
+                        cell_style.style.insert("color".into(), Json::String(color.into()));
+                    }
+                    let align = format
+                        .and_then(|f| f.align.as_deref())
+                        .map(|a| format!("<w:jc w:val=\"{}\"/>", alignment(a)))
+                        .unwrap_or_default();
+
                     out.push_str(&format!(
-                        "<w:tc><w:tcPr>{shading}</w:tcPr><w:p>{}</w:p></w:tc>",
+                        "<w:tc><w:tcPr>{props}</w:tcPr><w:p><w:pPr>{align}</w:pPr>{}</w:p></w:tc>",
                         runs_xml(cell, Some(&cell_style), &mut ctx.hyperlinks)
                     ));
                 }
@@ -290,6 +405,32 @@ fn block_xml(block: &Block, style: Option<&Override>, ctx: &mut Ctx) -> String {
     }
 }
 
+/// A header band, row banding, or an explicit per-cell colour — as a hex value
+/// Word accepts, or `None` for no shading.
+fn cell_fill(
+    spec: &TableSpec,
+    format: Option<&ai_format::table::CellFormat>,
+    row: usize,
+) -> Option<String> {
+    if let Some(color) = format.and_then(|f| f.fill.as_deref()) {
+        return Some(hex(color));
+    }
+    if spec.header_row && row == 0 {
+        return Some("F1F5F9".to_string());
+    }
+    if spec.banded_rows && spec.style != TableStyle::Borderless {
+        let body_row = if spec.header_row {
+            row.saturating_sub(1)
+        } else {
+            row
+        };
+        if body_row % 2 == 1 {
+            return Some("F8FAFC".to_string());
+        }
+    }
+    None
+}
+
 fn drawing_xml(rel_id: &str, alt: &str, width: f64, height: f64, index: usize) -> String {
     format!(
         "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">\
@@ -327,7 +468,7 @@ fn chart_block_xml(spec: &ai_format::chart::ChartSpec, ctx: &mut Ctx) -> String 
     let table = chart_to_markdown_table(spec);
     for block in parse_markdown(&table) {
         if matches!(block, Block::Table { .. }) {
-            out.push_str(&block_xml(&block, None, ctx));
+            out.push_str(&block_xml(&block, None, None, ctx));
         }
     }
 
@@ -338,7 +479,7 @@ fn chart_block_xml(spec: &ai_format::chart::ChartSpec, ctx: &mut Ctx) -> String 
     out
 }
 
-fn section_xml(section: &Section, ctx: &mut Ctx) -> (String, String) {
+fn section_xml(section: &Section, ctx: &mut Ctx, running: &[(String, &str)]) -> (String, String) {
     let mut body = String::new();
 
     for block in &section.blocks {
@@ -348,7 +489,12 @@ fn section_xml(section: &Section, ctx: &mut Ctx) -> (String, String) {
             continue;
         }
         for parsed in parse_markdown(&block.md) {
-            body.push_str(&block_xml(&parsed, block.format_override.as_ref(), ctx));
+            body.push_str(&block_xml(
+                &parsed,
+                block.format_override.as_ref(),
+                block.table.as_ref(),
+                ctx,
+            ));
         }
     }
     if body.is_empty() {
@@ -360,8 +506,21 @@ fn section_xml(section: &Section, ctx: &mut Ctx) -> (String, String) {
     // `twip` already folds in the px -> pt step. The JavaScript exporter applied
     // both conversions, which shipped every page and margin at 75% of its size:
     // A4 arrived in Word as 6.2in wide instead of 8.27in.
+    // Word needs the orientation stated as well as the swapped size, or it
+    // prints a landscape page onto a portrait sheet.
+    let orient = if section.page.landscape() {
+        " w:orient=\"landscape\""
+    } else {
+        ""
+    };
+    // The references come before the page size, which is the order the schema
+    // requires — Word refuses to open a section whose children are shuffled.
+    let references: String = running
+        .iter()
+        .map(|(id, kind)| format!("<w:{kind}Reference w:type=\"default\" r:id=\"{id}\"/>"))
+        .collect();
     let props = format!(
-        "<w:sectPr><w:pgSz w:w=\"{}\" w:h=\"{}\"/><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/>{}</w:sectPr>",
+        "<w:sectPr>{references}<w:pgSz w:w=\"{}\" w:h=\"{}\"{orient}/><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>{}</w:sectPr>",
         twip(w),
         twip(h),
         twip(m.top),
@@ -395,6 +554,70 @@ fn read_asset(dir: &Path, src: &str) -> Option<(Vec<u8>, String)> {
     Some((data, ext))
 }
 
+/// A header or footer part.
+///
+/// The three slots are laid out with a centre and a right tab stop, which is how
+/// Word itself writes a header — and why an imported one splits on tabs.
+fn running_xml(running: &ai_format::model::Running, kind: &str) -> String {
+    let field = |token: &str, instruction: &str| {
+        // A field rather than a literal number: the whole point of a page number
+        // is that Word recomputes it per page.
+        let _ = token;
+        format!("<w:fldSimple w:instr=\" {instruction} \"><w:r><w:t>1</w:t></w:r></w:fldSimple>")
+    };
+    let runs = |text: &str| {
+        let mut out = String::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            let next = ["{PAGE}", "{PAGES}", "{DATE}"]
+                .iter()
+                .filter_map(|token| rest.find(token).map(|at| (at, *token)))
+                .min();
+            match next {
+                Some((at, token)) => {
+                    if at > 0 {
+                        out.push_str(&format!(
+                            "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
+                            esc(&rest[..at])
+                        ));
+                    }
+                    out.push_str(&field(
+                        token,
+                        match token {
+                            "{PAGE}" => "PAGE",
+                            "{PAGES}" => "NUMPAGES",
+                            _ => "DATE",
+                        },
+                    ));
+                    rest = &rest[at + token.len()..];
+                }
+                None => {
+                    out.push_str(&format!(
+                        "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
+                        esc(rest)
+                    ));
+                    break;
+                }
+            }
+        }
+        out
+    };
+
+    let tab = "<w:r><w:tab/></w:r>";
+    let body = format!(
+        "{}{tab}{}{tab}{}",
+        runs(&running.left),
+        runs(&running.center),
+        runs(&running.right)
+    );
+    let element = if kind == "header" { "hdr" } else { "ftr" };
+    format!(
+        "<w:{element} xmlns:w=\"{NS_W}\" xmlns:r=\"{NS_R}\">\
+         <w:p><w:pPr><w:tabs><w:tab w:val=\"center\" w:pos=\"4680\"/><w:tab w:val=\"right\" w:pos=\"9360\"/></w:tabs></w:pPr>{body}</w:p>\
+         </w:{element}>"
+    )
+}
+
 /// Export a document to `.docx`.
 pub fn export(project: &Project) -> Result<Vec<u8>> {
     let mut ctx = Ctx {
@@ -404,9 +627,29 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     };
 
     let sections = project.sections();
+    // Header and footer parts, one pair per section that has them.
+    let mut running_parts: Vec<(String, String, &'static str)> = Vec::new();
     let mut body = String::new();
     for (i, section) in sections.iter().enumerate() {
-        let (content, props) = section_xml(section, &mut ctx);
+        let mut references: Vec<(String, &str)> = Vec::new();
+        for (kind, running) in [
+            ("header", section.page.header.as_ref()),
+            ("footer", section.page.footer.as_ref()),
+        ] {
+            let Some(running) = running.filter(|r| !r.is_empty()) else {
+                continue;
+            };
+            let number = running_parts.len() + 1;
+            let file = format!("{kind}{number}.xml");
+            let id = format!("rIdRun{number}");
+            running_parts.push((
+                file,
+                running_xml(running, kind),
+                if kind == "header" { "header" } else { "footer" },
+            ));
+            references.push((id, if kind == "header" { "header" } else { "footer" }));
+        }
+        let (content, props) = section_xml(section, &mut ctx, &references);
         body.push_str(&content);
         // Every section but the last carries its properties in a trailing
         // paragraph; the last one carries them on the body itself.
@@ -451,6 +694,19 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
             url.clone(),
         ));
     }
+    let header_rel = format!("{REL}/header");
+    let footer_rel = format!("{REL}/footer");
+    for (i, (file, _, kind)) in running_parts.iter().enumerate() {
+        rels.push((
+            format!("rIdRun{}", i + 1),
+            if *kind == "header" {
+                header_rel.as_str()
+            } else {
+                footer_rel.as_str()
+            },
+            file.clone(),
+        ));
+    }
 
     let mut content_types = String::from(
         "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
@@ -464,6 +720,11 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     for (path, _, content_type) in &ctx.media.parts {
         content_types.push_str(&format!(
             "<Override PartName=\"/word/{path}\" ContentType=\"{content_type}\"/>"
+        ));
+    }
+    for (file, _, kind) in &running_parts {
+        content_types.push_str(&format!(
+            "<Override PartName=\"/word/{file}\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml\"/>"
         ));
     }
     content_types.push_str("</Types>");
@@ -495,6 +756,9 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     for (path, data, _) in ctx.media.parts {
         pkg.add(&format!("word/{path}"), data);
     }
+    for (file, xml, _) in &running_parts {
+        pkg.add_xml(&format!("word/{file}"), xml);
+    }
 
     pkg.finish()
 }
@@ -502,15 +766,22 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
 fn styles_xml() -> String {
     let mut out = format!("<w:styles xmlns:w=\"{NS_W}\">");
     out.push_str(
-        "<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\" w:eastAsia=\"Malgun Gothic\"/><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"120\" w:line=\"276\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault></w:docDefaults>",
+        &format!(
+            // The one family the app draws with, so a document exported and
+            // reopened in Word is set in what the editor showed. A reader who
+            // does not have it gets Word's own substitution, which is the same
+            // thing that happens to any font a document names.
+            "<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"{font}\" w:hAnsi=\"{font}\" w:eastAsia=\"{font}\" w:cs=\"{font}\"/><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"120\" w:line=\"276\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault></w:docDefaults>",
+            font = ai_format::font::FAMILY
+        ),
     );
     out.push_str("<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>");
-    for (i, size) in HEADING_SIZE.iter().enumerate() {
-        let level = i + 1;
+    for level in 1..=6 {
+        let i = level - 1;
+        let size = heading_half_points(level);
         out.push_str(&format!(
             "<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\"><w:name w:val=\"heading {level}\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:keepNext/><w:outlineLvl w:val=\"{}\"/><w:spacing w:before=\"240\" w:after=\"120\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"{}\"/></w:rPr></w:style>",
-            i,
-            (pt(*size) * 2.0).round() as i64
+            i, size
         ));
     }
     out.push_str("<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:contextualSpacing/></w:pPr></w:style>");

@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { indexToCol, toRef, displayValue, dependencies, LIMITS } from '../core/index.js';
-import { normalizeRange, mergeCovering, fillTarget } from './gridOps.js';
+import { normalizeRange, mergeCovering, fillTarget, cycleRefLocks } from './gridOps.js';
 import SheetCharts from './SheetCharts.jsx';
 
 const ROW_BUFFER = 24;
@@ -23,12 +23,14 @@ const ROW_HEAD_W = 44;
 export default function Sheet({
   sheet, sel, onSelChange, editing, showFormulas, zoom = 1,
   onEditStart, onCommit, onEditCancel,
-  onFill, onResizeCol, onResizeRow, onAutoFitCol, onContextMenu,
+  onFill, onResizeCol, onResizeRow, onAutoFitCol, onAutoFitRow, onContextMenu,
   findHits, currentHit,
   selectedChartId, onSelectChart, onMoveChart, onEditChart, onDeleteChart,
 }) {
   const containerRef = useRef(null);
   const [dragSelect, setDragSelect] = useState(false);
+  /** `'row'` or `'col'` while a drag across the headers is selecting. */
+  const [headerDrag, setHeaderDrag] = useState(null);
   const [fillTo, setFillTo] = useState(null);
   const [resizing, setResizing] = useState(null);
 
@@ -183,11 +185,17 @@ export default function Sheet({
     <div
       className="sheet"
       ref={containerRef}
-      onMouseUp={() => setDragSelect(false)}
-      onMouseLeave={() => setDragSelect(false)}
+      onMouseUp={() => {
+        setDragSelect(false);
+        setHeaderDrag(null);
+      }}
+      onMouseLeave={() => {
+        setDragSelect(false);
+        setHeaderDrag(null);
+      }}
     >
       <div style={{ position: 'relative', width: totalWidth }}>
-      <table style={{ width: totalWidth, fontSize: `${Math.max(8, Math.round(13 * z))}px` }}>
+      <table style={{ width: totalWidth, fontSize: `${Math.max(8, Math.round(LIMITS.cellPx * z))}px` }}>
         <colgroup>
           <col style={{ width: rowHeadW }} />
           {Array.from({ length: visibleCols }, (_, c) => (
@@ -217,10 +225,15 @@ export default function Sheet({
                   style={frozen ? { left: colOffset[c], zIndex: 5 } : undefined}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
-                    onSelChange({ row: 0, col: c, row2: visibleRows - 1, col2: c });
+                    if (e.shiftKey) onSelChange({ ...sel, row2: visibleRows - 1, col2: c });
+                    else onSelChange({ row: 0, col: c, row2: visibleRows - 1, col2: c });
+                    setHeaderDrag('col');
+                  }}
+                  onMouseEnter={() => {
+                    if (headerDrag === 'col') onSelChange({ ...sel, row2: visibleRows - 1, col2: c });
                   }}
                   onContextMenu={(e) => onContextMenu?.(e, { kind: 'col', index: c })}
-                  title={`${indexToCol(c)}열 — 눌러 전체 선택, 경계를 끌어 너비 조절`}
+                  title={`${indexToCol(c)}열 — 눌러 전체 선택, 끌어 여러 열 선택, 경계를 끌어 너비 조절`}
                 >
                   {indexToCol(c)}
                   <span
@@ -257,10 +270,18 @@ export default function Sheet({
                   style={{ left: 0, ...(frozenRow ? { top: rowOffset[r], zIndex: 4 } : {}) }}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
-                    onSelChange({ row: r, col: 0, row2: r, col2: visibleCols - 1 });
+                    // Shift extends from the anchor row, and a plain press
+                    // starts a drag across the row headers — both of which are
+                    // how a block of rows gets selected before an insert.
+                    if (e.shiftKey) onSelChange({ ...sel, row2: r, col2: visibleCols - 1 });
+                    else onSelChange({ row: r, col: 0, row2: r, col2: visibleCols - 1 });
+                    setHeaderDrag('row');
+                  }}
+                  onMouseEnter={() => {
+                    if (headerDrag === 'row') onSelChange({ ...sel, row2: r, col2: visibleCols - 1 });
                   }}
                   onContextMenu={(e) => onContextMenu?.(e, { kind: 'row', index: r })}
-                  title={`${r + 1}행 — 눌러 전체 선택, 경계를 끌어 높이 조절`}
+                  title={`${r + 1}행 — 눌러 전체 선택, 끌어 여러 행 선택, 경계를 끌어 높이 조절`}
                 >
                   {r + 1}
                   <span
@@ -271,7 +292,12 @@ export default function Sheet({
                       resizingRef.current = { axis: 'row', index: r, startY: e.clientY, origin: rowHeight(r), size: rowHeight(r) };
                       setResizing(resizingRef.current);
                     }}
-                    title="높이 조절"
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onAutoFitRow?.(r);
+                    }}
+                    title="높이 조절 (두 번 누르면 자동 맞춤)"
                   />
                 </th>
 
@@ -380,13 +406,17 @@ function CellView({ cell, showFormulas, highlight }) {
   const style = cell.style ?? {};
   return (
     <div
-      className={`cell cell--${showFormulas && cell.f ? 's' : type}`}
+      className={`cell cell--${showFormulas && cell.f ? 's' : type}${style.wrap ? ' cell--wrap' : ''}`}
       style={{
+        // Relative to the sheet's own text, so an imported workbook's 16pt
+        // heading stays 16pt-shaped at every zoom without being told the zoom.
+        fontSize: style.fontSize ? `${(style.fontSize / LIMITS.cellPx).toFixed(3)}em` : undefined,
         fontWeight: style.bold ? 700 : undefined,
         fontStyle: style.italic ? 'italic' : undefined,
         textDecoration: style.underline ? 'underline' : undefined,
         color: style.color,
         justifyContent: alignOf(style.align),
+        alignItems: vAlignOf(style.valign),
       }}
       title={cell.f ? `${cell.f} → ${displayValue(cell)}` : undefined}
     >
@@ -429,6 +459,14 @@ function alignOf(align) {
   return undefined; // fall back to the type-based class
 }
 
+/** Excel's default is bottom, which is why an unset cell sits on the baseline. */
+function vAlignOf(valign) {
+  if (valign === 'top') return 'flex-start';
+  if (valign === 'middle') return 'center';
+  if (valign === 'bottom') return 'flex-end';
+  return undefined;
+}
+
 const BORDER = '1px solid #9ca3af';
 
 function cellVisualStyle(cell) {
@@ -449,6 +487,11 @@ function cellVisualStyle(cell) {
 /**
  * In-cell editor. Enter/Tab commit with a direction so the selection advances the
  * way it does in Excel; Escape restores the previous content.
+ *
+ * A textarea rather than an input, because Alt+Enter has to put a real newline
+ * in the cell — the way every two-line column heading in every workbook is
+ * made. Enter still commits, so it behaves like a single-line box until asked
+ * not to.
  */
 function CellEditor({ initial, onCommit, onCancel }) {
   const ref = useRef(null);
@@ -461,25 +504,50 @@ function CellEditor({ initial, onCommit, onCancel }) {
   }, []);
 
   return (
-    <input
+    <textarea
       ref={ref}
       className="cell__editor"
+      rows={1}
       value={value}
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
+        if (e.key === 'Enter' && e.altKey) {
+          // 셀 안에서 줄 바꾸기.
+          e.preventDefault();
+          const el = e.currentTarget;
+          const at = el.selectionStart;
+          const next = `${value.slice(0, at)}\n${value.slice(el.selectionEnd)}`;
+          setValue(next);
+          requestAnimationFrame(() => ref.current?.setSelectionRange(at + 1, at + 1));
+          return;
+        }
         if (e.key === 'Enter') {
           e.preventDefault();
           onCommit(value, e.shiftKey ? 'up' : 'down');
-        } else if (e.key === 'Tab') {
+          return;
+        }
+        if (e.key === 'Tab') {
           e.preventDefault();
           onCommit(value, e.shiftKey ? 'left' : 'right');
-        } else if (e.key === 'Escape') {
+          return;
+        }
+        if (e.key === 'Escape') {
           e.preventDefault();
           onCancel();
+          return;
+        }
+        // F4 cycles the $ locks on the reference under the caret, as in Excel.
+        if (e.key === 'F4') {
+          const next = cycleRefLocks(value, e.currentTarget.selectionStart);
+          if (!next) return;
+          e.preventDefault();
+          setValue(next.value);
+          requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
         }
       }}
       onBlur={() => onCommit(value, null)}
       spellCheck={false}
+      wrap="off"
     />
   );
 }

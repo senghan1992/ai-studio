@@ -94,6 +94,39 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Indent or outdent the selected lines by one level.
+ *
+ * Word's Tab at a list item demotes it; in markdown a level is two spaces of
+ * leading whitespace, and that is what a nested bullet is on disk. Returns
+ * `null` when there is nothing to outdent, so the caller can fall back to the
+ * paragraph's own indent.
+ */
+export function indentLines(value, start, end, outdent) {
+  const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+  const lineEndIdx = value.indexOf('\n', end);
+  const lineEnd = lineEndIdx === -1 ? value.length : lineEndIdx;
+  const target = value.slice(lineStart, lineEnd);
+  const lines = target.split('\n');
+
+  if (outdent && !lines.some((l) => /^ {1,2}/.test(l))) return null;
+
+  const next = lines
+    .map((l) => (outdent ? l.replace(/^ {1,2}/, '') : `  ${l}`))
+    .join('\n');
+  const value2 = value.slice(0, lineStart) + next + value.slice(lineEnd);
+  const delta = next.length - target.length;
+  return { value: value2, start: Math.max(lineStart, start + (outdent ? -2 : 2)), end: Math.max(lineStart, end + delta) };
+}
+
+/** True when the line the caret sits on is a bullet or numbered item. */
+export function isListLine(value, caret) {
+  const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
+  const lineEndIdx = value.indexOf('\n', lineStart);
+  const line = value.slice(lineStart, lineEndIdx === -1 ? value.length : lineEndIdx);
+  return /^[ \t]*([-+*]|\d+[.)])[ \t]+/.test(line);
+}
+
 /** Ordered-list aware continuation when the user presses Enter mid-list. */
 export function continueList(value, caret) {
   const lineStart = value.lastIndexOf('\n', caret - 1) + 1;

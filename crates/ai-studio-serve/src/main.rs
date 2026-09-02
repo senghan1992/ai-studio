@@ -116,7 +116,12 @@ async fn main() {
         }
     };
 
-    let mut app = Router::new().nest("/api", api::routes());
+    // Axum's default 2MB body limit would refuse any real Office file, and an
+    // imported deck's base64 is a third larger again than the file itself.
+    let mut app = Router::new().nest(
+        "/api",
+        api::routes().layer(axum::extract::DefaultBodyLimit::max(192 * 1024 * 1024)),
+    );
 
     // The UI, from a directory if one was given or found, else from the binary.
     let dist = options.web_dist.clone().or_else(find_web_dist);

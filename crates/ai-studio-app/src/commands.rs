@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use tauri::State;
 
 use ai_core::{
-    AssetEntry, AssetList, CreateRequest, FileBody, FileList, Health, ProjectList, ProjectPayload,
-    RecalcRequest, RecalcResponse, Studio, UploadAssetRequest,
+    AssetEntry, AssetList, CreateRequest, FileBody, FileList, Health, ImportRequest,
+    ImportResponse, ProjectList, ProjectPayload, RecalcRequest, RecalcResponse, Studio,
+    UploadAssetRequest,
 };
 
 /// A command error, rendered as a plain message the UI already knows how to show.
@@ -102,6 +103,45 @@ pub fn upload_asset(
     request: UploadAssetRequest,
 ) -> Result<AssetEntry> {
     Ok(studio.upload_asset(&folder, request)?)
+}
+
+#[tauri::command]
+pub fn import_file(studio: State<'_, Studio>, request: ImportRequest) -> Result<ImportResponse> {
+    Ok(studio.import(request)?)
+}
+
+/// Let the user pick an Office file and import it.
+///
+/// Reading the bytes natively rather than through the web layer keeps a large
+/// deck off the IPC channel twice over — the file never becomes base64 at all.
+#[tauri::command]
+pub async fn open_office_file(
+    app: tauri::AppHandle,
+    studio: State<'_, Studio>,
+) -> Result<Option<ImportResponse>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .add_filter("Office 문서", &["pptx", "docx", "xlsx"])
+        .add_filter("프레젠테이션", &["pptx", "pptm", "potx"])
+        .add_filter("문서", &["docx", "docm", "dotx"])
+        .add_filter("스프레드시트", &["xlsx", "xlsm", "xltx"])
+        .pick_file(move |path| {
+            let _ = tx.send(path.and_then(|p| p.into_path().ok()));
+        });
+
+    let Ok(Some(source)) = rx.recv() else {
+        return Ok(None);
+    };
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "문서".to_string());
+    let bytes = std::fs::read(&source).map_err(ai_core::Error::from)?;
+
+    Ok(Some(studio.import_bytes(&bytes, &name)?))
 }
 
 #[tauri::command]

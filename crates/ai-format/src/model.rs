@@ -13,6 +13,8 @@ use crate::blocks::Kind;
 use crate::chart::{CellSource, ChartSpec};
 use crate::geometry::{Box, Canvas};
 use crate::mdblocks::BlockType;
+use crate::shape::ShapeSpec;
+use crate::table::TableSpec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -112,7 +114,7 @@ impl Default for Theme {
         Self {
             name: "aurora".into(),
             accent: "#4f46e5".into(),
-            font: "Inter".into(),
+            font: crate::font::FAMILY.into(),
         }
     }
 }
@@ -157,8 +159,18 @@ pub struct SlideBlock {
     pub w: f64,
     pub h: f64,
     pub z: f64,
+    /// Text formatting: font size, weight, alignment, colour. Open-ended on
+    /// purpose — the editors add keys here as they grow.
     #[serde(default)]
     pub style: IndexMap<String, Json>,
+    /// Geometry and outline for a `shape` block. Typed rather than folded into
+    /// `style` because the importer and the exporter both depend on the exact
+    /// field names, and a typo there loses a shape silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ShapeSpec>,
+    /// Layout for a `table` block. Its text is the markdown table in `md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<TableSpec>,
     #[serde(default)]
     pub locked: bool,
 }
@@ -225,13 +237,59 @@ impl Default for Margin {
     }
 }
 
+/// A header or footer line: three slots, as Word and Excel both model them.
+///
+/// The tokens `{PAGE}`, `{PAGES}` and `{DATE}` are substituted when the page is
+/// drawn, which is what makes a page number a page number rather than a literal
+/// "1" repeated on every sheet.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Running {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub left: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub center: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub right: String,
+}
+
+impl Running {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.center.is_empty() && self.right.is_empty()
+    }
+
+    /// The three slots with the page tokens filled in.
+    pub fn resolved(&self, page: usize, pages: usize, today: &str) -> [String; 3] {
+        let fill = |text: &str| {
+            text.replace("{PAGE}", &page.to_string())
+                .replace("{PAGES}", &pages.to_string())
+                .replace("{DATE}", today)
+        };
+        [fill(&self.left), fill(&self.center), fill(&self.right)]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub size: String,
+    /// Explicit page size in px, written only when the paper name does not
+    /// already say it — a landscape A4, or a size Word let the author type in.
+    ///
+    /// A name alone cannot describe "A4 rotated" or "180×250mm", and a document
+    /// whose author set the page deliberately is exactly the one that must not
+    /// be reflowed onto A4 when it is opened here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
     #[serde(default)]
     pub margin: Margin,
     #[serde(default = "one")]
     pub columns: u32,
+    /// Drawn at the top of every page, above the text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Running>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<Running>,
 }
 
 fn one() -> u32 {
@@ -242,20 +300,98 @@ impl Default for Page {
     fn default() -> Self {
         Self {
             size: "A4".into(),
+            width: None,
+            height: None,
             margin: Margin::default(),
             columns: 1,
+            header: None,
+            footer: None,
         }
     }
 }
 
+/// The papers this format names, portrait, in px at 96dpi.
+///
+/// The millimetre sizes rounded the way a 96dpi screen rounds them: A4 is
+/// 210mm, which is 793.7px, which is the 794 Word itself lays out.
+pub const PAPERS: &[(&str, f64, f64)] = &[
+    ("A3", 1123.0, 1587.0),
+    ("A4", 794.0, 1123.0),
+    ("A5", 559.0, 794.0),
+    ("B5", 688.0, 971.0),
+    ("Letter", 816.0, 1056.0),
+    ("Legal", 816.0, 1344.0),
+];
+
+/// The label a page of no named size carries.
+pub const CUSTOM_PAPER: &str = "사용자 지정";
+
 impl Page {
     /// Page pixel dimensions at the editor's 96dpi.
+    ///
+    /// An explicit size wins over the name, which is what makes a landscape or
+    /// hand-typed page keep its proportions.
     pub fn dimensions(&self) -> (f64, f64) {
-        match self.size.as_str() {
-            "Letter" => (816.0, 1056.0),
-            "A5" => (559.0, 794.0),
-            _ => (794.0, 1123.0),
+        match (self.width, self.height) {
+            (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
+            _ => Page::paper(&self.size).unwrap_or((794.0, 1123.0)),
         }
+    }
+
+    /// Portrait dimensions of a named paper.
+    pub fn paper(name: &str) -> Option<(f64, f64)> {
+        PAPERS
+            .iter()
+            .find(|(paper, ..)| *paper == name)
+            .map(|(_, w, h)| (*w, *h))
+    }
+
+    /// The paper a size is, in either orientation, within a pixel of rounding.
+    ///
+    /// Word writes A4 as 11906×16838 twips, which is 793.73×1122.53px; a size
+    /// has to be recognised through that, not compared exactly.
+    pub fn name_for(w: f64, h: f64) -> Option<&'static str> {
+        PAPERS
+            .iter()
+            .find(|(_, pw, ph)| {
+                let near = |a: f64, b: f64| (a - b).abs() <= 2.0;
+                (near(w, *pw) && near(h, *ph)) || (near(w, *ph) && near(h, *pw))
+            })
+            .map(|(name, ..)| *name)
+    }
+
+    /// The same page at a new size. Everything but the size is carried over.
+    pub fn resized(&self, w: f64, h: f64) -> Page {
+        Page {
+            header: self.header.clone(),
+            footer: self.footer.clone(),
+            ..Page::sized(w, h, self.margin, self.columns)
+        }
+    }
+
+    /// A page of the given pixel size, named when it is a known paper and only
+    /// carrying explicit dimensions when the name is not enough.
+    pub fn sized(w: f64, h: f64, margin: Margin, columns: u32) -> Page {
+        let name = Page::name_for(w, h);
+        let portrait = name
+            .and_then(Page::paper)
+            .is_some_and(|(pw, ph)| (pw - w).abs() <= 2.0 && (ph - h).abs() <= 2.0);
+        Page {
+            size: name.unwrap_or(CUSTOM_PAPER).to_string(),
+            width: (!portrait).then_some(w),
+            height: (!portrait).then_some(h),
+            margin,
+            columns,
+            header: None,
+            footer: None,
+        }
+    }
+
+    /// True when the page is wider than it is tall, which is what Office calls
+    /// landscape orientation.
+    pub fn landscape(&self) -> bool {
+        let (w, h) = self.dimensions();
+        w > h
     }
 }
 
@@ -300,6 +436,9 @@ pub struct DocBlock {
     pub block_type: BlockType,
     #[serde(rename = "override", default, skip_serializing_if = "Option::is_none")]
     pub format_override: Option<Override>,
+    /// Layout for a table block, alongside the markdown table in `md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<TableSpec>,
 }
 
 mod block_type_serde {
@@ -453,4 +592,54 @@ pub struct ProjectSummary {
     pub modified: Option<String>,
     pub count: usize,
     pub label: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_named_paper_needs_no_explicit_size() {
+        let page = Page::sized(794.0, 1123.0, Margin::default(), 1);
+        assert_eq!(page.size, "A4");
+        assert_eq!((page.width, page.height), (None, None));
+        assert_eq!(page.dimensions(), (794.0, 1123.0));
+        assert!(!page.landscape());
+    }
+
+    #[test]
+    fn a_landscape_paper_keeps_its_name_and_states_its_size() {
+        // "A4" alone cannot describe a page turned sideways, so the name says
+        // which paper and the dimensions say how it is turned.
+        let page = Page::sized(1123.0, 794.0, Margin::default(), 1);
+        assert_eq!(page.size, "A4");
+        assert_eq!(page.dimensions(), (1123.0, 794.0));
+        assert!(page.landscape());
+    }
+
+    #[test]
+    fn a_size_no_paper_matches_is_labelled_and_kept() {
+        let page = Page::sized(680.0, 945.0, Margin::default(), 1);
+        assert_eq!(page.size, CUSTOM_PAPER);
+        assert_eq!(page.dimensions(), (680.0, 945.0));
+    }
+
+    #[test]
+    fn a_paper_is_recognised_through_words_rounding() {
+        // Word writes A4 as 11906 twips, which is 793.73px.
+        assert_eq!(Page::name_for(793.0, 1123.0), Some("A4"));
+        assert_eq!(Page::name_for(816.0, 1056.0), Some("Letter"));
+        assert_eq!(Page::name_for(700.0, 900.0), None);
+    }
+
+    #[test]
+    fn an_explicit_size_outranks_the_name() {
+        // What a file written before explicit sizes existed looks like, and what
+        // one written by an editor that resized the page looks like.
+        let named: Page = serde_json::from_str(r#"{"size":"A4"}"#).unwrap();
+        assert_eq!(named.dimensions(), (794.0, 1123.0));
+        let sized: Page =
+            serde_json::from_str(r#"{"size":"A4","width":1123,"height":794}"#).unwrap();
+        assert_eq!(sized.dimensions(), (1123.0, 794.0));
+    }
 }

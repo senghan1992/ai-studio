@@ -10,7 +10,7 @@ use serde_json::{json, Value as Json};
 use crate::deck::{make_slide, normalize_slide, read_slide, write_slide};
 use crate::digest::build_digest;
 use crate::doc::{make_section, normalize_section, read_section, write_section};
-use crate::grid::{make_sheet, normalize_sheet, read_sheet, write_sheet};
+use crate::grid::{make_sheet, normalize_sheet, read_sheet, write_sheet_in};
 use crate::ids::{new_project_id, pad, slugify};
 use crate::model::{Items, Manifest, ManifestEntry, Project, ProjectSummary, ProjectType, Theme};
 
@@ -475,7 +475,9 @@ fn serialize_item(items: &Items, i: usize) -> (String, Json, String) {
             (files.md, files.meta, v[i].id.clone())
         }
         Items::Sheets(v) => {
-            let files = write_sheet(&v[i]);
+            // The sibling sheets come along: a cell holding `=요약!B4` has to
+            // project its value, not a `#REF!`.
+            let files = write_sheet_in(&v[i], &crate::grid::book(v));
             (files.md, files.cells, v[i].id.clone())
         }
     }

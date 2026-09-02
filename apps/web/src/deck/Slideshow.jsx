@@ -2,26 +2,32 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { renderMarkdown } from '../lib/markdown.js';
 import { assetUrl, isProjectAsset } from '../api.js';
 import ChartView from '../components/ChartView.jsx';
+import ShapeView from '../components/ShapeView.jsx';
+import TableView from '../components/TableView.jsx';
 
 /**
  * Full-screen presentation mode.
  *
  * PowerPoint's F5 is muscle memory, and its absence is the loudest missing thing
  * in a deck editor. Same block geometry as the canvas, scaled to the viewport, with
- * arrow/space/PageDown advancing, Esc leaving, and `S` showing speaker notes.
+ * arrow/space/PageDown advancing, Esc leaving, `S` showing speaker notes, and
+ * `B`/`W` blanking the screen the way PowerPoint's presenter does.
  */
 export default function Slideshow({ slides, start = 0, folder, onClose }) {
   const [index, setIndex] = useState(start);
   const [showNotes, setShowNotes] = useState(false);
+  /** `null`, `'black'` or `'white'` — PowerPoint's B and W keys. */
+  const [blank, setBlank] = useState(null);
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
 
   const slide = slides[Math.min(index, slides.length - 1)];
   const canvas = slide?.canvas ?? { w: 1280, h: 720, bg: '#ffffff' };
 
-  const go = useCallback(
-    (delta) => setIndex((i) => Math.min(slides.length - 1, Math.max(0, i + delta))),
-    [slides.length]
-  );
+  const go = useCallback((delta) => {
+    // Advancing un-blanks the screen, as it does in PowerPoint.
+    setBlank(null);
+    setIndex((i) => Math.min(slides.length - 1, Math.max(0, i + delta)));
+  }, [slides.length]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -57,6 +63,21 @@ export default function Slideshow({ slides, start = 0, folder, onClose }) {
         case 'S':
           e.preventDefault();
           setShowNotes((v) => !v);
+          break;
+        // PowerPoint blanks the screen on B (black) and W (white), and any
+        // other key brings the slide back. Presenters use it to take the room's
+        // attention off the screen.
+        case 'b':
+        case 'B':
+        case '.':
+          e.preventDefault();
+          setBlank((v) => (v === 'black' ? null : 'black'));
+          break;
+        case 'w':
+        case 'W':
+        case ',':
+          e.preventDefault();
+          setBlank((v) => (v === 'white' ? null : 'white'));
           break;
         default:
           break;
@@ -100,15 +121,28 @@ export default function Slideshow({ slides, start = 0, folder, onClose }) {
               width: block.w * scale,
               height: block.h * scale,
               zIndex: block.z ?? 1,
-              ...(block.kind === 'shape'
-                ? { background: block.style?.fill ?? '#e5e7eb', borderRadius: (block.style?.radius ?? 6) * scale }
-                : {}),
+              transform: transformOf(block),
             }}
           >
+            {/* A shape is its preset geometry here exactly as on the canvas: a
+                diamond drawn as a CSS rectangle is not the slide the author
+                built, and a presentation is where that shows. */}
+            {block.kind === 'shape' && (
+              <ShapeView shape={block.shape} width={block.w * scale} height={block.h * scale} />
+            )}
             <BlockContent block={block} scale={scale} folder={folder} canvasBg={canvas.bg} />
           </div>
         ))}
       </div>
+
+      {/* B and W blank the screen over everything, including the notes. */}
+      {blank && (
+        <div
+          className="slideshow__blank"
+          style={{ background: blank === 'white' ? '#ffffff' : '#000000' }}
+          onClick={() => setBlank(null)}
+        />
+      )}
 
       {showNotes && slide.notes?.trim() && <div className="slideshow__notes">{slide.notes}</div>}
 
@@ -136,6 +170,14 @@ export default function Slideshow({ slides, start = 0, folder, onClose }) {
 function BlockContent({ block, scale, folder, canvasBg }) {
   if (block.kind === 'chart') {
     return <ChartView md={block.md} width={block.w * scale} height={block.h * scale} surface={canvasBg ?? '#ffffff'} />;
+  }
+
+  // A table keeps its column widths, merges and header band — the same renderer
+  // the canvas uses, read-only because there is nothing to edit in a show.
+  if (block.kind === 'table') {
+    return (
+      <TableView md={block.md} spec={block.table} width={block.w * scale} height={block.h * scale} />
+    );
   }
 
   if (block.kind === 'image') {
@@ -181,4 +223,18 @@ function BlockContent({ block, scale, folder, canvasBg }) {
       }}
     />
   );
+}
+
+/**
+ * Rotation and flips, in the same order the canvas applies them.
+ *
+ * Without this a rotated arrow points the wrong way in the show — the one place
+ * the audience is looking at it.
+ */
+function transformOf(block) {
+  const parts = [];
+  if (block.shape?.rotation) parts.push(`rotate(${block.shape.rotation}deg)`);
+  if (block.shape?.flipH) parts.push('scaleX(-1)');
+  if (block.shape?.flipV) parts.push('scaleY(-1)');
+  return parts.length ? parts.join(' ') : undefined;
 }

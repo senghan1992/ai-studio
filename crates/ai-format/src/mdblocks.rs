@@ -25,6 +25,28 @@ pub enum BlockType {
     Hr,
 }
 
+/// How much larger a markdown heading draws than the text around it.
+///
+/// These are the stylesheet's `em` factors for `.md h1`…`h4`. Export reads them
+/// so a heading leaves the app the size it was on screen: a 54px block whose
+/// markdown is `# 제목` draws at 103px, and writing 54pt into the `.pptx` would
+/// halve every title on the way out.
+pub const HEADING_EM: [f64; 6] = [1.9, 1.5, 1.2, 1.05, 1.0, 1.0];
+
+/// How much smaller each nested list level draws on a slide.
+///
+/// PowerPoint's own master steps a body placeholder 32 · 28 · 24 · 20pt, which is
+/// close to seven eighths a level. Word does not do this, so it applies to slides
+/// only — a Word list stays one size however deep it goes.
+pub const NESTED_LIST_EM: f64 = 0.875;
+
+pub fn heading_em(level: usize) -> f64 {
+    HEADING_EM
+        .get(level.saturating_sub(1))
+        .copied()
+        .unwrap_or(1.0)
+}
+
 impl BlockType {
     pub fn as_str(self) -> &'static str {
         match self {

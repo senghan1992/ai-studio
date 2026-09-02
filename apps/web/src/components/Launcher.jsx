@@ -1,6 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { Dialog } from './ui.jsx';
+import {
+  OFFICE_ACCEPT, hasNativePicker, importFile, isOfficeFile, pickAndImport, rejectionFor,
+} from '../lib/importFile.js';
 
 const APPS = [
   {
@@ -39,6 +42,11 @@ export default function Launcher({ onOpen, onError, notify }) {
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [importing, setImporting] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  /** What an import had to convert, shown before the project opens. */
+  const [report, setReport] = useState(null);
+  const fileInput = useRef(null);
 
   const refresh = () => {
     setLoading(true);
@@ -84,8 +92,83 @@ export default function Launcher({ onOpen, onError, notify }) {
     }
   };
 
+  /**
+   * Open an existing Office file.
+   *
+   * Reported rather than silent when something could not be carried across: a
+   * user who is told "그라데이션 채우기는 첫 색으로 단순화했습니다" knows what to
+   * check, where silence leaves them comparing slides by eye.
+   */
+  const runImport = async (run, label) => {
+    setImporting(label);
+    try {
+      const result = await run();
+      if (!result) return;
+      refresh();
+      const notes = result.warnings ?? [];
+      if (notes.length === 0) {
+        notify(`${result.folder}로 가져왔습니다`);
+        onOpen(result.folder, result.project.type);
+        return;
+      }
+      // A toast would be gone before six lines could be read, and these are the
+      // lines that say which parts of the file look different — the same job
+      // Word's own converter dialog does.
+      setReport({ notes, folder: result.folder, type: result.project.type });
+    } catch (e) {
+      onError(e.message);
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  const openOffice = () => {
+    if (hasNativePicker()) {
+      runImport(() => pickAndImport(), 'Office 문서');
+      return;
+    }
+    fileInput.current?.click();
+  };
+
+  const onFiles = (files) => {
+    const file = [...(files ?? [])][0];
+    if (!file) return;
+    if (!isOfficeFile(file.name)) {
+      onError(rejectionFor(file.name));
+      return;
+    }
+    runImport(() => importFile(file), file.name);
+  };
+
   return (
-    <div className="launcher">
+    <div
+      className={`launcher${dragging ? ' is-dropping' : ''}`}
+      onDragOver={(e) => {
+        if (![...e.dataTransfer.types].includes('Files')) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        // Leaving for a child element is not leaving the drop zone.
+        if (e.currentTarget.contains(e.relatedTarget)) return;
+        setDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        onFiles(e.dataTransfer.files);
+      }}
+    >
+      <input
+        ref={fileInput}
+        type="file"
+        accept={OFFICE_ACCEPT}
+        hidden
+        onChange={(e) => {
+          onFiles(e.target.files);
+          e.target.value = '';
+        }}
+      />
       <div className="launcher__inner">
         <header className="launcher__hero">
           <h1>AI Studio</h1>
@@ -97,6 +180,17 @@ export default function Launcher({ onOpen, onError, notify }) {
         </header>
 
         <div className="launcher__grid">
+          <button className="newcard newcard--open" onClick={openOffice} disabled={!!importing}>
+            <span className="newcard__icon newcard__icon--open">↥</span>
+            <span className="newcard__name">
+              {importing ? `${importing} 가져오는 중…` : '기존 파일 열기'}
+            </span>
+            <span className="newcard__desc">
+              PowerPoint · Word · Excel 파일을 이 포맷으로 가져옵니다. 원본은 그대로 두고 폴더 문서를
+              새로 만듭니다.
+            </span>
+            <span className="newcard__files">.pptx · .docx · .xlsx {hasNativePicker() ? '' : '· 끌어다 놓기'}</span>
+          </button>
           {APPS.map((app) => (
             <button
               key={app.type}
@@ -181,6 +275,30 @@ export default function Launcher({ onOpen, onError, notify }) {
             placeholder="문서 제목"
             aria-label="문서 제목"
           />
+        </Dialog>
+      )}
+
+      {report && (
+        <Dialog
+          title="가져왔습니다 — 바뀐 것"
+          confirmLabel="열기"
+          onCancel={() => setReport(null)}
+          onConfirm={() => {
+            const open = report;
+            setReport(null);
+            onOpen(open.folder, open.type);
+          }}
+        >
+          <p style={{ margin: '0 0 8px', fontSize: 13, color: 'var(--ink-2)' }}>
+            <code>{report.folder}</code>로 가져왔습니다. 아래는 이 프로그램에 맞게{' '}
+            <strong>바꾼 것</strong>과 <strong>옮기지 못한 것</strong>입니다. 나머지는 원본
+            그대로입니다.
+          </p>
+          <ul className="importnotes">
+            {report.notes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
         </Dialog>
       )}
 

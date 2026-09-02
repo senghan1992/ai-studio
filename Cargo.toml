@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ai-formula", "crates/ai-format", "crates/ai-export", "crates/ai-core", "crates/ai-studio-serve", "crates/ai-studio-wasm", "crates/ai-studio-app"]
+members = ["crates/ai-formula", "crates/ai-format", "crates/ai-export", "crates/ai-import", "crates/ai-core", "crates/ai-studio-serve", "crates/ai-studio-wasm", "crates/ai-studio-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ repository = "https://github.com/senghan1992/ai-studio"
 ai-formula = { path = "crates/ai-formula" }
 ai-format  = { path = "crates/ai-format" }
 ai-export  = { path = "crates/ai-export" }
+ai-import  = { path = "crates/ai-import" }
 ai-core    = { path = "crates/ai-core" }
 
 serde = { version = "1", features = ["derive"] }

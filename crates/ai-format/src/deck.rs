@@ -8,6 +8,8 @@ use crate::frontmatter::{meta_str, parse_frontmatter, serialize_frontmatter, Met
 use crate::geometry::{auto_layout, clamp_box, Box, Canvas, DEFAULT_CANVAS};
 use crate::ids::{new_block_id, new_slide_id};
 use crate::model::{Slide, SlideBlock, SLIDE_LAYOUTS};
+use crate::shape::ShapeSpec;
+use crate::table::{apply_markdown_authority, TableSpec};
 
 /// Default text styling, applied to text blocks that carry no style of their own.
 pub fn default_text_style() -> IndexMap<String, Json> {
@@ -109,6 +111,8 @@ pub fn read_slide(md: &str, layout: Option<&Json>) -> Slide {
                 h: boxed.h,
                 z: boxed.z,
                 style,
+                shape: read_shape(kind, g),
+                table: read_table(kind, g, &region.md),
                 locked: g
                     .and_then(|g| g.get("locked"))
                     .and_then(|v| v.as_bool())
@@ -134,6 +138,33 @@ pub fn read_slide(md: &str, layout: Option<&Json>) -> Slide {
         blocks,
         file: None,
     }
+}
+
+/// A shape's geometry, defaulted so a hand-written `kind: "shape"` still draws.
+fn read_shape(kind: Kind, entry: Option<&Json>) -> Option<ShapeSpec> {
+    if kind != Kind::Shape {
+        return None;
+    }
+    let parsed = entry
+        .and_then(|g| g.get("shape"))
+        .and_then(|v| serde_json::from_value::<ShapeSpec>(v.clone()).ok());
+    Some(parsed.unwrap_or_default())
+}
+
+/// A table's layout.
+///
+/// The markdown is the authority for anything it can express, so the alignment
+/// row wins over a stale `align` in the JSON. Editing `|---:|` by hand works.
+fn read_table(kind: Kind, entry: Option<&Json>, md: &str) -> Option<TableSpec> {
+    if kind != Kind::Table {
+        return None;
+    }
+    let mut spec = entry
+        .and_then(|g| g.get("table"))
+        .and_then(|v| serde_json::from_value::<TableSpec>(v.clone()).ok())
+        .unwrap_or_default();
+    apply_markdown_authority(&mut spec, md);
+    Some(spec)
 }
 
 fn read_canvas(value: Option<&Json>) -> Canvas {
@@ -196,6 +227,18 @@ pub fn write_slide(slide: &Slide) -> SlideFiles {
                 serde_json::to_value(&b.style).unwrap_or(Json::Null),
             );
         }
+        if let Some(shape) = &b.shape {
+            entry.insert(
+                "shape".into(),
+                serde_json::to_value(shape).unwrap_or(Json::Null),
+            );
+        }
+        if let Some(table) = &b.table {
+            entry.insert(
+                "table".into(),
+                serde_json::to_value(table).unwrap_or(Json::Null),
+            );
+        }
         blocks.insert(b.id.clone(), Json::Object(entry));
     }
 
@@ -239,6 +282,22 @@ pub fn normalize_slide(slide: &Slide) -> Slide {
                 },
                 &canvas,
             );
+            // A block whose kind says shape or table must carry the matching
+            // spec, or the renderer has nothing to draw; one whose kind says
+            // otherwise must not, or a stale spec would resurface on a re-typed
+            // block.
+            let shape = match b.kind {
+                Kind::Shape => Some(b.shape.clone().unwrap_or_default()),
+                _ => None,
+            };
+            let table = match b.kind {
+                Kind::Table => {
+                    let mut spec = b.table.clone().unwrap_or_default();
+                    apply_markdown_authority(&mut spec, &b.md);
+                    Some(spec)
+                }
+                _ => None,
+            };
             SlideBlock {
                 id,
                 kind: b.kind,
@@ -249,6 +308,8 @@ pub fn normalize_slide(slide: &Slide) -> Slide {
                 h: boxed.h,
                 z: boxed.z,
                 style: b.style.clone(),
+                shape,
+                table,
                 locked: b.locked,
             }
         })
@@ -306,6 +367,55 @@ fn text_block(md: String, b: Box, style: &[(&str, Json)]) -> SlideBlock {
         h: b.h,
         z: b.z,
         style: merged,
+        shape: None,
+        table: None,
+        locked: false,
+    }
+}
+
+/// A shape block, the way the gallery inserts one.
+pub fn make_shape(preset: &str, b: Box) -> SlideBlock {
+    SlideBlock {
+        id: new_block_id(),
+        kind: Kind::Shape,
+        md: String::new(),
+        x: b.x,
+        y: b.y,
+        w: b.w,
+        h: b.h,
+        z: b.z,
+        style: [
+            ("align".to_string(), json!("center")),
+            ("valign".to_string(), json!("middle")),
+            ("fontSize".to_string(), json!(18)),
+            ("color".to_string(), json!("#1f2937")),
+        ]
+        .into_iter()
+        .collect(),
+        shape: Some(ShapeSpec {
+            preset: preset.to_string(),
+            ..ShapeSpec::default()
+        }),
+        table: None,
+        locked: false,
+    }
+}
+
+/// A table block of the given size, the way Office's grid picker inserts one.
+pub fn make_table(columns: usize, rows: usize, b: Box) -> SlideBlock {
+    let (md, table) = crate::table::blank_table(columns, rows);
+    SlideBlock {
+        id: new_block_id(),
+        kind: Kind::Table,
+        md,
+        x: b.x,
+        y: b.y,
+        w: b.w,
+        h: b.h,
+        z: b.z,
+        style: IndexMap::new(),
+        shape: None,
+        table: Some(table),
         locked: false,
     }
 }
@@ -513,5 +623,186 @@ mod tests {
         assert!(slide.blocks.is_empty());
         let files = write_slide(&slide);
         assert_eq!(files.layout["blocks"], json!({}));
+    }
+}
+
+#[cfg(test)]
+mod shape_table_tests {
+    use super::*;
+    use crate::shape::{Dash, Fill, Line};
+    use crate::table::TableStyle;
+
+    fn box_of() -> Box {
+        Box {
+            x: 100.0,
+            y: 120.0,
+            w: 300.0,
+            h: 200.0,
+            z: 3.0,
+        }
+    }
+
+    #[test]
+    fn a_shape_keeps_its_preset_through_disk() {
+        let mut slide = make_slide("blank", Some("도형"), 1);
+        let mut shape = make_shape("flowChartDecision", box_of());
+        shape.md = "승인?".into();
+        shape.shape = Some(ShapeSpec {
+            preset: "flowChartDecision".into(),
+            fill: Some(Fill {
+                color: "#dbeafe".into(),
+                opacity: 100.0,
+            }),
+            line: Some(Line {
+                color: "#2a78d6".into(),
+                width: 2.0,
+                dash: Dash::Dash,
+            }),
+            rotation: 15.0,
+            flip_h: true,
+            flip_v: false,
+            adjust: [("adj".to_string(), 20000.0)].into_iter().collect(),
+        });
+        slide.blocks.push(shape);
+
+        let files = write_slide(&slide);
+        // The text is in the markdown, the geometry in the JSON — as everywhere.
+        assert!(files.md.contains("승인?"), "{}", files.md);
+        let json = serde_json::to_string(&files.layout).unwrap();
+        assert!(
+            !json.contains("승인"),
+            "text leaked into the layout: {json}"
+        );
+
+        let back = read_slide(&files.md, Some(&files.layout));
+        let spec = back.blocks[0].shape.as_ref().expect("the shape survived");
+        assert_eq!(spec.preset, "flowChartDecision");
+        assert_eq!(spec.label(), "판단");
+        assert_eq!(spec.rotation, 15.0);
+        assert!(spec.flip_h && !spec.flip_v);
+        assert_eq!(spec.adjust["adj"], 20000.0);
+        assert_eq!(spec.line.as_ref().unwrap().dash, Dash::Dash);
+        assert_eq!(back.blocks[0].md, "승인?");
+    }
+
+    #[test]
+    fn a_shape_with_no_fill_stays_unfilled() {
+        let mut slide = make_slide("blank", None, 1);
+        let mut shape = make_shape("line", box_of());
+        shape.shape = Some(ShapeSpec {
+            preset: "line".into(),
+            fill: None,
+            line: Some(Line {
+                color: "#000000".into(),
+                width: 1.5,
+                dash: Dash::Solid,
+            }),
+            ..ShapeSpec::default()
+        });
+        slide.blocks.push(shape);
+
+        let files = write_slide(&slide);
+        let back = read_slide(&files.md, Some(&files.layout));
+        assert!(back.blocks[0].shape.as_ref().unwrap().fill.is_none());
+    }
+
+    #[test]
+    fn a_table_keeps_its_text_in_markdown_and_layout_in_json() {
+        let mut slide = make_slide("blank", Some("표"), 1);
+        let mut table = make_table(3, 3, box_of());
+        table.md = "| 항목 | 1분기 | 2분기 |\n|---|---:|---:|\n| 제품 A | 1,200 | 1,350 |\n| 제품 B | 980 | 1,120 |".into();
+        table.table = Some(TableSpec {
+            cols: vec![180.0, 120.0, 120.0],
+            rows: vec![32.0, 28.0, 28.0],
+            merges: vec!["B1:C1".into()],
+            header_row: true,
+            banded_rows: true,
+            first_col: true,
+            style: TableStyle::Plain,
+            cells: Default::default(),
+        });
+        slide.blocks.push(table);
+
+        let files = write_slide(&slide);
+        assert!(
+            files.md.contains("| 제품 A | 1,200 | 1,350 |"),
+            "{}",
+            files.md
+        );
+        let json = serde_json::to_string(&files.layout).unwrap();
+        assert!(
+            !json.contains("제품 A"),
+            "cell text leaked into the layout: {json}"
+        );
+        assert!(json.contains("\"cols\":[180"), "{json}");
+
+        let back = read_slide(&files.md, Some(&files.layout));
+        let spec = back.blocks[0].table.as_ref().expect("the table survived");
+        assert_eq!(spec.cols, vec![180.0, 120.0, 120.0]);
+        assert_eq!(spec.merges, vec!["B1:C1"]);
+        assert_eq!(spec.style, TableStyle::Plain);
+        assert!(spec.first_col);
+        // The markdown's alignment row is the authority for alignment.
+        assert_eq!(spec.cells["B1"].align.as_deref(), Some("right"));
+        assert_eq!(spec.cells["C1"].align.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn a_hand_edited_alignment_row_wins_over_stale_json() {
+        let md = "<!-- block:b_t -->\n| a | b |\n|---|:---:|\n| 1 | 2 |\n";
+        let layout = json!({
+            "blocks": {
+                "b_t": {
+                    "x": 0, "y": 0, "w": 400, "h": 120, "z": 1, "kind": "table",
+                    "table": { "cells": { "B1": { "align": "left" } } }
+                }
+            }
+        });
+        let slide = read_slide(md, Some(&layout));
+        let spec = slide.blocks[0].table.as_ref().unwrap();
+        assert_eq!(spec.cells["B1"].align.as_deref(), Some("center"));
+    }
+
+    #[test]
+    fn a_merge_that_no_longer_fits_is_dropped() {
+        // The user deleted a column by editing the markdown.
+        let md = "<!-- block:b_t -->\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let layout = json!({
+            "blocks": {
+                "b_t": {
+                    "x": 0, "y": 0, "w": 400, "h": 120, "z": 1, "kind": "table",
+                    "table": { "merges": ["A1:B1", "C1:D1"] }
+                }
+            }
+        });
+        let slide = read_slide(md, Some(&layout));
+        assert_eq!(
+            slide.blocks[0].table.as_ref().unwrap().merges,
+            vec!["A1:B1"]
+        );
+    }
+
+    #[test]
+    fn changing_a_blocks_kind_drops_the_stale_spec() {
+        let mut slide = make_slide("blank", None, 1);
+        slide.blocks.push(make_shape("ellipse", box_of()));
+        // The user turned it into a text box.
+        slide.blocks[0].kind = Kind::Text;
+        let normalized = normalize_slide(&slide);
+        assert!(normalized.blocks[0].shape.is_none());
+        assert!(normalized.blocks[0].table.is_none());
+    }
+
+    #[test]
+    fn a_hand_written_shape_block_still_draws() {
+        // Only `kind` given; the reader fills in a usable default.
+        let md = "<!-- block:b_s -->\n손으로 쓴 도형\n";
+        let layout = json!({
+            "blocks": { "b_s": { "x": 10, "y": 10, "w": 200, "h": 100, "z": 1, "kind": "shape" } }
+        });
+        let slide = read_slide(md, Some(&layout));
+        let spec = slide.blocks[0].shape.as_ref().unwrap();
+        assert_eq!(spec.preset, "rect");
+        assert!(spec.fill.is_some());
     }
 }

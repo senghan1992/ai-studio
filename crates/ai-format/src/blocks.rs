@@ -210,7 +210,8 @@ impl Kind {
 static CHART_FENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^```chart\b").unwrap());
 static LONE_IMAGE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^!\[[^\]]*\]\([^)]+\)\s*$").unwrap());
 static TABLE_ROW: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^\|.*\|\s*$").unwrap());
-static TABLE_RULE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^\|[\s:|-]+\|\s*$").unwrap());
+static TABLE_RULE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^\|[\s:|-]*-[\s:|-]*\|\s*$").unwrap());
 
 /// Guess a block's kind from its markdown, used when layout JSON has no entry
 /// (a hand-added block) or when the user pastes content.

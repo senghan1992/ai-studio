@@ -120,6 +120,19 @@ export const api = {
       }
     ),
 
+  /**
+   * Convert an Office file into a project.
+   *
+   * `data` is bare base64. The desktop app has a native path that skips the
+   * encoding entirely (see `lib/importFile.js`); this is the browser's route.
+   */
+  importFile: (name, data) =>
+    call(
+      'import_file',
+      { request: { name, data } },
+      { path: '/import', options: json({ data: { name, data } }) }
+    ),
+
   /** Recalculate a sheet on the native side. The editors normally use the wasm
    *  core directly; this is here for parity and for very large sheets. */
   recalc: (cells, names) =>

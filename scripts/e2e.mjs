@@ -283,6 +283,158 @@ console.log('\n■ 제목 변경 → 폴더 이름 추적');
   await call(`/api/projects/${encodeURIComponent(renamed.folder)}`, { method: 'DELETE' });
 }
 
+/* ---------------------------------------------------------------- import */
+
+console.log('\n■ 기존 Office 파일 열기');
+{
+  // Export one of this project's own documents, then open the result. Anything
+  // the writer emits and the reader drops shows up here immediately.
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'grid', title: '내보내고 다시 열기' }),
+  });
+  const url = `${BASE}/api/projects/${encodeURIComponent(created.folder)}/export/xlsx`;
+  const bytes = Buffer.from(await (await fetch(url)).arrayBuffer());
+  check('내보낸 xlsx가 비어 있지 않음', bytes.length > 2000, `${bytes.length} bytes`);
+
+  const imported = await call('/api/import', {
+    method: 'POST',
+    body: JSON.stringify({ name: '가져온 예산.xlsx', data: bytes.toString('base64') }),
+  });
+  check('가져오기가 폴더를 만듦', imported.folder?.endsWith('.aigrid'), imported.folder);
+  check('제목이 파일명에서 옴', imported.project.manifest.title === '가져온 예산');
+
+  const sheet = imported.project.sheets[0];
+  check('수식이 수식으로 들어옴', sheet.cells?.D2?.f === '=B2+C2', JSON.stringify(sheet.cells?.D2));
+  check('표시 형식이 유지됨', sheet.cells?.B2?.fmt === '#,##0');
+  check('셀 스타일이 유지됨', sheet.cells?.A1?.style?.bold === true, JSON.stringify(sheet.cells?.A1));
+  check('틀 고정이 유지됨', sheet.frozen?.rows === 1 && sheet.frozen?.cols === 1);
+
+  // And the folder on disk is a normal project: md, json and AI.md.
+  const files = (await call(`/api/projects/${encodeURIComponent(imported.folder)}/files`)).files.map((f) => f.path);
+  check('디스크에 AI.md가 있음', files.includes('AI.md'), files.join(', '));
+  check('디스크에 md/json 쌍이 있음',
+    files.some((f) => f.endsWith('.md') && f.startsWith('sheets/')) &&
+    files.some((f) => f.endsWith('.cells.json')));
+
+  const digest = await read(imported.folder, 'AI.md');
+  check('AI.md가 가져온 내용을 담음', digest.includes('# 가져온 예산') && digest.includes('### 수식과 계산 결과'));
+
+  await call(`/api/projects/${encodeURIComponent(imported.folder)}`, { method: 'DELETE' });
+  await call(`/api/projects/${encodeURIComponent(created.folder)}`, { method: 'DELETE' });
+}
+
+console.log('\n■ 가져온 문서가 원본대로 보이는지');
+{
+  // A Word document whose author turned the page and set a heading size. Both
+  // are things the editor draws differently from its own defaults, so both have
+  // to arrive as stated rather than as the app would have chosen.
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'doc', title: '가로 문서' }),
+  });
+  const section = created.sections[0];
+  await call(`/api/projects/${encodeURIComponent(created.folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      sections: [{ ...section, page: { size: 'A4', width: 1123, height: 794, margin: section.page.margin, columns: 1 } }],
+    }),
+  });
+
+  const url = `${BASE}/api/projects/${encodeURIComponent(created.folder)}/export/docx`;
+  const bytes = Buffer.from(await (await fetch(url)).arrayBuffer());
+  const imported = await call('/api/import', {
+    method: 'POST',
+    body: JSON.stringify({ name: '가로 문서.docx', data: bytes.toString('base64') }),
+  });
+  const page = imported.project.sections[0].page;
+  check('가로 방향이 유지됨', page.width === 1123 && page.height === 794, JSON.stringify(page));
+  check('용지 이름은 여전히 A4', page.size === 'A4', page.size);
+  // This file was written by the app, so it already names the app's own font and
+  // there is nothing to substitute. A file from Word reports the swap instead —
+  // that path is covered in the Rust tests, where the fonts can be dictated.
+  check('직접 내보낸 파일은 글꼴 경고가 없음',
+    !(imported.warnings ?? []).some((w) => w.includes('글꼴')),
+    JSON.stringify(imported.warnings));
+
+  await call(`/api/projects/${encodeURIComponent(imported.folder)}`, { method: 'DELETE' });
+  await call(`/api/projects/${encodeURIComponent(created.folder)}`, { method: 'DELETE' });
+}
+
+console.log('\n■ 시트 사이 수식과 머리글이 저장을 견디는지');
+{
+  // The two things a real workbook and a real document are full of, through the
+  // API and back off the disk: a cross-sheet formula and a page number.
+  const grid = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'grid', title: '시트 사이 수식' }),
+  });
+  const first = grid.sheets[0];
+  const second = { ...first, id: 'sh_two', name: '요약', cells: { A1: { f: `=${first.name}!B2*2` } }, charts: [] };
+  await call(`/api/projects/${encodeURIComponent(grid.folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sheets: [first, second] }),
+  });
+
+  const reopened = await call(`/api/projects/${encodeURIComponent(grid.folder)}`);
+  const summary = reopened.sheets.find((s) => s.name === '요약');
+  check('시트 사이 수식이 그대로 저장됨', summary.cells.A1.f === `=${first.name}!B2*2`, summary.cells.A1.f);
+  check('값이 다른 시트에서 계산됨', Number(summary.cells.A1.v) === Number(first.cells.B2.v) * 2,
+    `${summary.cells.A1.v} vs ${first.cells.B2.v}`);
+
+  const projection = await read(grid.folder, 'sheets/02-요약.md');
+  check('md 투영에도 계산된 값이 들어감', /2,?\d{3}/.test(projection), projection.slice(0, 200));
+
+  const doc = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'doc', title: '페이지 번호' }),
+  });
+  const section = doc.sections[0];
+  await call(`/api/projects/${encodeURIComponent(doc.folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      sections: [{ ...section, page: { ...section.page, footer: { center: '{PAGE} / {PAGES}' } } }],
+    }),
+  });
+  const backDoc = await call(`/api/projects/${encodeURIComponent(doc.folder)}`);
+  check('바닥글이 저장되고 다시 열림',
+    backDoc.sections[0].page.footer?.center === '{PAGE} / {PAGES}',
+    JSON.stringify(backDoc.sections[0].page));
+
+  const url = `${BASE}/api/projects/${encodeURIComponent(doc.folder)}/export/docx`;
+  const bytes = Buffer.from(await (await fetch(url)).arrayBuffer());
+  const imported = await call('/api/import', {
+    method: 'POST',
+    body: JSON.stringify({ name: '페이지 번호.docx', data: bytes.toString('base64') }),
+  });
+  check('내보낸 docx의 바닥글이 다시 읽힘',
+    imported.project.sections[0].page.footer?.center === '{PAGE} / {PAGES}',
+    JSON.stringify(imported.project.sections[0].page.footer));
+
+  for (const folder of [grid.folder, doc.folder, imported.folder]) {
+    await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+  }
+}
+
+console.log('\n■ 열 수 없는 파일');
+{
+  for (const [name, expect] of [
+    ['old.ppt', /2007년 이전/],
+    ['photo.png', /pptx/],
+  ]) {
+    let message = '';
+    try {
+      await call('/api/import', {
+        method: 'POST',
+        body: JSON.stringify({ name, data: Buffer.from('not office').toString('base64') }),
+      });
+    } catch (e) {
+      message = e.message;
+    }
+    check(`${name}은 무엇을 해야 할지 알려줌`, expect.test(message), message);
+  }
+}
+
 /* -------------------------------------------------------------- security */
 
 console.log('\n■ 경로 보안');

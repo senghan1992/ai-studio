@@ -3,9 +3,16 @@ import {
   recalcSheet, parseCellInput, displayValue, editValue, LIMITS,
 } from '../core/index.js';
 
-/** Recalculate after any mutation so displayed values never lag the formulas. */
-export function withRecalc(sheet) {
-  const { cells } = recalcSheet({ cells: sheet.cells, names: sheet.names });
+/**
+ * Recalculate after any mutation so displayed values never lag the formulas.
+ *
+ * `others` are the workbook's remaining sheets. Without them a cross-sheet
+ * formula cannot be resolved and the core leaves the value already in the cell,
+ * so calling this without the workbook is safe but incomplete — the editor runs
+ * a final pass with the workbook after each edit.
+ */
+export function withRecalc(sheet, others = []) {
+  const { cells } = recalcSheet({ cells: sheet.cells, names: sheet.names, name: sheet.name }, others);
   return { ...sheet, cells };
 }
 
@@ -47,6 +54,40 @@ export function patchCells(sheet, refs, patch) {
       if (patch.fmt) next.fmt = patch.fmt;
       else delete next.fmt;
     }
+    const isEmpty = !next.f && (next.v === null || next.v === undefined || next.v === '') && !next.style && !next.fmt;
+    if (isEmpty) delete cells[ref];
+    else cells[ref] = next;
+  }
+  return withRecalc({ ...sheet, cells });
+}
+
+/**
+ * 서식 복사 — put one cell's whole look onto others.
+ *
+ * This replaces rather than merges, which is the difference between the format
+ * painter and the individual buttons: painting a plain cell's format onto a bold
+ * one has to un-bold it, or the brush can only ever add.
+ */
+export function paintFormat(sheet, refs, { style, fmt }) {
+  const cells = { ...sheet.cells };
+  for (const ref of refs) {
+    const existing = cells[ref];
+    if (!existing) {
+      // Nothing to paint onto: an empty cell stays out of the file unless the
+      // brush actually carries something.
+      if (!style && !fmt) continue;
+      cells[ref] = {
+        v: null,
+        ...(style ? { style: { ...style } } : {}),
+        ...(fmt ? { fmt } : {}),
+      };
+      continue;
+    }
+    const next = { ...existing };
+    delete next.style;
+    delete next.fmt;
+    if (style && Object.keys(style).length) next.style = { ...style };
+    if (fmt) next.fmt = fmt;
     const isEmpty = !next.f && (next.v === null || next.v === undefined || next.v === '') && !next.style && !next.fmt;
     if (isEmpty) delete cells[ref];
     else cells[ref] = next;
@@ -216,6 +257,135 @@ export function selectionStats(sheet, range) {
     }
   }
   return { count, numeric, sum, avg: numeric ? sum / numeric : null };
+}
+
+/* -------------------------------------------------------------- navigation */
+
+const isFilled = (sheet, row, col) => {
+  const cell = sheet.cells[toRef(col, row)];
+  return !!cell && cell.v !== null && cell.v !== undefined && cell.v !== '';
+};
+
+/**
+ * Where Ctrl+Arrow lands, by Excel's rule.
+ *
+ * Inside a run of filled cells it goes to the last one; standing at the edge of
+ * a run it skips the blanks and lands on the next filled cell; with nothing
+ * ahead it goes to the last row or column of the sheet. This is how anyone gets
+ * to the bottom of a ten-thousand-row table, and holding the arrow key instead
+ * is not a substitute.
+ */
+export function edgeOf(sheet, row, col, direction) {
+  const step = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] }[direction];
+  if (!step) return { row, col };
+  const [dr, dc] = step;
+  const lastRow = Math.max(0, (sheet.dims?.rows ?? 200) - 1);
+  const lastCol = Math.max(0, (sheet.dims?.cols ?? 26) - 1);
+  const inside = (r, c) => r >= 0 && c >= 0 && r <= lastRow && c <= lastCol;
+
+  let r = row;
+  let c = col;
+  const nextFilled = isFilled(sheet, r + dr, c + dc);
+  if (isFilled(sheet, r, c) && nextFilled) {
+    // Run to the far end of the block we are standing in.
+    while (inside(r + dr, c + dc) && isFilled(sheet, r + dr, c + dc)) {
+      r += dr;
+      c += dc;
+    }
+    return { row: r, col: c };
+  }
+  // Skip the gap and land on the next thing there is.
+  while (inside(r + dr, c + dc)) {
+    r += dr;
+    c += dc;
+    if (isFilled(sheet, r, c)) return { row: r, col: c };
+  }
+  return { row: r, col: c };
+}
+
+/**
+ * The block of filled cells the cursor is standing in — Excel's "current
+ * region", which is what Ctrl+A selects first and what Ctrl+Shift+L would
+ * filter. An empty cell gives back just itself.
+ */
+export function currentRegion(sheet, row, col) {
+  if (!isFilled(sheet, row, col)) return { r1: row, r2: row, c1: col, c2: col };
+  const region = { r1: row, r2: row, c1: col, c2: col };
+  // Grow one edge at a time until no edge has anything against it.
+  for (let guard = 0; guard < 4096; guard++) {
+    let grew = false;
+    const anyFilled = (rs, re, cs, ce) => {
+      for (let r = rs; r <= re; r++) {
+        for (let c = cs; c <= ce; c++) if (isFilled(sheet, r, c)) return true;
+      }
+      return false;
+    };
+    if (region.r1 > 0 && anyFilled(region.r1 - 1, region.r1 - 1, region.c1, region.c2)) {
+      region.r1--;
+      grew = true;
+    }
+    if (anyFilled(region.r2 + 1, region.r2 + 1, region.c1, region.c2)) {
+      region.r2++;
+      grew = true;
+    }
+    if (region.c1 > 0 && anyFilled(region.r1, region.r2, region.c1 - 1, region.c1 - 1)) {
+      region.c1--;
+      grew = true;
+    }
+    if (anyFilled(region.r1, region.r2, region.c2 + 1, region.c2 + 1)) {
+      region.c2++;
+      grew = true;
+    }
+    if (!grew) break;
+  }
+  return region;
+}
+
+/**
+ * Ctrl+D / Ctrl+R — copy the selection's first row or column over the rest.
+ *
+ * Excel treats it as a fill from that first line, so a formula picks up shifted
+ * references exactly as a drag of the fill handle would.
+ */
+export function fillWithin(sheet, range, direction) {
+  if (direction === 'down') {
+    if (range.r2 <= range.r1) return sheet;
+    return fillRange(sheet, { ...range, r2: range.r1 }, { ...range, dir: 'down' });
+  }
+  if (range.c2 <= range.c1) return sheet;
+  return fillRange(sheet, { ...range, c2: range.c1 }, { ...range, dir: 'right' });
+}
+
+/**
+ * Toggle the `$` signs in a formula's references, cycling A1 → $A$1 → A$1 →
+ * $A1 → A1 — Excel's F4, pressed constantly while writing a lookup.
+ *
+ * `caret` selects the reference under the cursor; without one every reference
+ * in the formula is cycled, which is what F4 does to a selected reference.
+ */
+export function cycleRefLocks(formula, caret) {
+  const text = String(formula ?? '');
+  if (!text.startsWith('=')) return null;
+  const pattern = /(\$?)([A-Za-z]{1,3})(\$?)(\d{1,7})/g;
+  let hit = null;
+  for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
+    const start = m.index;
+    const end = start + m[0].length;
+    if (caret === undefined || caret === null || (caret >= start && caret <= end)) {
+      hit = { start, end, colLock: m[1], col: m[2], rowLock: m[3], row: m[4] };
+      if (caret !== undefined && caret !== null) break;
+    }
+  }
+  if (!hit) return null;
+  // A1 → $A$1 → A$1 → $A1 → A1
+  const state = `${hit.colLock ? 'c' : ''}${hit.rowLock ? 'r' : ''}`;
+  const next = { '': '$c$r', cr: 'r', r: 'c', c: '' }[state] ?? '';
+  const locked = { '$c$r': ['$', '$'], r: ['', '$'], c: ['$', ''], '': ['', ''] }[next];
+  const replaced = `${locked[0]}${hit.col}${locked[1]}${hit.row}`;
+  return {
+    value: text.slice(0, hit.start) + replaced + text.slice(hit.end),
+    caret: hit.start + replaced.length,
+  };
 }
 
 /* ------------------------------------------------------------- fill handle */
@@ -529,6 +699,28 @@ export function autoFitColumn(sheet, col, maxRow) {
 /* ------------------------------------------------------- go to / find */
 
 /** Resolve what the user typed in the name box: a ref, a range, or a name. */
+/**
+ * The height a row needs, given the wrapped cells in it.
+ *
+ * Only wrapped cells can be taller than one line, so an ordinary row auto-fits
+ * back to the default — which is exactly what double-clicking the boundary is
+ * for after a wrap has been turned off.
+ */
+export function autoFitRow(sheet, row, maxCol) {
+  let lines = 1;
+  for (let c = 0; c <= maxCol; c++) {
+    const cell = sheet.cells[toRef(c, row)];
+    if (!cell?.style?.wrap) continue;
+    const width = sheet.colWidths?.[indexToCol(c)] ?? LIMITS.colWidth;
+    const text = String(displayValue(cell) ?? '');
+    // ~7px a character at the sheet's own size, which is what the measurement
+    // in `autoFitColumn` assumes too.
+    const perLine = Math.max(1, Math.floor((width - 10) / 7));
+    lines = Math.max(lines, Math.ceil(text.length / perLine));
+  }
+  return lines <= 1 ? 0 : Math.min(400, lines * (LIMITS.rowHeight - 4) + 4);
+}
+
 export function resolveTarget(sheet, input) {
   const text = String(input ?? '').trim();
   if (!text) return null;
@@ -585,4 +777,104 @@ export function replaceInCells(sheet, hits, query, replacement, { matchCase = fa
 
 function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/* ------------------------------------------------------------------- sort */
+
+/**
+ * Does this range's first row look like a header?
+ *
+ * Excel's own guess: text on top of numbers is a header, and so is a bold first
+ * row over a plain one. Getting this wrong is what makes a sort look like it
+ * destroyed the table — the column titles end up filed alphabetically among the
+ * data.
+ */
+export function looksLikeHeader(sheet, range) {
+  if (range.r2 <= range.r1) return false;
+  let headerText = 0;
+  let bodyNumeric = 0;
+  let columns = 0;
+  for (let c = range.c1; c <= range.c2; c++) {
+    const head = sheet.cells[toRef(c, range.r1)];
+    if (!head || head.v === null || head.v === undefined || head.v === '') continue;
+    columns++;
+    if (typeof head.v === 'string') headerText++;
+    for (let r = range.r1 + 1; r <= range.r2; r++) {
+      const cell = sheet.cells[toRef(c, r)];
+      if (cell && typeof cell.v === 'number') {
+        bodyNumeric++;
+        break;
+      }
+    }
+  }
+  if (!columns) return false;
+  if (headerText === columns && bodyNumeric > 0) return true;
+  // A bold first row over a non-bold body is a header even when both are text.
+  const headBold = Array.from({ length: range.c2 - range.c1 + 1 }, (_, i) =>
+    sheet.cells[toRef(range.c1 + i, range.r1)]?.style?.bold
+  ).some(Boolean);
+  const bodyBold = sheet.cells[toRef(range.c1, range.r1 + 1)]?.style?.bold;
+  return headBold && !bodyBold;
+}
+
+/**
+ * Sort the selected block, carrying whole rows along.
+ *
+ * Sorts by the column the cursor is in, not always the first one — that is what
+ * Excel does, and it is why clicking a column then pressing 오름차순 works. A
+ * header row is left where it is.
+ */
+export function sortRange(sheet, range, ascending, { by = range.c1, hasHeader = false } = {}) {
+  const first = range.r1 + (hasHeader ? 1 : 0);
+  if (range.r2 <= first) return sheet;
+  const keyColumn = Math.min(Math.max(by, range.c1), range.c2) - range.c1;
+
+  const rows = [];
+  for (let r = first; r <= range.r2; r++) {
+    const cells = [];
+    for (let c = range.c1; c <= range.c2; c++) cells.push(sheet.cells[toRef(c, r)] ?? null);
+    rows.push(cells);
+  }
+
+  const key = (cells) => {
+    const v = cells[keyColumn]?.v;
+    return v === null || v === undefined ? '' : v;
+  };
+  rows.sort((a, b) => {
+    const av = key(a);
+    const bv = key(b);
+    // Blanks sink to the bottom in both directions, as they do in Excel.
+    if (av === '' && bv !== '') return 1;
+    if (bv === '' && av !== '') return -1;
+    const numeric = typeof av === 'number' && typeof bv === 'number';
+    const cmp = numeric ? av - bv : String(av).localeCompare(String(bv), 'ko');
+    return ascending ? cmp : -cmp;
+  });
+
+  const cells = { ...sheet.cells };
+  rows.forEach((rowCells, i) => {
+    rowCells.forEach((cell, j) => {
+      const ref = toRef(range.c1 + j, first + i);
+      if (cell) cells[ref] = cell;
+      else delete cells[ref];
+    });
+  });
+  return withRecalc({ ...sheet, cells });
+}
+
+/* --------------------------------------------------------- number formats */
+
+/**
+ * One step of Excel's 자릿수 늘림 / 줄임.
+ *
+ * The pattern keeps whatever prefix and suffix it had — a currency or percent
+ * format gains decimals rather than being replaced by a plain number.
+ */
+export function stepDecimals(fmt, direction) {
+  const pattern = String(fmt ?? '') || '#,##0';
+  const m = pattern.match(/^(.*?)([#0](?:[,#0]*[#0])?)(?:\.(0+))?(.*)$/);
+  if (!m) return pattern;
+  const [, head, integer, decimals = '', tail] = m;
+  const next = Math.max(0, Math.min(9, decimals.length + direction));
+  return `${head}${integer}${next > 0 ? `.${'0'.repeat(next)}` : ''}${tail}`;
 }

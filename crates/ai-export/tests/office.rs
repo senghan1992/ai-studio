@@ -206,6 +206,8 @@ fn a_chart_block_becomes_an_editable_chart_part() {
         h: 360.0,
         z: 9.0,
         style: Default::default(),
+        shape: None,
+        table: None,
         locked: false,
     });
     let project = save_project(&project).unwrap();
@@ -329,6 +331,14 @@ fn paragraph_overrides_map_onto_word() {
     };
     o.style.insert("bold".into(), serde_json::json!(true));
     o.style.insert("color".into(), serde_json::json!("#ff0000"));
+    // The three the ribbon gained: 밑줄 · 형광펜 · 줄 간격.
+    o.style.insert("underline".into(), serde_json::json!(true));
+    o.style.insert("bg".into(), serde_json::json!("#ffff00"));
+    o.style.insert("lineHeight".into(), serde_json::json!(1.5));
+    o.spacing = Some(ai_format::model::Spacing {
+        before: Some(12.0),
+        after: Some(6.0),
+    });
     sections[0].blocks[1].format_override = Some(o);
     let project = save_project(&project).unwrap();
 
@@ -340,6 +350,15 @@ fn paragraph_overrides_map_onto_word() {
     assert!(
         document.contains("<w:color w:val=\"FF0000\"/>"),
         "{document}"
+    );
+    assert!(document.contains("<w:u w:val=\"single\"/>"), "{document}");
+    assert!(document.contains("w:fill=\"FFFF00\""), "형광펜: {document}");
+    // One spacing element carrying all three, not three that overwrite it.
+    assert!(
+        document.contains(
+            "<w:spacing w:before=\"180\" w:after=\"90\" w:line=\"360\" w:lineRule=\"auto\"/>"
+        ),
+        "줄 간격과 문단 간격이 한 요소에: {document}"
     );
 }
 
@@ -355,6 +374,7 @@ fn a_chart_in_a_doc_becomes_its_data_table() {
         md: "```chart\n{\"type\":\"line\",\"title\":\"추이\",\"labels\":[\"1월\"],\"series\":[{\"name\":\"매출\",\"values\":[10]}]}\n```".into(),
         block_type: ai_format::mdblocks::BlockType::Code,
         format_override: None,
+        table: None,
     });
     let project = save_project(&project).unwrap();
 
@@ -454,6 +474,33 @@ fn named_ranges_become_defined_names() {
         !workbook.contains("name=\"2024\""),
         "a digit-leading name is dropped"
     );
+}
+
+#[test]
+fn cell_alignment_and_wrapping_cross_over() {
+    let ws = Workspace::new("xlsxalign");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "맞춤", true).unwrap();
+    let Items::Sheets(sheets) = &mut project.items else {
+        panic!()
+    };
+    // 텍스트 줄바꿈 and 세로 맞춤 are set in the ribbon's 맞춤 group; without
+    // them here they would be app-only settings that vanish on the way to Excel.
+    let cell = sheets[0].cells.entry("A1".into()).or_default();
+    cell.v = serde_json::json!("아주 긴 열 제목");
+    cell.t = Some("s".into());
+    cell.extra.insert(
+        "style".into(),
+        serde_json::json!({ "wrap": true, "valign": "middle", "align": "center" }),
+    );
+    let project = save_project(&project).unwrap();
+
+    let styles = Parts::of(&export(&project, Format::Xlsx).unwrap())
+        .get("xl/styles.xml")
+        .to_string();
+    assert!(styles.contains("applyAlignment=\"1\""), "{styles}");
+    assert!(styles.contains("wrapText=\"1\""), "{styles}");
+    assert!(styles.contains("vertical=\"center\""), "{styles}");
+    assert!(styles.contains("horizontal=\"center\""), "{styles}");
 }
 
 #[test]
@@ -569,4 +616,346 @@ fn every_workspace_sample_exports_without_error() {
             }
         }
     }
+}
+
+/* ------------------------------------------------- shapes and tables (pptx) */
+
+fn deck_with(
+    ws: &Workspace,
+    title: &str,
+    block: ai_format::model::SlideBlock,
+) -> ai_format::model::Project {
+    let mut project = create_project(ws.path(), ProjectType::Deck, title, false).unwrap();
+    let Items::Slides(slides) = &mut project.items else {
+        panic!()
+    };
+    slides[0].blocks.push(block);
+    save_project(&project).unwrap()
+}
+
+fn geometry() -> ai_format::geometry::Box {
+    ai_format::geometry::Box {
+        x: 96.0,
+        y: 200.0,
+        w: 600.0,
+        h: 320.0,
+        z: 9.0,
+    }
+}
+
+#[test]
+fn a_shape_exports_with_its_preset_geometry() {
+    let ws = Workspace::new("pptxshape");
+    let mut block = ai_format::deck::make_shape("flowChartDecision", geometry());
+    block.md = "승인?".into();
+    block.shape = Some(ai_format::shape::ShapeSpec {
+        preset: "flowChartDecision".into(),
+        fill: Some(ai_format::shape::Fill {
+            color: "#dbeafe".into(),
+            opacity: 60.0,
+        }),
+        line: Some(ai_format::shape::Line {
+            color: "#2a78d6".into(),
+            width: 2.0,
+            dash: ai_format::shape::Dash::Dash,
+        }),
+        rotation: 15.0,
+        flip_h: true,
+        flip_v: false,
+        adjust: [("adj".to_string(), 20000.0)].into_iter().collect(),
+    });
+    let project = deck_with(&ws, "도형", block);
+
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    parts.assert_internally_consistent("ppt");
+    let slide = parts.get("ppt/slides/slide1.xml");
+
+    assert!(slide.contains("prst=\"flowChartDecision\""), "{slide}");
+    assert!(
+        slide.contains("<a:gd name=\"adj\" fmla=\"val 20000\"/>"),
+        "{slide}"
+    );
+    // 15 degrees is 900000 in OOXML's 60,000ths.
+    assert!(slide.contains("rot=\"900000\""), "{slide}");
+    assert!(slide.contains("flipH=\"1\""), "{slide}");
+    assert!(!slide.contains("flipV=\"1\""), "{slide}");
+    assert!(
+        slide.contains("<a:alpha val=\"60000\"/>"),
+        "opacity crossed over: {slide}"
+    );
+    assert!(slide.contains("<a:prstDash val=\"dash\"/>"), "{slide}");
+    // A shape carries its text.
+    assert!(slide.contains("승인?"), "{slide}");
+}
+
+#[test]
+fn a_preset_this_renderer_cannot_draw_still_exports_under_its_real_name() {
+    let ws = Workspace::new("pptxunknown");
+    let mut block = ai_format::deck::make_shape("rect", geometry());
+    block.shape = Some(ai_format::shape::ShapeSpec {
+        preset: "swooshArrow".into(),
+        ..Default::default()
+    });
+    let project = deck_with(&ws, "미지의 도형", block);
+
+    let slide = Parts::of(&export(&project, Format::Pptx).unwrap())
+        .get("ppt/slides/slide1.xml")
+        .to_string();
+    assert!(
+        slide.contains("prst=\"swooshArrow\""),
+        "the name must not be downgraded: {slide}"
+    );
+}
+
+#[test]
+fn a_shape_with_no_fill_and_no_outline_exports_as_neither() {
+    let ws = Workspace::new("pptxnofill");
+    let mut block = ai_format::deck::make_shape("rect", geometry());
+    block.shape = Some(ai_format::shape::ShapeSpec {
+        preset: "rect".into(),
+        fill: None,
+        line: None,
+        ..Default::default()
+    });
+    let project = deck_with(&ws, "빈 도형", block);
+
+    let slide = Parts::of(&export(&project, Format::Pptx).unwrap())
+        .get("ppt/slides/slide1.xml")
+        .to_string();
+    // Scope the check to the shape itself; the slide's own text runs legitimately
+    // carry a solidFill for their font colour.
+    let shape = slide
+        .split("<p:sp>")
+        .find(|part| part.contains("직사각형"))
+        .expect("the shape is on the slide");
+    let props = shape.split("</p:spPr>").next().unwrap();
+    assert!(props.contains("<a:noFill/>"), "{props}");
+    assert!(props.contains("<a:ln><a:noFill/></a:ln>"), "{props}");
+    assert!(
+        !props.contains("<a:solidFill>"),
+        "a fill must not be invented: {props}"
+    );
+}
+
+#[test]
+fn a_table_exports_as_an_editable_table_with_its_merges() {
+    let ws = Workspace::new("pptxtable");
+    let mut block = ai_format::deck::make_table(3, 3, geometry());
+    block.md = "| 항목 | 상반기 | |\n|---|---:|---:|\n| 제품 A | **1,200** | 1,350 |".into();
+    block.table = Some(ai_format::table::TableSpec {
+        cols: vec![240.0, 180.0, 180.0],
+        rows: vec![40.0, 32.0],
+        merges: vec!["B1:C1".into()],
+        header_row: true,
+        banded_rows: true,
+        first_col: true,
+        style: ai_format::table::TableStyle::Banded,
+        cells: Default::default(),
+    });
+    let project = deck_with(&ws, "표", block);
+
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    parts.assert_internally_consistent("ppt");
+    let slide = parts.get("ppt/slides/slide1.xml");
+
+    assert!(
+        slide.contains("<a:tbl>"),
+        "a real table, not a text box: {slide}"
+    );
+    assert!(
+        slide.contains("firstRow=\"1\" firstCol=\"1\" bandRow=\"1\""),
+        "{slide}"
+    );
+    // The merge became a gridSpan on the anchor and a continuation next to it.
+    assert!(slide.contains("gridSpan=\"2\""), "{slide}");
+    assert!(slide.contains("hMerge=\"1\""), "{slide}");
+    // Column widths in EMU: 240px is 2286000.
+    assert!(slide.contains("<a:gridCol w=\"2286000\"/>"), "{slide}");
+    // Cell markdown became runs, not literal asterisks.
+    assert!(slide.contains("<a:t>1,200</a:t>"), "{slide}");
+    assert!(!slide.contains("**1,200**"), "{slide}");
+    // The alignment row set the numeric columns right-aligned — and that holds
+    // whether the table came off disk or straight out of the editor.
+    assert!(slide.contains("algn=\"r\""), "{slide}");
+    // A single-row merge continues horizontally only.
+    assert!(slide.contains("<a:tc hMerge=\"1\">"), "{slide}");
+}
+
+#[test]
+fn a_table_with_no_borders_omits_them() {
+    let ws = Workspace::new("pptxborderless");
+    let mut block = ai_format::deck::make_table(2, 2, geometry());
+    block.md = "| a | b |\n|---|---|\n| 1 | 2 |".into();
+    block.table = Some(ai_format::table::TableSpec {
+        style: ai_format::table::TableStyle::Borderless,
+        banded_rows: false,
+        ..Default::default()
+    });
+    let project = deck_with(&ws, "테두리 없음", block);
+
+    let slide = Parts::of(&export(&project, Format::Pptx).unwrap())
+        .get("ppt/slides/slide1.xml")
+        .to_string();
+    assert!(!slide.contains("<a:lnL"), "{slide}");
+}
+
+#[test]
+fn a_doc_table_carries_its_widths_merges_and_banding() {
+    let ws = Workspace::new("docxtable");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "표 문서", false).unwrap();
+    let Items::Sections(sections) = &mut project.items else {
+        panic!()
+    };
+    sections[0].blocks.push(ai_format::model::DocBlock {
+        id: "b_tbl".into(),
+        md: "| 항목 | 상반기 | |\n|---|---:|---:|\n| 제품 A | 1,200 | 1,350 |".into(),
+        block_type: ai_format::mdblocks::BlockType::Table,
+        format_override: None,
+        table: Some(ai_format::table::TableSpec {
+            cols: vec![300.0, 150.0, 150.0],
+            merges: vec!["B1:C1".into()],
+            header_row: true,
+            banded_rows: true,
+            first_col: true,
+            ..Default::default()
+        }),
+    });
+    let project = save_project(&project).unwrap();
+
+    let parts = Parts::of(&export(&project, Format::Docx).unwrap());
+    parts.assert_internally_consistent("word");
+    let document = parts.get("word/document.xml");
+
+    assert!(document.contains("<w:tbl>"), "{document}");
+    // 300 of 600px across 9360 twips is 4680.
+    assert!(document.contains("<w:gridCol w:w=\"4680\"/>"), "{document}");
+    assert!(document.contains("<w:gridSpan w:val=\"2\"/>"), "{document}");
+    // The merged cell is not emitted twice.
+    assert_eq!(document.matches("상반기").count(), 1, "{document}");
+    assert!(
+        document.contains("w:fill=\"F1F5F9\""),
+        "header band: {document}"
+    );
+    assert!(
+        document.contains("<w:jc w:val=\"right\"/>"),
+        "alignment row: {document}"
+    );
+}
+
+#[test]
+fn a_table_block_needs_an_anchor_only_when_its_layout_says_something() {
+    let ws = Workspace::new("docxanchor");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "앵커", false).unwrap();
+    let Items::Sections(sections) = &mut project.items else {
+        panic!()
+    };
+    // A plain table: the markdown says everything, so no anchor and no JSON.
+    sections[0].blocks.push(ai_format::model::DocBlock {
+        id: "b_plain".into(),
+        md: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
+        block_type: ai_format::mdblocks::BlockType::Table,
+        format_override: None,
+        table: Some(ai_format::table::TableSpec::default()),
+    });
+    let project = save_project(&project).unwrap();
+
+    let md = std::fs::read_to_string(project.dir.join(&project.manifest.entries[0].md)).unwrap();
+    assert!(
+        !md.contains("<!-- block:"),
+        "a plain table stays pure markdown: {md}"
+    );
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.dir.join(&project.manifest.entries[0].json)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(meta["blocks"], serde_json::json!({}));
+}
+
+/* ------------------------------------------------------- page setup, fonts */
+
+#[test]
+fn a_landscape_section_exports_with_its_orientation() {
+    let ws = Workspace::new("docxland");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "가로", false).unwrap();
+    let Items::Sections(sections) = &mut project.items else {
+        panic!()
+    };
+    // A4 turned sideways. Word needs the orientation as well as the swapped
+    // size, or it prints a landscape page onto a portrait sheet.
+    sections[0].page = ai_format::model::Page::sized(
+        1123.0,
+        794.0,
+        sections[0].page.margin,
+        sections[0].page.columns,
+    );
+    let project = save_project(&project).unwrap();
+
+    let document = Parts::of(&export(&project, Format::Docx).unwrap())
+        .get("word/document.xml")
+        .to_string();
+    assert!(
+        document.contains("w:orient=\"landscape\""),
+        "no orientation: {document}"
+    );
+    assert!(
+        document.contains("<w:pgSz w:w=\"16845\" w:h=\"11910\""),
+        "{document}"
+    );
+}
+
+#[test]
+fn a_page_size_no_paper_matches_exports_at_that_size() {
+    let ws = Workspace::new("docxcustom");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "소책자", false).unwrap();
+    let Items::Sections(sections) = &mut project.items else {
+        panic!()
+    };
+    // 180 x 250mm.
+    sections[0].page = ai_format::model::Page::sized(680.0, 945.0, Default::default(), 1);
+    assert_eq!(sections[0].page.size, ai_format::model::CUSTOM_PAPER);
+    let project = save_project(&project).unwrap();
+
+    let document = Parts::of(&export(&project, Format::Docx).unwrap())
+        .get("word/document.xml")
+        .to_string();
+    assert!(
+        document.contains("<w:pgSz w:w=\"10200\" w:h=\"14175\"/>"),
+        "{document}"
+    );
+}
+
+#[test]
+fn every_format_declares_the_one_font_the_app_draws_with() {
+    // A file exported and reopened in Office should be set in what the editor
+    // showed, so the family is stated in each format's own place for it.
+    let ws = Workspace::new("fonts");
+    let font = ai_format::font::FAMILY;
+
+    let doc = create_project(ws.path(), ProjectType::Doc, "글꼴 문서", true).unwrap();
+    let styles = Parts::of(&export(&doc, Format::Docx).unwrap())
+        .get("word/styles.xml")
+        .to_string();
+    assert!(
+        styles.contains(&format!("w:ascii=\"{font}\""))
+            && styles.contains(&format!("w:eastAsia=\"{font}\"")),
+        "{styles}"
+    );
+
+    let deck = create_project(ws.path(), ProjectType::Deck, "글꼴 덱", true).unwrap();
+    let theme = Parts::of(&export(&deck, Format::Pptx).unwrap())
+        .get("ppt/theme/theme1.xml")
+        .to_string();
+    assert!(
+        theme.contains(&format!("<a:latin typeface=\"{font}\"/>")),
+        "{theme}"
+    );
+
+    let grid = create_project(ws.path(), ProjectType::Grid, "글꼴 시트", true).unwrap();
+    let sheet_styles = Parts::of(&export(&grid, Format::Xlsx).unwrap())
+        .get("xl/styles.xml")
+        .to_string();
+    assert!(
+        sheet_styles.contains(&format!("<name val=\"{font}\"/>")),
+        "{sheet_styles}"
+    );
 }

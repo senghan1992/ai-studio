@@ -63,3 +63,18 @@ export function contentHeightOf(pageSize, margin) {
 export function contentWidthOf(pageSize, margin) {
   return pageSize.w - (margin?.left ?? 72) - (margin?.right ?? 72);
 }
+
+/** Word's own gap between columns: half an inch. */
+export const COLUMN_GAP = 48;
+
+/**
+ * The width one column of text gets.
+ *
+ * A two-column section is not a narrower document — it is the same page with the
+ * text flowing down one column and up the next, so a block is measured at the
+ * column's width and a page holds as many column-heights as there are columns.
+ */
+export function columnWidthOf(contentWidth, columns = 1) {
+  const n = Math.max(1, Math.min(4, Math.round(columns || 1)));
+  return (contentWidth - COLUMN_GAP * (n - 1)) / n;
+}
