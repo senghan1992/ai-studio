@@ -18,6 +18,10 @@ pub struct Run {
     pub strike: bool,
     pub code: bool,
     pub link: Option<String>,
+    /// From an inline `<span style="color:#…">`: a run coloured unlike its block.
+    pub color: Option<String>,
+    /// From `font-family:` in the same span.
+    pub font: Option<String>,
 }
 
 impl Run {
@@ -38,14 +42,34 @@ pub struct ListItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
-    Heading { level: usize, runs: Vec<Run> },
-    Paragraph { runs: Vec<Run> },
-    Quote { runs: Vec<Run> },
-    List { ordered: bool, items: Vec<ListItem> },
-    Code { lang: String, text: String },
-    Table { rows: Vec<Vec<Vec<Run>>> },
-    Image { alt: String, src: String },
+    Heading {
+        level: usize,
+        runs: Vec<Run>,
+    },
+    Paragraph {
+        runs: Vec<Run>,
+    },
+    Quote {
+        runs: Vec<Run>,
+    },
+    List {
+        ordered: bool,
+        items: Vec<ListItem>,
+    },
+    Code {
+        lang: String,
+        text: String,
+    },
+    Table {
+        rows: Vec<Vec<Vec<Run>>>,
+    },
+    Image {
+        alt: String,
+        src: String,
+    },
     Hr,
+    /// `<!-- page-break -->` — the editor's Ctrl+Enter.
+    PageBreak,
 }
 
 static HEADING: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(#{1,6})[ \t]+(.*)$").unwrap());
@@ -67,8 +91,40 @@ pub fn parse_markdown(md: &str) -> Vec<Block> {
         .collect()
 }
 
+/// The row's closing `|` — but a trailing `\|` is the last cell's own text.
+fn strip_unescaped_pipe_suffix(body: &str) -> &str {
+    if body.ends_with('|') && !body.ends_with("\\|") {
+        &body[..body.len() - 1]
+    } else {
+        body
+    }
+}
+
+/// A table row's cells, honouring the `\|` escape a cell uses to keep a pipe.
+fn split_cells(body: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                cell.push('|');
+                chars.next();
+            }
+            '|' => cells.push(std::mem::take(&mut cell)),
+            other => cell.push(other),
+        }
+    }
+    cells.push(cell);
+    cells
+}
+
 fn to_block(text: &str) -> Option<Block> {
     let trimmed = text.trim();
+
+    if trimmed == "<!-- page-break -->" {
+        return Some(Block::PageBreak);
+    }
 
     if let Some(c) = HEADING.captures(trimmed) {
         return Some(Block::Heading {
@@ -102,8 +158,9 @@ fn to_block(text: &str) -> Option<Block> {
             .filter(|l| l.starts_with('|') && !TABLE_RULE.is_match(l))
             .map(|l| {
                 let body = l.strip_prefix('|').unwrap_or(l);
-                let body = body.strip_suffix('|').unwrap_or(body);
-                body.split('|')
+                let body = strip_unescaped_pipe_suffix(body);
+                split_cells(body)
+                    .iter()
                     .map(|cell| inline_runs(cell.trim()))
                     .collect()
             })
@@ -156,8 +213,14 @@ fn to_block(text: &str) -> Option<Block> {
     if trimmed.is_empty() {
         return None;
     }
+    // A newline inside a paragraph is a line break, not a space: the editor
+    // renders markdown with hard breaks on, and an imported slide keeps each of
+    // its original paragraphs on its own line this way. Both exporters turn the
+    // `\n` into `<a:br>`/`<w:br/>`; folding it to a space merged a text box's
+    // eight bullet lines into one run-on paragraph on export.
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
     Some(Block::Paragraph {
-        runs: inline_runs(&text.replace('\n', " ")),
+        runs: inline_runs(&lines.join("\n")),
     })
 }
 
@@ -169,6 +232,8 @@ struct InlineRule {
     italic: bool,
     strike: bool,
     code: bool,
+    /// `_` emphasis, which unlike `*` never applies inside a word.
+    underscore: bool,
 }
 
 static INLINE_LINK: Lazy<Regex> =
@@ -176,29 +241,73 @@ static INLINE_LINK: Lazy<Regex> =
 static INLINE_IMAGE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^!\[([^\]]*)\]\([^)]*\)").unwrap());
 
 static RULES: Lazy<Vec<InlineRule>> = Lazy::new(|| {
-    let rule = |pattern: &str, bold, italic, strike, code| InlineRule {
+    let rule = |pattern: &str, bold, italic, strike, code, underscore| InlineRule {
         re: Regex::new(pattern).unwrap(),
         bold,
         italic,
         strike,
         code,
+        underscore,
     };
     vec![
-        rule(r"^`([^`]+)`", false, false, false, true),
-        rule(r"^\*\*\*([^*]+)\*\*\*", true, true, false, false),
-        rule(r"^\*\*([^*]+)\*\*", true, false, false, false),
-        rule(r"^__([^_]+)__", true, false, false, false),
-        rule(r"^~~([^~]+)~~", false, false, true, false),
-        rule(r"^\*([^*]+)\*", false, true, false, false),
-        rule(r"^_([^_]+)_", false, true, false, false),
+        rule(r"^`([^`]+)`", false, false, false, true, false),
+        rule(r"^\*\*\*([^*]+)\*\*\*", true, true, false, false, false),
+        rule(r"^\*\*([^*]+)\*\*", true, false, false, false, false),
+        rule(r"^__([^_]+)__", true, false, false, false, true),
+        rule(r"^~~([^~]+)~~", false, false, true, false, false),
+        rule(r"^\*([^*]+)\*", false, true, false, false, false),
+        rule(r"^_([^_]+)_", false, true, false, false, true),
     ]
 });
 
+static INLINE_SPAN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?s)<span style="([^"]*)">(.*?)</span>"#).unwrap());
+
 /// Split inline markdown into styled runs.
+///
+/// An inline `<span style="color:#…;font-family:…">` — the one piece of HTML
+/// the importers write, for a run whose colour or family differs from its
+/// block — colours the runs inside it; everything else is plain markdown.
+pub fn inline_runs(text: &str) -> Vec<Run> {
+    let mut runs = Vec::new();
+    let mut last = 0;
+    for span in INLINE_SPAN.captures_iter(text) {
+        let whole = span.get(0).unwrap();
+        let before = &text[last..whole.start()];
+        if !before.is_empty() {
+            runs.extend(inline_runs_plain(before));
+        }
+        let (mut color, mut font) = (None, None);
+        for declaration in span[1].split(';') {
+            let Some((key, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            let value = value.trim().trim_matches(['"', '\'']).to_string();
+            match key.trim() {
+                "color" if !value.is_empty() => color = Some(value),
+                "font-family" if !value.is_empty() => font = Some(value),
+                _ => {}
+            }
+        }
+        for mut run in inline_runs_plain(&span[2]) {
+            run.color = run.color.or_else(|| color.clone());
+            run.font = run.font.or_else(|| font.clone());
+            runs.push(run);
+        }
+        last = whole.end();
+    }
+    let after = &text[last..];
+    if last == 0 || !after.is_empty() {
+        runs.extend(inline_runs_plain(after));
+    }
+    runs
+}
+
+/// Split inline markdown into styled runs — the markdown part alone.
 ///
 /// Unmatched syntax characters stay as literal text — an exporter should never
 /// silently swallow a stray asterisk.
-pub fn inline_runs(text: &str) -> Vec<Run> {
+fn inline_runs_plain(text: &str) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     let mut plain = String::new();
     let mut i = 0usize;
@@ -246,11 +355,56 @@ pub fn inline_runs(text: &str) -> Vec<Run> {
             continue;
         }
 
+        // `\*`, `\|`, `\_`… — a backslash keeps the next punctuation literal,
+        // exactly as the on-screen renderer treats it. Without this a salary
+        // formula like `기본급\*1.5` loses its asterisk to emphasis.
+        if let Some(after) = rest.strip_prefix('\\') {
+            if let Some(next) = after.chars().next() {
+                if next.is_ascii_punctuation() {
+                    plain.push(next);
+                    i += 1 + next.len_utf8();
+                    continue;
+                }
+            }
+        }
+
+        // `<br>` inside a paragraph or a table cell is the format's own line
+        // break; it becomes a newline the writers turn into a real break.
+        if let Some(len) = ["<br />", "<br/>", "<br>"]
+            .iter()
+            .find(|br| {
+                rest.get(..br.len())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(br))
+            })
+            .map(|br| br.len())
+        {
+            plain.push('\n');
+            i += len;
+            continue;
+        }
+
         let mut matched = false;
         for rule in RULES.iter() {
             let Some(c) = rule.re.captures(rest) else {
                 continue;
             };
+            // CommonMark: `_` does not open or close emphasis inside a word,
+            // so `인사_규정_v2` stays literal — as it does on screen.
+            if rule.underscore {
+                let before_ok = text[..i]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|ch| !ch.is_alphanumeric());
+                let after = &text[i + c.get(0).unwrap().len()..];
+                let after_ok = after.chars().next().is_none_or(|ch| !ch.is_alphanumeric());
+                if !before_ok || !after_ok {
+                    let ch = rest.chars().next().expect("non-empty");
+                    plain.push(ch);
+                    i += ch.len_utf8();
+                    matched = true;
+                    break;
+                }
+            }
             flush!();
             runs.push(Run {
                 text: c.get(1).unwrap().as_str().to_string(),
@@ -259,6 +413,8 @@ pub fn inline_runs(text: &str) -> Vec<Run> {
                 strike: rule.strike,
                 code: rule.code,
                 link: None,
+                color: None,
+                font: None,
             });
             i += c.get(0).unwrap().len();
             matched = true;
@@ -294,6 +450,7 @@ pub fn blocks_to_text(blocks: &[Block]) -> String {
             Block::Heading { runs, .. } | Block::Paragraph { runs } | Block::Quote { runs } => {
                 lines.push(runs_to_text(runs))
             }
+            Block::PageBreak => {}
             Block::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
                     let marker = if *ordered {
@@ -329,8 +486,9 @@ pub fn table_rows(md: &str) -> Vec<Vec<String>> {
         .filter(|l| l.starts_with('|') && !TABLE_RULE.is_match(l))
         .map(|l| {
             let body = l.strip_prefix('|').unwrap_or(l);
-            let body = body.strip_suffix('|').unwrap_or(body);
-            body.split('|')
+            let body = strip_unescaped_pipe_suffix(body);
+            split_cells(body)
+                .iter()
                 .map(|c| c.trim().replace("**", ""))
                 .collect()
         })
@@ -384,6 +542,42 @@ mod tests {
         let runs = inline_runs("***둘 다***");
         assert_eq!(runs.len(), 1);
         assert!(runs[0].bold && runs[0].italic);
+    }
+
+    #[test]
+    fn escapes_and_word_internal_underscores_stay_literal() {
+        // The on-screen renderer's rules, mirrored: `\*` is an asterisk,
+        // and `_` inside a word never becomes emphasis.
+        let runs = inline_runs("통상임금\\*0.5\\*시간");
+        assert_eq!(runs_to_text(&runs), "통상임금*0.5*시간");
+        assert!(runs.iter().all(|r| !r.italic && !r.bold));
+
+        let runs = inline_runs("인사_규정_v2와 emp_id_no");
+        assert_eq!(runs_to_text(&runs), "인사_규정_v2와 emp_id_no");
+        assert!(runs.iter().all(|r| !r.italic));
+
+        // Boundary `_` still works.
+        let runs = inline_runs("자 _기울임_ 끝");
+        assert!(runs.iter().any(|r| r.italic && r.text == "기울임"));
+    }
+
+    #[test]
+    fn a_br_becomes_a_newline_in_the_run() {
+        let runs = inline_runs("1년 미만<br>월 1일 발생");
+        assert_eq!(runs_to_text(&runs), "1년 미만\n월 1일 발생");
+    }
+
+    #[test]
+    fn escaped_pipes_stay_inside_their_cell() {
+        let rows = table_rows("| 직급 | 사원\\|대리\\|과장 |\n|---|---|\n| a | b |");
+        assert_eq!(rows[0], vec!["직급", "사원|대리|과장"]);
+        assert_eq!(rows[0].len(), 2);
+    }
+
+    #[test]
+    fn a_page_break_comment_is_its_own_block() {
+        let blocks = parse_markdown("<!-- page-break -->");
+        assert!(matches!(blocks.as_slice(), [Block::PageBreak]));
     }
 
     #[test]
@@ -447,6 +641,38 @@ mod tests {
         };
         assert_eq!(items.len(), 1);
         assert_eq!(runs_to_text(&items[0].runs), "첫 항목 계속되는 줄");
+    }
+
+    #[test]
+    fn a_newline_inside_a_paragraph_stays_a_line_break() {
+        // An imported text box keeps each original paragraph on its own line;
+        // the exporters turn `\n` into a break. Folding it to a space merged
+        // eight bullet lines of a real slide into one run-on paragraph.
+        let blocks = parse_markdown("첫 줄\n둘째 줄\n  셋째 줄");
+        assert_eq!(blocks.len(), 1);
+        let Block::Paragraph { runs } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(runs_to_text(runs), "첫 줄\n둘째 줄\n셋째 줄");
+    }
+
+    #[test]
+    fn a_coloured_span_colours_the_runs_inside_it() {
+        // The importers mark a run coloured unlike its block this way; the
+        // exporters need it back as a run colour, and the text stays plain.
+        let runs = inline_runs(
+            "<span style=\"color:#a50034;font-family:맑은 고딕\">**핵심** Pain</span> Point",
+        );
+        assert_eq!(runs_to_text(&runs), "핵심 Pain Point", "{runs:?}");
+        assert_eq!(runs[0].color.as_deref(), Some("#a50034"));
+        assert_eq!(runs[0].font.as_deref(), Some("맑은 고딕"));
+        assert!(runs[0].bold, "markdown inside the span still applies");
+        assert_eq!(runs[1].color.as_deref(), Some("#a50034"));
+        let last = runs.last().unwrap();
+        assert_eq!(
+            last.color, None,
+            "outside the span the block's colour rules"
+        );
     }
 
     #[test]

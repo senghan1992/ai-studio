@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use serde_json::json;
+use serde_json::{json, Value as Json};
 
 use ai_format::blocks::Kind;
 use ai_format::chart::{ChartSpec, Series};
@@ -23,7 +23,7 @@ use ai_format::model::{Slide, SlideBlock};
 use ai_format::shape::{Dash, Fill, Line, ShapeSpec};
 use ai_format::table::{apply_markdown_authority, to_markdown_table, CellFormat, TableSpec};
 
-use crate::ooxml::{px, px_from_font_size, solid_color, Node, Package, Relationship, Result};
+use crate::ooxml::{px, solid_color, Node, Package, Relationship, Result};
 use crate::{Asset, Warnings};
 
 /// What a placeholder inherits when the slide itself does not say.
@@ -131,7 +131,7 @@ fn defaults_from_props(properties: &Node, theme: &Theme) -> TextDefaults {
     TextDefaults {
         size: run
             .and_then(|r| r.attr_i64("sz"))
-            .map(|sz| px_from_font_size(sz).round()),
+            .map(|sz| ai_format::font::px_for_pt(sz as f64 / 100.0)),
         bold: flag(run, "b"),
         italic: flag(run, "i"),
         color: run
@@ -446,7 +446,7 @@ fn read_theme(package: &Package, slide_rels: &HashMap<String, Relationship>) -> 
     if theme.other_text.iter().all(TextDefaults::is_empty) {
         theme.other_text = (0..9)
             .map(|_| TextDefaults {
-                size: Some(px_from_font_size(1800).round()),
+                size: Some(ai_format::font::px_for_pt(18.0)),
                 ..TextDefaults::default()
             })
             .collect();
@@ -630,7 +630,8 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Deck> {
         // `showMasterSp="0"` is how a slide says it does not want the master's
         // shapes, and a deck's one full-bleed image slide usually does say it.
         ctx.decoration = true;
-        if sld.attr("showMasterSp").is_none_or(|v| v != "0") {
+        let master_shapes = sld.attr("showMasterSp").is_none_or(|v| v != "0");
+        if master_shapes {
             if let (Some(tree), Some(rels)) = (design.master_tree(), design.master_rels()) {
                 ctx.rels = rels;
                 ctx.walk_tree(tree, Transform::identity());
@@ -641,6 +642,9 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Deck> {
             }
         }
         ctx.decoration = false;
+        // Everything so far is the design's furniture — the banner, the rule,
+        // the footer text. It must never name the slide.
+        let decoration_blocks = ctx.blocks.len();
         ctx.rels = &slide_rels;
 
         if let Some(tree) = sld.path(&["cSld", "spTree"]) {
@@ -665,13 +669,29 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Deck> {
             .or_else(|| design.background(&ctx.theme))
             .unwrap_or_else(|| canvas.bg.as_str().to_string());
 
-        let blocks = std::mem::take(&mut ctx.blocks);
+        let mut blocks = std::mem::take(&mut ctx.blocks);
+        // The design's furniture is marked, so an export that puts the slide
+        // back on its original layout can leave those blocks to the master
+        // rather than drawing the logo twice.
+        for block in blocks.iter_mut().take(decoration_blocks) {
+            block.style.insert("design".to_string(), json!(true));
+        }
+        let layout_part = slide_rels
+            .values()
+            .find(|r| r.kind == "slideLayout")
+            .and_then(|r| r.target.strip_prefix("ppt/"))
+            .map(str::to_string);
         // A slide with no title placeholder still needs a name, and the first
-        // readable line is what a person would call it.
+        // readable line *of its own content* is what a person would call it —
+        // a themed layout's footer ("AI Studio · 대외비") named every slide
+        // in the deck after itself when the whole list was scanned.
+        let own = blocks
+            .get(decoration_blocks.min(blocks.len())..)
+            .unwrap_or(&[]);
         let title = ctx
             .title
             .clone()
-            .unwrap_or_else(|| derive_title(&blocks, slides.len() + 1));
+            .unwrap_or_else(|| derive_title(own, slides.len() + 1));
 
         slides.push(Slide {
             id: new_slide_id(),
@@ -684,11 +704,89 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Deck> {
                 bg: background.into(),
             },
             blocks,
+            layout_part,
+            master_shapes,
             file: None,
         });
     }
 
+    if let Some(bundle) = design_bundle(package) {
+        assets.push(Asset {
+            name: TEMPLATE_ASSET.to_string(),
+            bytes: bundle,
+            source: "ppt/".to_string(),
+        });
+    }
+
     Ok(Deck { slides, assets })
+}
+
+/// The asset an imported deck keeps its Office design in — masters, layouts,
+/// theme, notes master and the media they draw — so an export can hand the
+/// slides back on the template they came from. A plain zip of the original
+/// parts, not a `.pptx`: it has no slides and PowerPoint has no reason to open it.
+pub const TEMPLATE_ASSET: &str = "office-template.zip";
+
+/// Zip the design parts of a presentation, or `None` when it has no master.
+fn design_bundle(package: &Package) -> Option<Vec<u8>> {
+    let mut keep: Vec<String> = package
+        .names()
+        .filter(|n| {
+            n.starts_with("ppt/slideMasters/")
+                || n.starts_with("ppt/slideLayouts/")
+                || n.starts_with("ppt/theme/")
+                || n.starts_with("ppt/notesMasters/")
+                || matches!(
+                    *n,
+                    "ppt/presProps.xml" | "ppt/viewProps.xml" | "ppt/tableStyles.xml"
+                )
+        })
+        .map(str::to_string)
+        .collect();
+    if !keep
+        .iter()
+        .any(|n| n.starts_with("ppt/slideMasters/") && n.ends_with(".xml"))
+    {
+        return None;
+    }
+    // The pictures a master or layout draws (a logo, a background) live in
+    // `ppt/media` beside the slides' own pictures; only the design's are kept.
+    let mut media: Vec<String> = Vec::new();
+    for part in keep.iter().filter(|n| !n.contains("/_rels/")) {
+        for rel in package.rels_for(part).values() {
+            if !rel.external && rel.target.starts_with("ppt/media/") && package.has(&rel.target) {
+                media.push(rel.target.clone());
+            }
+        }
+    }
+    keep.extend(media);
+    for meta in [
+        "ppt/presentation.xml",
+        "ppt/_rels/presentation.xml.rels",
+        "[Content_Types].xml",
+    ] {
+        if package.has(meta) {
+            keep.push(meta.to_string());
+        }
+    }
+    keep.sort();
+    keep.dedup();
+
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buffer);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for name in &keep {
+            let Some(bytes) = package.bytes(name) else {
+                continue;
+            };
+            zip.start_file(name.clone(), options).ok()?;
+            std::io::Write::write_all(&mut zip, bytes).ok()?;
+        }
+        zip.finish().ok()?;
+    }
+    Some(buffer.into_inner())
 }
 
 /// A name for a slide with no title placeholder.
@@ -898,6 +996,54 @@ fn read_geometry(sp: &Node) -> Option<Geometry> {
         flip_h: xfrm.attr_bool("flipH"),
         flip_v: xfrm.attr_bool("flipV"),
     })
+}
+
+/// Names the image format when a browser cannot draw it, else `None`. PNG, JPG,
+/// GIF, WebP, BMP and SVG all render; Windows metafiles and TIFF do not.
+fn unrenderable_image_format(name: &str) -> Option<&'static str> {
+    match name.rsplit('.').next()?.to_ascii_lowercase().as_str() {
+        "emf" | "emz" => Some("EMF"),
+        "wmf" | "wmz" => Some("WMF"),
+        "tif" | "tiff" => Some("TIFF"),
+        _ => None,
+    }
+}
+
+/// A `<a:srcRect>` crop as whole-percent edges, or `None` when nothing is
+/// cropped. OOXML stores each edge as 1/1000 of a percent (`100000` = 100%) —
+/// the fraction trimmed off that side of the source before it fills the box.
+/// Negative values (an outset) are clamped to zero: this format has no way to
+/// pad an image, and drawing it un-padded is closer than drawing it wrong.
+fn read_crop(blip_fill: &Node) -> Option<Json> {
+    let sr = blip_fill.child("srcRect")?;
+    let pct = |name: &str| (sr.attr_i64(name).unwrap_or(0) as f64 / 1000.0).max(0.0);
+    let (l, t, r, b) = (pct("l"), pct("t"), pct("r"), pct("b"));
+    if l == 0.0 && t == 0.0 && r == 0.0 && b == 0.0 {
+        return None;
+    }
+    Some(json!({ "l": l, "t": t, "r": r, "b": b }))
+}
+
+/// Rotation, flip and crop for an image block, written into the open-ended
+/// `style` map — the same job `ShapeSpec` does for shapes, but images already
+/// ride in `style` (`fit`, `radius`). Only non-default values are written, so
+/// an ordinary upright, uncropped picture keeps an empty style and its saved
+/// JSON stays clean.
+fn image_style(geometry: &Geometry, blip_fill: Option<&Node>) -> IndexMap<String, Json> {
+    let mut style = IndexMap::new();
+    if geometry.rotation != 0.0 {
+        style.insert("rotation".to_string(), json!(geometry.rotation));
+    }
+    if geometry.flip_h {
+        style.insert("flipH".to_string(), json!(true));
+    }
+    if geometry.flip_v {
+        style.insert("flipV".to_string(), json!(true));
+    }
+    if let Some(crop) = blip_fill.and_then(read_crop) {
+        style.insert("crop".to_string(), crop);
+    }
+    style
 }
 
 /// A group's coordinate mapping, so nested shapes land where they are drawn.
@@ -1187,7 +1333,14 @@ impl SlideCtx<'_> {
 
         let body = sp.child("txBody");
         let markdown = body
-            .map(|b| paragraphs_to_markdown(b, self.rels, &list_style))
+            .map(|b| {
+                let inline = Inline {
+                    theme: Some(&self.theme),
+                    color: dominant_run_color(b, &self.theme),
+                    font: dominant_run_font(b),
+                };
+                paragraphs_to_markdown_in(b, self.rels, &list_style, &inline)
+            })
             .unwrap_or_default();
         let text_style = body
             .map(|b| text_style(b, &defaults, &self.theme))
@@ -1212,8 +1365,8 @@ impl SlideCtx<'_> {
         // A shape filled with a picture: the picture is what the slide showed, and
         // this format draws images. The shape's own outline is lost, which is far
         // less of the original than the photograph is.
-        if let Some(blip) = sp.path(&["spPr", "blipFill", "blip"]) {
-            if markdown.trim().is_empty() && self.stash_blip(blip, geometry).is_some() {
+        if let Some(blip_fill) = sp.path(&["spPr", "blipFill"]) {
+            if markdown.trim().is_empty() && self.stash_blip(blip_fill, geometry).is_some() {
                 return;
             }
         }
@@ -1281,7 +1434,16 @@ impl SlideCtx<'_> {
                         .and_then(|a| a.attr_i64("val"))
                         .map(|v| v as f64 / 1000.0)
                         .unwrap_or(100.0);
-                    return solid_color(solid).map(|color| Fill { color, opacity });
+                    // Through the theme first: a `schemeClr tx1` with lumMod/
+                    // lumOff is how PowerPoint writes most grey and tinted
+                    // fills, and `solid_color` alone sees no colour in it. A
+                    // label chip lost its dark fill that way and its white text
+                    // vanished into the white slide.
+                    return self
+                        .theme
+                        .color_of(solid)
+                        .or_else(|| solid_color(solid))
+                        .map(|color| Fill { color, opacity });
                 }
                 if let Some(node) = p.child("gradFill") {
                     // The average of the stops rather than the first one: a
@@ -1402,12 +1564,14 @@ impl SlideCtx<'_> {
         }
     }
 
-    /// Store the image a `blip` points at and place it as a block.
+    /// Store the picture a shape is filled with and place it as a block.
     ///
-    /// Used for a shape whose fill is a picture: the picture is the block.
-    fn stash_blip(&mut self, blip: &Node, geometry: Geometry) -> Option<()> {
-        let target = blip
-            .attr("embed")
+    /// Used for a shape whose fill is a picture: the picture is the block, and it
+    /// carries the shape's rotation, flip and crop just like a `p:pic` would.
+    fn stash_blip(&mut self, blip_fill: &Node, geometry: Geometry) -> Option<()> {
+        let target = blip_fill
+            .child("blip")
+            .and_then(|b| b.attr("embed"))
             .and_then(|id| self.rels.get(id))
             .map(|rel| rel.target.clone())?;
         let name = self.stash_asset(&target)?;
@@ -1421,7 +1585,7 @@ impl SlideCtx<'_> {
             w: geometry.w,
             h: geometry.h,
             z,
-            style: IndexMap::new(),
+            style: image_style(&geometry, Some(blip_fill)),
             shape: None,
             table: None,
             locked: false,
@@ -1437,8 +1601,9 @@ impl SlideCtx<'_> {
             .unwrap_or("이미지")
             .to_string();
 
-        let embed = pic
-            .path(&["blipFill", "blip"])
+        let blip_fill = pic.child("blipFill");
+        let embed = blip_fill
+            .and_then(|b| b.child("blip"))
             .and_then(|b| b.attr("embed"))
             .and_then(|id| self.rels.get(id));
 
@@ -1466,7 +1631,11 @@ impl SlideCtx<'_> {
             w: geometry.w,
             h: geometry.h,
             z,
-            style: IndexMap::new(),
+            style: if kind == Kind::Image {
+                image_style(&geometry, blip_fill)
+            } else {
+                IndexMap::new()
+            },
             shape: None,
             table: None,
             locked: false,
@@ -1479,6 +1648,15 @@ impl SlideCtx<'_> {
         let base = part.rsplit('/').next().unwrap_or("image.png").to_string();
         if let Some(existing) = self.assets.iter().find(|a| a.source == part) {
             return Some(existing.name.clone());
+        }
+        // EMF/WMF (Windows metafiles, often a chart or clip-art pasted from
+        // Office) and TIFF are stored verbatim but no browser draws them, so the
+        // block would show a broken image. Copy the bytes anyway — an export can
+        // hand them back untouched — but name the format so nobody hunts a blank.
+        if let Some(fmt) = unrenderable_image_format(&base) {
+            self.warnings.note(&format!(
+                "일부 이미지가 {fmt} 형식이라 화면에 보이지 않을 수 있습니다 (PowerPoint에서 그림으로 붙여넣기 해 두면 보입니다)"
+            ));
         }
         let name = crate::unique_asset_name(&base, self.assets);
         self.assets.push(Asset {
@@ -1824,6 +2002,36 @@ fn paragraphs_to_markdown(
     paragraphs_to_markdown_with(body, rels, list_style, false)
 }
 
+/// What a run's own colour and family are measured against: the block's. Only
+/// a run that differs from the rest of its block gets an inline `<span style>`,
+/// so a sub-heading in burgundy over grey body text keeps its colour while a
+/// single-colour box carries no markup at all.
+struct Inline<'a> {
+    theme: Option<&'a Theme>,
+    color: Option<String>,
+    font: Option<String>,
+}
+
+impl Inline<'_> {
+    fn none() -> Inline<'static> {
+        Inline {
+            theme: None,
+            color: None,
+            font: None,
+        }
+    }
+}
+
+/// A text body's markdown with runs that differ from the block marked inline.
+fn paragraphs_to_markdown_in(
+    body: &Node,
+    rels: &HashMap<String, Relationship>,
+    list_style: &ListStyle,
+    inline: &Inline<'_>,
+) -> String {
+    paragraphs_to_markdown_inline(body, rels, list_style, false, inline)
+}
+
 /// The same, with `ignore_bold` for text whose weight is already implied by its
 /// place — a table's header row, or its first column.
 fn paragraphs_to_markdown_with(
@@ -1832,10 +2040,20 @@ fn paragraphs_to_markdown_with(
     list_style: &ListStyle,
     ignore_bold: bool,
 ) -> String {
+    paragraphs_to_markdown_inline(body, rels, list_style, ignore_bold, &Inline::none())
+}
+
+fn paragraphs_to_markdown_inline(
+    body: &Node,
+    rels: &HashMap<String, Relationship>,
+    list_style: &ListStyle,
+    ignore_bold: bool,
+    inline: &Inline<'_>,
+) -> String {
     let lines: Vec<String> = body
         .children_named("p")
         .map(|p| {
-            let text = runs_to_markdown_with(p, rels, ignore_bold);
+            let text = runs_to_markdown_inline(p, rels, ignore_bold, inline);
             match bullet_of(p, list_style) {
                 None => text,
                 Some(Bullet::Unordered(level)) => {
@@ -1904,17 +2122,20 @@ fn bullet_of(p: &Node, list_style: &ListStyle) -> Option<Bullet> {
     }
 }
 
-fn runs_to_markdown_with(
+fn runs_to_markdown_inline(
     p: &Node,
     rels: &HashMap<String, Relationship>,
     ignore_bold: bool,
+    inline: &Inline<'_>,
 ) -> String {
     let mut out = String::new();
     for child in &p.children {
         match child.name.as_str() {
-            "r" => out.push_str(&run_to_markdown(child, rels, ignore_bold)),
-            // A soft break inside a paragraph.
-            "br" => out.push(' '),
+            "r" => out.push_str(&run_to_markdown(child, rels, ignore_bold, inline)),
+            // A line break inside a paragraph (Shift+Enter). It is a new line
+            // on the slide, so it is a new line here; reading it as a space
+            // ran a text box's lines together on every re-open.
+            "br" => out.push('\n'),
             // A field is a computed value; its cached text is what was shown.
             "fld" => out.push_str(
                 &child
@@ -1929,7 +2150,12 @@ fn runs_to_markdown_with(
     out.trim_end().to_string()
 }
 
-fn run_to_markdown(r: &Node, rels: &HashMap<String, Relationship>, ignore_bold: bool) -> String {
+fn run_to_markdown(
+    r: &Node,
+    rels: &HashMap<String, Relationship>,
+    ignore_bold: bool,
+    inline: &Inline<'_>,
+) -> String {
     let text = r
         .descendants("t")
         .iter()
@@ -1967,6 +2193,38 @@ fn run_to_markdown(r: &Node, rels: &HashMap<String, Relationship>, ignore_bold: 
         (true, false) => wrapped = format!("**{wrapped}**"),
         (false, true) => wrapped = format!("*{wrapped}*"),
         (false, false) => {}
+    }
+
+    // A colour or family this run has and its block does not. Colour is
+    // block-wide in this format, so the odd run out is marked inline — the
+    // renderer draws the span and both exporters read it back into the run.
+    if let Some(theme) = inline.theme {
+        let own_color = props
+            .and_then(|p| p.child("solidFill"))
+            .and_then(|f| theme.color_of(f).or_else(|| solid_color(f)))
+            .filter(|c| inline.color.as_deref() != Some(c.as_str()));
+        let own_font = props
+            .and_then(|p| {
+                ["ea", "latin"]
+                    .iter()
+                    .filter_map(|tag| p.child(tag))
+                    .filter_map(|n| n.attr("typeface"))
+                    .map(str::trim)
+                    .find(|f| ai_format::font::is_substitution(f))
+            })
+            .filter(|f| !f.contains(['"', '<', '>', ';']))
+            .map(str::to_string)
+            .filter(|f| inline.font.as_deref() != Some(f.as_str()));
+        let mut css: Vec<String> = Vec::new();
+        if let Some(c) = own_color {
+            css.push(format!("color:{c}"));
+        }
+        if let Some(f) = own_font {
+            css.push(format!("font-family:{f}"));
+        }
+        if !css.is_empty() {
+            wrapped = format!("<span style=\"{}\">{wrapped}</span>", css.join(";"));
+        }
     }
 
     // A hyperlink's target is in the slide's relationships, not in the run.
@@ -2011,13 +2269,18 @@ fn text_style(
         .unwrap_or_default();
     let first_run = first_paragraph.and_then(|p| p.children_named("r").next());
     let props = first_run.and_then(|r| r.child("rPr"));
+    let run_bold = flag(props, "b");
     let from_run = TextDefaults {
         size: props
             .and_then(|p| p.attr_i64("sz"))
-            .map(|sz| px_from_font_size(sz).round()),
-        bold: flag(props, "b"),
+            .map(|sz| ai_format::font::px_for_pt(sz as f64 / 100.0)),
+        bold: run_bold,
         italic: flag(props, "i"),
-        color: props.and_then(solid_color),
+        // Colour is block-wide in this format, so take the colour most of the
+        // text is drawn in rather than the first run's. A text box whose first
+        // line is a burgundy sub-heading and the rest body grey arrived all
+        // burgundy the other way.
+        color: dominant_run_color(body, theme),
         align: None,
         line: None,
     };
@@ -2039,10 +2302,36 @@ fn text_style(
     if let Some(size) = resolved.size {
         style.insert("fontSize".to_string(), json!((size * scale).round()));
     }
-    if resolved.bold == Some(true) {
-        // The run also carries `**`, so the weight is what makes an all-bold
-        // paragraph look right without doubling the markers — and it is the only
-        // carrier when the boldness came from the master.
+    // Weight is block-wide in this format, so it may only be promoted when
+    // the boldness really is block-wide: inherited from the layout/master, or
+    // explicit on every run. Promoting the *first* run's `b="1"` made "**매출
+    // 142억** — 전년 대비 +24%" arrive with the plain half bold too.
+    let block_bold = match run_bold {
+        Some(true) => {
+            let paragraph_bold = from_paragraph.bold.or(inherited.bold);
+            let mut any_text = false;
+            let mut all_bold = true;
+            for paragraph in body.children_named("p") {
+                let p_bold = paragraph
+                    .child("pPr")
+                    .map(|pr| defaults_from_props(pr, theme).bold)
+                    .unwrap_or(None)
+                    .or(paragraph_bold);
+                for run in paragraph.children_named("r") {
+                    any_text = true;
+                    if !flag(run.child("rPr"), "b").or(p_bold).unwrap_or(false) {
+                        all_bold = false;
+                    }
+                }
+            }
+            any_text && all_bold
+        }
+        Some(false) => false,
+        // Nothing on the runs: the paragraph or the master said it, and that
+        // is block-wide by nature — the only carrier, since no run wrote `**`.
+        None => resolved.bold == Some(true),
+    };
+    if block_bold {
         style.insert("weight".to_string(), json!(700));
     }
     if resolved.italic == Some(true) {
@@ -2050,6 +2339,9 @@ fn text_style(
     }
     if let Some(color) = resolved.color {
         style.insert("color".to_string(), json!(color));
+    }
+    if let Some(font) = dominant_run_font(body) {
+        style.insert("font".to_string(), json!(font));
     }
     if let Some(align) = resolved.align {
         style.insert("align".to_string(), json!(align));
@@ -2072,6 +2364,70 @@ fn text_style(
         }
     }
     style
+}
+
+/// The explicit run colour covering the most non-blank characters in a text
+/// body, resolved through the theme, or `None` when no run states one.
+fn dominant_run_color(body: &Node, theme: &Theme) -> Option<String> {
+    let mut weights: IndexMap<String, usize> = IndexMap::new();
+    for paragraph in body.children_named("p") {
+        for run in paragraph.children_named("r") {
+            let Some(fill) = run.child("rPr").and_then(|p| p.child("solidFill")) else {
+                continue;
+            };
+            let Some(color) = theme.color_of(fill).or_else(|| solid_color(fill)) else {
+                continue;
+            };
+            let chars = run
+                .child("t")
+                .map(|t| t.all_text().chars().filter(|c| !c.is_whitespace()).count())
+                .unwrap_or(0);
+            *weights.entry(color).or_insert(0) += chars.max(1);
+        }
+    }
+    // The first colour wins a tie, so a single-colour box is unaffected.
+    let mut best: Option<(String, usize)> = None;
+    for (color, weight) in weights {
+        if best.as_ref().is_none_or(|(_, w)| weight > *w) {
+            best = Some((color, weight));
+        }
+    }
+    best.map(|(color, _)| color)
+}
+
+/// The Latin/East-Asian family covering the most characters in a text body,
+/// when it is a real family and not the one this format draws. Theme
+/// references (`+mn-lt`) are resolved by PowerPoint, so they are skipped.
+fn dominant_run_font(body: &Node) -> Option<String> {
+    let mut weights: IndexMap<String, usize> = IndexMap::new();
+    for paragraph in body.children_named("p") {
+        for run in paragraph.children_named("r") {
+            let Some(props) = run.child("rPr") else {
+                continue;
+            };
+            let Some(face) = ["ea", "latin"]
+                .iter()
+                .filter_map(|tag| props.child(tag))
+                .filter_map(|n| n.attr("typeface"))
+                .map(str::trim)
+                .find(|f| ai_format::font::is_substitution(f))
+            else {
+                continue;
+            };
+            let chars = run
+                .child("t")
+                .map(|t| t.all_text().chars().filter(|c| !c.is_whitespace()).count())
+                .unwrap_or(0);
+            *weights.entry(face.to_string()).or_insert(0) += chars.max(1);
+        }
+    }
+    let mut best: Option<(String, usize)> = None;
+    for (face, weight) in weights {
+        if best.as_ref().is_none_or(|(_, w)| weight > *w) {
+            best = Some((face, weight));
+        }
+    }
+    best.map(|(face, _)| face)
 }
 
 /* --------------------------------------------------------------------- chart */

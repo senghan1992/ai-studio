@@ -65,7 +65,7 @@ impl Format {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
-    #[error("{0} 문서는 .{1}로 내보낼 수 없습니다")]
+    #[error("{0}은(는) .{1} 형식으로 내보낼 수 없습니다")]
     WrongType(&'static str, &'static str),
     #[error(transparent)]
     Package(#[from] crate::ooxml::Error),

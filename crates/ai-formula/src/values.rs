@@ -5,8 +5,8 @@ use std::rc::Rc;
 use crate::jsnum;
 
 /// Every error code the engine can produce, in the order the lexer scans them.
-pub const ERROR_CODES: [&str; 7] = [
-    "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#N/A", "#NUM!", "#CIRC!",
+pub const ERROR_CODES: [&str; 8] = [
+    "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#N/A", "#NUM!", "#CIRC!", "#SPILL!",
 ];
 
 pub const VALUE_ERR: &str = "#VALUE!";
@@ -16,6 +16,8 @@ pub const NA_ERR: &str = "#N/A";
 pub const REF_ERR: &str = "#REF!";
 pub const NAME_ERR: &str = "#NAME?";
 pub const CIRC_ERR: &str = "#CIRC!";
+/// A dynamic array could not spill: something occupies its range.
+pub const SPILL_ERR: &str = "#SPILL!";
 
 /// The result of evaluating a range reference.
 #[derive(Clone, Debug, PartialEq)]
@@ -268,20 +270,43 @@ pub fn bool_of(v: &Value) -> Result<bool, Value> {
     }
 }
 
-/// Numbers only, skipping text/blanks — the `SUM`/`AVERAGE` contract.
-/// An error anywhere aborts, matching the JS early return.
+/// Numbers only — the `SUM`/`AVERAGE` contract. An error anywhere aborts.
+///
+/// Excel draws a line the flattened stream would erase: text inside a
+/// referenced range or array is *ignored* (a `SUM` down a column skips the label
+/// cells and a stray `'5` typed as text), but a text argument passed *directly*
+/// — `SUM("5", A1)` — is coerced. We keep that distinction by tracking whether a
+/// value arrived through a range/array (`direct = false`) or as its own argument.
 pub fn numeric_values(args: &[Value]) -> Result<Vec<f64>, Value> {
     let mut out = Vec::new();
-    for v in flatten(args) {
-        match v {
-            Value::Error(_) => return Err(v),
-            Value::Blank => continue,
-            Value::Bool(_) => continue,
-            Value::Number(n) => out.push(n),
-            Value::Text(s) => {
-                if s.is_empty() {
-                    continue;
-                }
+    for arg in args {
+        collect_numeric(arg, true, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn collect_numeric(v: &Value, direct: bool, out: &mut Vec<f64>) -> Result<(), Value> {
+    match v {
+        Value::Error(_) => return Err(v.clone()),
+        Value::Range(r) => {
+            for x in r.values() {
+                collect_numeric(x, false, out)?;
+            }
+        }
+        Value::Array(items) => {
+            for x in items {
+                collect_numeric(x, false, out)?;
+            }
+        }
+        Value::Number(n) => out.push(*n),
+        Value::Blank => {}
+        // Logical values are ignored here whether direct or referenced; this
+        // matches the reader's long-standing behaviour and is left untouched.
+        Value::Bool(_) => {}
+        Value::Text(s) => {
+            // Only a text value handed in as its own argument is coerced; text
+            // pulled out of a range or array is a label, not a number.
+            if direct && !s.is_empty() {
                 let cleaned: String = s.chars().filter(|c| *c != ',').collect();
                 if let Some(n) = js_string_to_number(&cleaned) {
                     if n.is_finite() {
@@ -289,10 +314,9 @@ pub fn numeric_values(args: &[Value]) -> Result<Vec<f64>, Value> {
                     }
                 }
             }
-            Value::Range(_) | Value::Array(_) => unreachable!("flatten expands these"),
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Shortest round-trippable decimal, avoiding `0.30000000000000004` in output.

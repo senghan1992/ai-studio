@@ -348,14 +348,23 @@ fn render_datetime(serial: f64, section: &str) -> String {
             Piece::Token(token) => {
                 // `m` is minutes when it follows an hour or precedes seconds,
                 // and months otherwise — the one genuinely ambiguous token in
-                // the whole format language.
-                let neighbour_is_time = |offset: isize| {
-                    let i = index as isize + offset;
-                    usize::try_from(i)
-                        .ok()
-                        .and_then(|i| parts.get(i))
-                        .map(|p| matches!(p, Piece::Token(t) if t.starts_with('h') || t.starts_with('s')))
-                        .unwrap_or(false)
+                // the whole format language. The neighbours are the nearest
+                // *tokens*, not the nearest pieces: in `h:mm` the `:` literal
+                // sits between them, and stopping at it made every clock in a
+                // sheet show the month where its minutes belong.
+                let nearest_token = |direction: isize| -> Option<&str> {
+                    let mut i = index as isize + direction;
+                    while let Some(piece) = usize::try_from(i).ok().and_then(|i| parts.get(i)) {
+                        if let Piece::Token(t) = piece {
+                            return Some(t.as_str());
+                        }
+                        i += direction;
+                    }
+                    None
+                };
+                let neighbour_is_time = |direction: isize| {
+                    nearest_token(direction)
+                        .is_some_and(|t| t.starts_with('h') || t.starts_with('s') || t == "[h]")
                 };
                 let text = match token.as_str() {
                     "yyyy" | "yyy" => y.to_string(),
@@ -395,7 +404,9 @@ fn render_datetime(serial: f64, section: &str) -> String {
                     }
                     "ss" => pad2(second as u32),
                     "s" => second.to_string(),
-                    "am/pm" => if hour24 < 12 { "오전" } else { "오후" }.to_string(),
+                    // Excel shows the `AM/PM` literal in English; the Korean
+                    // words come only from an explicit locale section.
+                    "am/pm" => if hour24 < 12 { "AM" } else { "PM" }.to_string(),
                     "[h]" => ((serial * 24.0).floor() as i64).to_string(),
                     "[m]" => ((serial * 1440.0).floor() as i64).to_string(),
                     "[s]" => ((serial * 86400.0).floor() as i64).to_string(),
@@ -653,10 +664,12 @@ mod format_tests {
 
     #[test]
     fn times_render_and_m_means_minutes_next_to_an_hour() {
-        let serial = ymd_to_serial(2026, 9, 2).unwrap() + 13.0 / 24.0 + 9.0 / 1440.0;
+        // Minute 9 in month 9 once masked a bug where `mm` rendered the
+        // month; the added minute-33 case cannot be right by coincidence.
+        let serial = ymd_to_serial(2026, 9, 2).unwrap() + 13.0 / 24.0 + 33.0 / 1440.0;
         let f = |fmt: &str| apply_num_fmt(&Value::Number(serial), fmt);
-        assert_eq!(f("hh:mm"), "13:09");
-        assert_eq!(f("h:mm AM/PM"), "1:09 오후");
+        assert_eq!(f("hh:mm"), "13:33");
+        assert_eq!(f("h:mm AM/PM"), "1:33 PM");
         // The same `mm` is a month when no hour is beside it.
         assert_eq!(f("yyyy-mm"), "2026-09");
     }
@@ -686,5 +699,22 @@ mod format_tests {
             apply_num_fmt(&Value::Text("서울".into()), "\"[\"@\"]\""),
             "[서울]"
         );
+    }
+}
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use crate::values::Value;
+
+    #[test]
+    fn m_next_to_an_hour_or_second_is_minutes() {
+        let at = |serial: f64, fmt: &str| apply_num_fmt(&Value::Number(serial), fmt);
+        assert_eq!(at(0.5, "h:mm"), "12:00");
+        assert_eq!(at(0.5236111111, "h:mm"), "12:34");
+        assert_eq!(at(0.75, "h:mm AM/PM"), "6:00 PM");
+        assert_eq!(at(0.25, "hh:mm:ss"), "06:00:00");
+        assert_eq!(at(0.0, "mm:ss"), "00:00");
+        // A date-and-time format keeps the month a month and the minute a minute.
+        assert_eq!(at(46053.25, "yyyy-mm-dd h:mm"), "2026-01-31 6:00");
     }
 }

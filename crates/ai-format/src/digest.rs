@@ -16,7 +16,7 @@ use crate::chart::{
 };
 use crate::doc::describe_override;
 use crate::geometry::{position_phrase, reading_order};
-use crate::grid::{summarize_columns, summary_scope, used_range};
+use crate::grid::{formula_entries, summarize_columns, summary_scope, used_range, FormulaEntry};
 use crate::mdblocks::{count_words, heading_level, plain_text};
 use crate::model::{Items, Project, Section, Sheet, Slide};
 
@@ -233,7 +233,62 @@ fn doc_digest(project: &Project, sections: &[Section]) -> String {
 
 /* -------------------------------------------------------------------- grid */
 
-const GRID_DIGEST_ROWS: usize = 60;
+/// Rows written out record by record. A company data dictionary runs to a few
+/// hundred rows and every one of them is an answer a model may be asked for, so
+/// the cap is generous; past it the digest names the sheet file that holds the
+/// rest, which RAG can index in its own right.
+const GRID_DIGEST_ROWS: usize = 500;
+
+/// Longest cell text kept intact in the digest. A stray paragraph pasted into
+/// one cell can be thousands of characters; the digest exists to be scanned, so
+/// past this it is clipped with an ellipsis. The source files keep the full text.
+const GRID_DIGEST_CELL_CHARS: usize = 500;
+
+fn display_value_or_blank(cell: &ai_formula::evaluate::Cell) -> String {
+    let shown = display_value(cell);
+    if shown.is_empty() {
+        "(빈 값)".to_string()
+    } else {
+        shown
+    }
+}
+
+/// A cell's text made safe to sit inside one markdown bullet.
+///
+/// A multi-line cell (a description column, typically) would otherwise split
+/// the `- N행:` bullet across lines and a RAG chunker loses which row the text
+/// belongs to; a header beginning with `*` would fuse with the bold markers
+/// into `***x**`. Whitespace runs collapse to one space, and the three
+/// characters markdown reads as emphasis or code are escaped.
+fn digest_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        if matches!(ch, '*' | '_' | '`') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Clip an over-long cell value for the digest, on a character boundary.
+fn truncate_value(text: &str) -> String {
+    let text = digest_text(text);
+    if text.chars().count() <= GRID_DIGEST_CELL_CHARS {
+        return text;
+    }
+    let kept: String = text.chars().take(GRID_DIGEST_CELL_CHARS).collect();
+    format!("{kept}… (전체 {}자)", text.chars().count())
+}
 
 fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
     // Recalculate here rather than trusting the caller's cached `v` values: the
@@ -310,7 +365,10 @@ fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
                 };
                 lines.push(format!(
                     "- `{}` **{}** — {}, 값 {}개{stats}",
-                    col.col, col.header, col.col_type, col.count
+                    col.col,
+                    digest_text(&col.header),
+                    col.col_type,
+                    col.count
                 ));
             }
             lines.push(String::new());
@@ -348,7 +406,9 @@ fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
                             .get(&to_ref(c, r))
                             .map(display_value)
                             .unwrap_or_default();
-                        (!shown.is_empty()).then(|| format!("{}={shown}", header_row[c]))
+                        (!shown.is_empty()).then(|| {
+                            format!("{}={}", digest_text(&header_row[c]), truncate_value(&shown))
+                        })
                     })
                     .collect();
                 if !parts.is_empty() {
@@ -364,7 +424,8 @@ fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
                             .get(&to_ref(c, r))
                             .map(display_value)
                             .unwrap_or_default();
-                        (!shown.is_empty()).then(|| format!("{}={shown}", to_ref(c, r)))
+                        (!shown.is_empty())
+                            .then(|| format!("{}={}", to_ref(c, r), truncate_value(&shown)))
                     })
                     .collect();
                 if !parts.is_empty() {
@@ -373,28 +434,47 @@ fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
             }
         }
         if range.max_row > GRID_DIGEST_ROWS {
-            lines.push(format!(
-                "- _… {}개 행 생략_",
-                range.max_row - GRID_DIGEST_ROWS
-            ));
+            let rest = range.max_row - GRID_DIGEST_ROWS;
+            lines.push(match &sheet.file {
+                Some(file) => format!("- _… {rest}개 행 생략 — 전체 데이터는 `{file}`에 있습니다_"),
+                None => format!("- _… {rest}개 행 생략_"),
+            });
         }
         lines.push(String::new());
 
-        let formulas: Vec<_> = sheet.cells.iter().filter(|(_, c)| c.f.is_some()).collect();
-        if !formulas.is_empty() {
+        let entries = formula_entries(sheet);
+        if !entries.is_empty() {
             lines.push("### 수식과 계산 결과".into());
             lines.push(String::new());
-            for (reference, cell) in &formulas {
-                let shown = display_value(cell);
-                let shown = if shown.is_empty() {
-                    "(빈 값)".to_string()
-                } else {
-                    shown
-                };
-                lines.push(format!(
-                    "- `{reference}`: `{}` → **{shown}**",
-                    cell.f.as_deref().unwrap_or("")
-                ));
+            for entry in &entries {
+                match entry {
+                    FormulaEntry::Single(reference, cell) => {
+                        let shown = truncate_value(&display_value_or_blank(cell));
+                        // A dynamic array names the range it spilled over, so a
+                        // reader knows the neighbouring values belong to it.
+                        let spilled = cell
+                            .spill
+                            .as_deref()
+                            .map(|range| format!(" ({range}로 스필)"))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "- `{reference}`: `{}` → **{shown}**{spilled}",
+                            cell.f.as_deref().unwrap_or("")
+                        ));
+                    }
+                    FormulaEntry::FillDown {
+                        anchor,
+                        anchor_cell,
+                        end,
+                        count,
+                    } => {
+                        lines.push(format!(
+                            "- `{anchor}:{end}`: `{}` → 아래로 {count}개 채움 (예: `{anchor}` → **{}**)",
+                            anchor_cell.f.as_deref().unwrap_or(""),
+                            truncate_value(&display_value_or_blank(anchor_cell))
+                        ));
+                    }
+                }
             }
             lines.push(String::new());
         }

@@ -39,6 +39,8 @@ pub enum Token {
     Error(String),
     Ref(String),
     Range(String),
+    /// `E2#` — the spill range anchored at E2.
+    SpillRef(String),
     Name(String),
     Op(Op),
     LParen,
@@ -191,14 +193,20 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     .map(|m| m.as_str().to_string())
                     .unwrap_or_default();
                 let start = caps.get(3).unwrap().as_str().to_uppercase();
+                let mut consumed = caps.get(0).unwrap().as_str().len();
                 let token = match caps.get(4) {
                     Some(end) => {
                         Token::Range(format!("{sheet}!{start}:{}", end.as_str().to_uppercase()))
                     }
+                    // `실적!E2#` — the spill range anchored on another sheet.
+                    None if rest[consumed..].starts_with('#') => {
+                        consumed += 1;
+                        Token::SpillRef(format!("{sheet}!{start}"))
+                    }
                     None => Token::Ref(format!("{sheet}!{start}")),
                 };
                 tokens.push(token);
-                i += caps.get(0).unwrap().as_str().len();
+                i += consumed;
                 continue;
             }
         }
@@ -223,14 +231,31 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             let len = word.len();
             let upper = word.to_uppercase();
 
+            // `LOG10(`, `FOO123(`: a word that looks like a cell reference
+            // but is followed by an opening paren is a function call — Excel
+            // resolves the ambiguity the same way. Without this, `=LOG10(100)`
+            // lexes as the cell LOG10 and the whole formula fails.
+            let called = rest[len..]
+                .chars()
+                .find(|c| !c.is_whitespace())
+                .is_some_and(|c| c == '(');
+
             if upper == "TRUE" || upper == "FALSE" {
                 tokens.push(Token::Bool(upper == "TRUE"));
-            } else if parse_ref(&word).is_some() {
-                tokens.push(Token::Ref(upper));
+                i += len;
+            } else if !called && parse_ref(&word).is_some() {
+                // `E2#` reads the whole range the formula at E2 spilled over.
+                if rest[len..].starts_with('#') {
+                    tokens.push(Token::SpillRef(upper));
+                    i += len + 1;
+                } else {
+                    tokens.push(Token::Ref(upper));
+                    i += len;
+                }
             } else {
                 tokens.push(Token::Name(word));
+                i += len;
             }
-            i += len;
             continue;
         }
 
@@ -276,6 +301,8 @@ pub enum Node {
     Blank,
     Ref(String),
     Range(String),
+    /// `E2#` — whatever range the formula at E2 spilled over.
+    SpillRef(String),
     Name(String),
     Array(Vec<Node>),
     Call {
@@ -294,9 +321,17 @@ pub enum Node {
     Percent(Box<Node>),
 }
 
+/// The deepest expression nesting we will parse. Excel itself caps nested
+/// function calls at 64; we allow far more for generated formulas but still
+/// reject the pathological `((((…))))` or `SUM(SUM(…))` that a crafted file uses
+/// to overflow the stack — here while parsing, and later when the resulting AST
+/// is evaluated or dropped, both of which recurse to the same depth.
+const MAX_PARSE_DEPTH: usize = 256;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -320,6 +355,21 @@ impl Parser {
     }
 
     fn parse_expr(&mut self, min_prec: u8) -> Result<Node> {
+        // Every recursive descent path — grouping, unary, function arguments —
+        // passes back through here, so one guard at the cycle head bounds them all.
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(FormulaError::new(
+                VALUE_ERR,
+                "수식이 너무 깊게 중첩되어 있습니다",
+            ));
+        }
+        let result = self.parse_expr_inner(min_prec);
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_expr_inner(&mut self, min_prec: u8) -> Result<Node> {
         let mut left = self.parse_unary()?;
         // Climb while the next token is an infix operator that binds at least as
         // tightly as the caller's floor.
@@ -374,6 +424,7 @@ impl Parser {
             Token::Error(v) => Ok(Node::Error(v)),
             Token::Ref(v) => Ok(Node::Ref(v)),
             Token::Range(v) => Ok(Node::Range(v)),
+            Token::SpillRef(v) => Ok(Node::SpillRef(v)),
             Token::LParen => {
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
@@ -430,7 +481,11 @@ pub fn parse(formula: &str) -> Result<Node> {
     let text = formula.trim_start();
     let text = text.strip_prefix('=').unwrap_or(text);
     let tokens = tokenize(text)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let ast = parser.parse_expr(0)?;
     if parser.pos < parser.tokens.len() {
         return Err(FormulaError::new(VALUE_ERR, "trailing input"));
@@ -455,6 +510,7 @@ pub fn collect_refs(ast: &Node) -> Refs {
 fn walk_refs(ast: &Node, out: &mut Refs) {
     match ast {
         Node::Ref(r) => out.refs.push(r.clone()),
+        Node::SpillRef(r) => out.refs.push(r.clone()),
         Node::Range(r) => out.ranges.push(r.clone()),
         Node::Name(n) => out.names.push(n.clone()),
         Node::Binary { left, right, .. } => {
@@ -492,6 +548,20 @@ mod tests {
         );
         assert_eq!(tokenize("매출").unwrap(), vec![Token::Name("매출".into())]);
         assert!(tokenize("\"open").is_err());
+    }
+
+    #[test]
+    fn a_ref_shaped_word_before_a_paren_is_a_function() {
+        // LOG10 and FOO123 both fit the A1 reference pattern; the paren decides.
+        assert_eq!(
+            tokenize("LOG10(100)").unwrap()[0],
+            Token::Name("LOG10".into())
+        );
+        assert_eq!(tokenize("A1+B2").unwrap()[0], Token::Ref("A1".into()));
+        assert_eq!(
+            tokenize("FOO123()").unwrap()[0],
+            Token::Name("FOO123".into())
+        );
     }
 
     #[test]
@@ -534,5 +604,18 @@ mod tests {
     fn rejects_trailing_input() {
         assert!(parse("=1 2").is_err());
         assert!(parse("=SUM(").is_err());
+    }
+
+    #[test]
+    fn deeply_nested_formulas_are_rejected_instead_of_overflowing_the_stack() {
+        // A crafted cell with thousands of nested parens or calls must return an
+        // error, never recurse deep enough to overflow the stack while parsing,
+        // evaluating, or dropping the tree.
+        let parens = format!("={}1{}", "(".repeat(5000), ")".repeat(5000));
+        assert!(parse(&parens).is_err(), "nested parens are bounded");
+        let calls = format!("={}1{}", "SUM(".repeat(5000), ")".repeat(5000));
+        assert!(parse(&calls).is_err(), "nested calls are bounded");
+        // A reasonably nested formula still parses.
+        assert!(parse("=SUM(1,MAX(2,MIN(3,4)))").is_ok());
     }
 }

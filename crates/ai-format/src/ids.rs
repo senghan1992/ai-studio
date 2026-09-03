@@ -80,10 +80,16 @@ pub fn slugify(title: &str, fallback: &str) -> String {
         pending_dash = false;
         out.extend(c.to_lowercase());
     }
-    if out.is_empty() {
+    // Filesystems cap a name at 255 bytes, and a Korean character is three of
+    // them; the slug still has to carry a numbering prefix and a suffix like
+    // `.layout.json`. Sixty characters keeps every combination comfortably
+    // inside the limit — the full title lives untruncated in the manifest.
+    let capped: String = out.chars().take(60).collect();
+    let capped = capped.trim_end_matches('-');
+    if capped.is_empty() {
         fallback.to_string()
     } else {
-        out
+        capped.to_string()
     }
 }
 

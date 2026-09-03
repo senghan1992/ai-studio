@@ -181,6 +181,33 @@ pub fn create_project(
 /* -------------------------------------------------------------------- load */
 
 pub fn load_project(dir: &Path) -> Result<Project> {
+    Ok(load_project_with_warnings(dir)?.0)
+}
+
+/// Load a project and report what could not be read as it was written.
+///
+/// A layout/meta/cells JSON that exists but does not parse is *replaced* by
+/// defaults so the document still opens — but silently, the very next
+/// autosave overwrites the broken file with those defaults and the author's
+/// hand-placed geometry is gone for good. The warning is what stands between
+/// "opened resiliently" and "lost quietly".
+pub fn load_project_with_warnings(dir: &Path) -> Result<(Project, Vec<String>)> {
+    let mut warnings: Vec<String> = Vec::new();
+    let mut read_json_noted = |rel: &str| -> Option<Json> {
+        let file = dir.join(rel);
+        let text = fs::read_to_string(&file).ok()?;
+        match serde_json::from_str(&text) {
+            Ok(json) => Some(json),
+            Err(_) => {
+                warnings.push(format!(
+                    "{rel} 파일을 읽을 수 없어 기본값으로 대체했습니다 — 이 상태로 저장하면 \
+                     원래 내용을 잃습니다. 파일을 고치거나 버전 기록에서 복원하세요."
+                ));
+                None
+            }
+        }
+    };
+
     let Some(project_type) = type_from_path(dir) else {
         return Err(Error::NotAProject(
             dir.file_name()
@@ -189,7 +216,7 @@ pub fn load_project(dir: &Path) -> Result<Project> {
         ));
     };
 
-    let manifest_json = read_json(&dir.join("manifest.json"));
+    let manifest_json = read_json_noted("manifest.json");
     let manifest = read_manifest(manifest_json.as_ref(), dir, project_type);
     let entries = resolve_entries(dir, project_type, manifest_json.as_ref())?;
 
@@ -199,7 +226,7 @@ pub fn load_project(dir: &Path) -> Result<Project> {
                 .iter()
                 .map(|e| {
                     let md = read_text(&dir.join(&e.0));
-                    let layout = read_json(&dir.join(&e.1));
+                    let layout = read_json_noted(&e.1);
                     let mut slide = read_slide(&md, layout.as_ref());
                     slide.file = Some(e.0.clone());
                     slide
@@ -215,7 +242,7 @@ pub fn load_project(dir: &Path) -> Result<Project> {
                 .iter()
                 .map(|e| {
                     let md = read_text(&dir.join(&e.0));
-                    let meta = read_json(&dir.join(&e.1));
+                    let meta = read_json_noted(&e.1);
                     let mut section = read_section(&md, meta.as_ref());
                     section.file = Some(e.0.clone());
                     section
@@ -231,7 +258,7 @@ pub fn load_project(dir: &Path) -> Result<Project> {
                 .iter()
                 .map(|e| {
                     let md = read_text(&dir.join(&e.0));
-                    let cells = read_json(&dir.join(&e.1));
+                    let cells = read_json_noted(&e.1);
                     let mut sheet = read_sheet(&md, cells.as_ref());
                     sheet.file = Some(e.0.clone());
                     sheet
@@ -244,12 +271,15 @@ pub fn load_project(dir: &Path) -> Result<Project> {
         }
     };
 
-    Ok(Project {
-        project_type,
-        dir: dir.to_path_buf(),
-        manifest,
-        items,
-    })
+    Ok((
+        Project {
+            project_type,
+            dir: dir.to_path_buf(),
+            manifest,
+            items,
+        },
+        warnings,
+    ))
 }
 
 fn read_manifest(json: Option<&Json>, dir: &Path, project_type: ProjectType) -> Manifest {
@@ -352,7 +382,19 @@ pub fn save_project(project: &Project) -> Result<Project> {
     let project_type = project.project_type;
     let dir = &project.dir;
 
+    // Keep the state this save is about to overwrite. A failure to write
+    // history must never block the save itself — the user's edit comes first.
+    let _ = crate::history::snapshot(dir, project_type);
+
     let items = normalize_items(project);
+    // A grid is recalculated here, not only inside the per-sheet writer, so the
+    // project this function returns matches the bytes it wrote: an agent that
+    // PUTs a bare formula gets the computed values — and the cells its array
+    // spilled into — back in the same response.
+    let items = match items {
+        Items::Sheets(sheets) => Items::Sheets(crate::grid::recalculated_all(&sheets)),
+        other => other,
+    };
     let mut written: Vec<ManifestEntry> = Vec::new();
     let mut keep: HashSet<String> = HashSet::new();
 
@@ -610,6 +652,11 @@ fn walk(current: &Path, rel: &str, out: &mut Vec<FileEntry>) -> Result<()> {
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
+        // The version trail is bookkeeping, not part of the document; showing
+        // its copies in the file inspector would triple every listing.
+        if rel.is_empty() && name == crate::history::HISTORY_DIR {
+            continue;
+        }
         let rel_path = if rel.is_empty() {
             name.clone()
         } else {
@@ -629,8 +676,32 @@ fn walk(current: &Path, rel: &str, out: &mut Vec<FileEntry>) -> Result<()> {
 }
 
 pub fn read_project_file(dir: &Path, rel_path: &str) -> Result<String> {
-    let abs = resolve_inside(dir, rel_path)?;
-    Ok(read_text(&abs))
+    let abs = resolve_existing_inside(dir, rel_path)?;
+    fs::read_to_string(&abs).map_err(|_| Error::NotFound(rel_path.to_string()))
+}
+
+/// Resolve a path for reading: the file must exist, and its real location —
+/// symlinks followed — must still be inside `root`.
+///
+/// The lexical check alone is not enough here: a symlink named `link.md`
+/// pointing at `/etc/passwd` passes every `..` test and would hand the file
+/// API anything the server can read. A folder someone shares with you is
+/// exactly where such a link would arrive.
+pub fn resolve_existing_inside(root: &Path, target: &str) -> Result<PathBuf> {
+    let lexical = resolve_inside(root, target)?;
+    let real = lexical
+        .canonicalize()
+        .map_err(|_| Error::NotFound(target.to_string()))?;
+    if !real.is_file() {
+        return Err(Error::NotFound(target.to_string()));
+    }
+    let real_root = root
+        .canonicalize()
+        .map_err(|_| Error::NotFound(target.to_string()))?;
+    if !real.starts_with(&real_root) {
+        return Err(Error::Escape(target.to_string()));
+    }
+    Ok(real)
 }
 
 /// A project directory that must already exist, for API handlers.
@@ -643,4 +714,57 @@ pub fn existing_project_dir(root: &Path, folder: &str) -> Result<PathBuf> {
         return Err(Error::NotFound(folder.to_string()));
     }
     Ok(dir)
+}
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    use crate::model::ProjectType;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ai-proj-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_very_long_title_still_gets_a_folder() {
+        let root = scratch("longtitle");
+        let title = "가".repeat(200);
+        let project = create_project(&root, ProjectType::Doc, &title, false).unwrap();
+        // The manifest keeps the whole title; only the folder name is capped.
+        assert_eq!(project.manifest.title, title);
+        let folder = project
+            .dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(folder.len() < 240, "folder is {} bytes", folder.len());
+        // And a slide-length item name inside stays writable too.
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_cannot_smuggle_a_file_from_outside() {
+        let root = scratch("symlink");
+        let project = create_project(&root, ProjectType::Grid, "보안", false).unwrap();
+        let outside = std::env::temp_dir().join(format!("ai-secret-{}", std::process::id()));
+        fs::write(&outside, "비밀").unwrap();
+        std::os::unix::fs::symlink(&outside, project.dir.join("link.md")).unwrap();
+
+        let err = read_project_file(&project.dir, "link.md").unwrap_err();
+        assert!(matches!(err, Error::Escape(_)), "{err}");
+
+        // A real file still reads, and a missing one is 404 rather than "".
+        assert!(read_project_file(&project.dir, "manifest.json").is_ok());
+        assert!(matches!(
+            read_project_file(&project.dir, "없는파일.md"),
+            Err(Error::NotFound(_))
+        ));
+
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

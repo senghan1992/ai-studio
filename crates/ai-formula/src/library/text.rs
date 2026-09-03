@@ -102,7 +102,7 @@ pub fn call(name: &str, args: &[Value]) -> Option<Value> {
             Err(e) => e,
             Ok(n) => {
                 let code = n.trunc();
-                if code < 1.0 || code > 1_114_111.0 {
+                if !(1.0..=1_114_111.0).contains(&code) {
                     return Some(err(VALUE_ERR));
                 }
                 match char::from_u32(code as u32) {

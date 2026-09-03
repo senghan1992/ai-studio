@@ -242,11 +242,26 @@ pub fn call(name: &str, args: &[Value]) -> Option<Value> {
             if count <= 0.0 || count > 100_000.0 {
                 return Some(err(NUM_ERR));
             }
-            array(
-                (0..count as usize)
-                    .map(|i| Value::Number(start + step * i as f64))
-                    .collect(),
-            )
+            let values: Vec<Value> = (0..count as usize)
+                .map(|i| Value::Number(start + step * i as f64))
+                .collect();
+            if cols > 1.0 {
+                // A two-dimensional sequence keeps its shape, so it spills as
+                // the rows × cols block Excel produces. The addresses are
+                // synthetic, as TRANSPOSE's are — only the shape matters.
+                let cells = values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (to_ref(i % cols as usize, i / cols as usize), v))
+                    .collect();
+                Value::Range(Rc::new(RangeValue {
+                    cells,
+                    rows: rows as usize,
+                    cols: cols as usize,
+                }))
+            } else {
+                array(values)
+            }
         }
         "TRANSPOSE" => match args.first() {
             Some(Value::Range(r)) => {

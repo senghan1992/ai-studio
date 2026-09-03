@@ -9,7 +9,7 @@ use ai_format::model::{Project, Sheet};
 use ai_formula::evaluate::Cell;
 use ai_formula::refs::{index_to_col, parse_ref, to_ref};
 
-use crate::ooxml::{esc, hex, pt, relationships, Package, Result};
+use crate::ooxml::{esc, font_pt, hex, pt, relationships, Package, Result};
 
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -143,8 +143,13 @@ impl Styles {
         underline: bool,
         color: Option<&str>,
         size_px: Option<f64>,
+        name: Option<&str>,
     ) -> usize {
-        if !bold && !italic && !underline && color.is_none() && size_px.is_none() {
+        // A family carried over from an imported workbook is written back as
+        // itself; a cell with none asks for the format's own font.
+        let name = name.filter(|n| ai_format::font::is_substitution(n));
+        if !bold && !italic && !underline && color.is_none() && size_px.is_none() && name.is_none()
+        {
             return 0;
         }
         let mut xml = String::from("<font>");
@@ -162,13 +167,13 @@ impl Styles {
         }
         // Excel works in points and the editor in px at 96dpi. Trailing zeros
         // are trimmed so 11pt is written as `11`, the way Excel writes it.
-        let points = size_px.unwrap_or(ai_format::grid::CELL_PX) * 0.75;
+        let points = font_pt(size_px.unwrap_or(ai_format::grid::CELL_PX));
         xml.push_str(&format!(
             "<sz val=\"{}\"/><name val=\"{}\"/></font>",
             format!("{:.2}", points)
                 .trim_end_matches('0')
                 .trim_end_matches('.'),
-            ai_format::font::FAMILY
+            esc(name.unwrap_or(ai_format::font::FAMILY))
         ));
         Self::intern(&mut self.fonts, xml)
     }
@@ -184,25 +189,58 @@ impl Styles {
 
     fn border(&mut self, edges: Option<&Json>) -> usize {
         let Some(edges) = edges else { return 0 };
-        let on = |key: &str| edges.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
-        if !on("t") && !on("b") && !on("l") && !on("r") {
+        // An edge is `true` (the editor's thin grey line) or `{style, color}`
+        // carried over from an imported workbook. Only Excel's own line styles
+        // may be written; anything else would make the file refuse to open.
+        const STYLES: [&str; 14] = [
+            "thin",
+            "medium",
+            "thick",
+            "hair",
+            "dotted",
+            "dashed",
+            "double",
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+            "none",
+        ];
+        let edge = |name: &str, key: &str| -> Option<String> {
+            let (style, color) = match edges.get(key)? {
+                Json::Bool(true) => ("thin", None),
+                Json::Object(o) => (
+                    o.get("style")
+                        .and_then(|s| s.as_str())
+                        .filter(|s| STYLES.contains(s))
+                        .unwrap_or("thin"),
+                    o.get("color").and_then(|c| c.as_str()),
+                ),
+                _ => return None,
+            };
+            if style == "none" {
+                return None;
+            }
+            let color = color.map(hex).unwrap_or_else(|| "9CA3AF".to_string());
+            Some(format!(
+                "<{name} style=\"{style}\"><color rgb=\"FF{color}\"/></{name}>"
+            ))
+        };
+        let sides = [("left", "l"), ("right", "r"), ("top", "t"), ("bottom", "b")];
+        let drawn: Vec<Option<String>> = sides.iter().map(|(n, k)| edge(n, k)).collect();
+        if drawn.iter().all(Option::is_none) {
             return 0;
         }
-        const THIN: &str = "<color rgb=\"FF9CA3AF\"/>";
-        let edge = |name: &str, present: bool| {
-            if present {
-                format!("<{name} style=\"thin\">{THIN}</{name}>")
-            } else {
-                format!("<{name}/>")
+        let mut xml = String::from("<border>");
+        for ((name, _), side) in sides.iter().zip(drawn) {
+            match side {
+                Some(s) => xml.push_str(&s),
+                None => xml.push_str(&format!("<{name}/>")),
             }
-        };
-        let xml = format!(
-            "<border>{}{}{}{}<diagonal/></border>",
-            edge("left", on("l")),
-            edge("right", on("r")),
-            edge("top", on("t")),
-            edge("bottom", on("b")),
-        );
+        }
+        xml.push_str("<diagonal/></border>");
         Self::intern(&mut self.borders, xml)
     }
 
@@ -238,6 +276,7 @@ impl Styles {
                     .and_then(|s| s.get("fontSize"))
                     .and_then(|v| v.as_f64())
                     .filter(|px| *px > 0.0),
+                get_str("font"),
             ),
             fill: self.fill(get_str("bg")),
             border: self.border(style.and_then(|s| s.get("border"))),
@@ -376,6 +415,16 @@ struct Written {
     xml: String,
 }
 
+/// A stored formula in the exact spelling Excel keeps in a file: modern
+/// functions behind `_xlfn.`, and `E2#` as `_xlfn.ANCHORARRAY(E2)`. Without
+/// the prefixes Excel treats XLOOKUP or UNIQUE as an unknown user function
+/// and recalculates the cell to #NAME?.
+fn excel_formula(f: &str) -> String {
+    ai_formula::refs::spill_refs_to_anchorarray(&ai_formula::refs::add_xlfn_prefixes(
+        f.trim_start_matches('='),
+    ))
+}
+
 fn cell_xml(reference: &str, cell: &Cell, style: usize, strings: &mut SharedStrings) -> String {
     let s_attr = if style == 0 {
         String::new()
@@ -385,10 +434,13 @@ fn cell_xml(reference: &str, cell: &Cell, style: usize, strings: &mut SharedStri
 
     if cell.t.as_deref() == Some("e") {
         let code = cell.v.as_str().unwrap_or("#VALUE!");
+        // `#CIRC!` is this engine's own word for a circular reference; OOXML
+        // has no such literal, and Excel would flag the file as damaged.
+        let code = if code == "#CIRC!" { "#VALUE!" } else { code };
         return match &cell.f {
             Some(f) => format!(
                 "<c r=\"{reference}\"{s_attr} t=\"e\"><f>{}</f><v>{}</v></c>",
-                esc(f.trim_start_matches('=')),
+                esc(&excel_formula(f)),
                 esc(code)
             ),
             None => format!(
@@ -421,8 +473,15 @@ fn cell_xml(reference: &str, cell: &Cell, style: usize, strings: &mut SharedStri
 
     match &cell.f {
         Some(f) => format!(
-            "<c r=\"{reference}\"{s_attr}{type_attr}><f>{}</f>{value_xml}</c>",
-            esc(f.trim_start_matches('='))
+            "<c r=\"{reference}\"{s_attr}{type_attr}><f{}>{}</f>{value_xml}</c>",
+            // A dynamic-array anchor goes out as an array formula over its
+            // spill range — the storage Excel itself uses. The spilled cells
+            // follow as plain cached values, which is also Excel's own shape.
+            cell.spill
+                .as_deref()
+                .map(|range| format!(" t=\"array\" ref=\"{}\"", esc(range)))
+                .unwrap_or_default(),
+            esc(&excel_formula(f))
         ),
         None if value_xml.is_empty() && s_attr.is_empty() => String::new(),
         None => format!("<c r=\"{reference}\"{s_attr}{type_attr}>{value_xml}</c>"),
@@ -500,9 +559,19 @@ fn sheet_xml(
     if cols > 0 {
         out.push_str("<cols>");
         for c in 0..cols {
+            // Excel widths are fractional characters (17.5 is common). Rounding
+            // to whole characters moved 14 of 20 columns in a real workbook and
+            // drifted further on every save; two decimals keep the width the
+            // reader will round back to the same px.
             let chars = match sheet.col_widths.get(&index_to_col(c)) {
-                Some(px) => ((*px as f64 / PX_PER_CHAR).round() as i64).max(1),
-                None => DEFAULT_COL_CHARS,
+                Some(px) => {
+                    let w = (*px as f64 / PX_PER_CHAR).max(1.0);
+                    format!("{:.2}", w)
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string()
+                }
+                None => DEFAULT_COL_CHARS.to_string(),
             };
             out.push_str(&format!(
                 "<col min=\"{}\" max=\"{}\" width=\"{chars}\" customWidth=\"1\"/>",
@@ -736,6 +805,10 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     workbook.push_str("</sheets>");
 
     let mut defined: Vec<String> = Vec::new();
+    // Workbook names are copied onto every sheet on import, so the same name
+    // arrives here once per sheet; Excel refuses a workbook that defines a
+    // name twice, so each name is written exactly once.
+    let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, sheet) in sheets.iter().enumerate() {
         for (name, target) in &sheet.names {
             let Some(safe) = safe_defined_name(name) else {
@@ -744,18 +817,37 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
             let Json::String(target) = target else {
                 continue;
             };
-            if ai_formula::refs::parse_range(target).is_none()
-                && ai_formula::refs::parse_ref(target).is_none()
+            if !written.insert(safe.to_uppercase()) {
+                continue;
+            }
+            // A name may point into another sheet — `실적!B2:B13` is how a
+            // summary sheet's ranges arrive. The owner is then that sheet,
+            // under the sanitised name the workbook actually uses.
+            let (sheet_part, local) = ai_formula::refs::split_sheet(target);
+            if ai_formula::refs::parse_range(local).is_none()
+                && ai_formula::refs::parse_ref(local).is_none()
             {
                 continue;
             }
+            let owner = match sheet_part {
+                None => names[i].clone(),
+                Some(part) => {
+                    let Some(at) = sheets
+                        .iter()
+                        .position(|s| s.name.eq_ignore_ascii_case(part))
+                    else {
+                        continue;
+                    };
+                    names[at].clone()
+                }
+            };
             // Absolute and sheet-qualified: a relative defined name means
             // something different to Excel.
             defined.push(format!(
                 "<definedName name=\"{}\">'{}'!{}</definedName>",
                 esc(&safe),
-                esc(&names[i]),
-                esc(&absolutize(target))
+                esc(&owner),
+                esc(&absolutize(local))
             ));
         }
     }

@@ -101,6 +101,12 @@ impl Node {
     }
 }
 
+/// The deepest element nesting we will build a tree for. Real Office parts nest
+/// well under twenty levels; anything past this is a hostile file crafted to
+/// overflow the stack when the tree is walked or dropped. Rejecting keeps the
+/// recursion in `find_all`/`all_text`/`Drop` bounded.
+const MAX_XML_DEPTH: usize = 256;
+
 /// Parse an XML part into a tree.
 pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
     let text = String::from_utf8_lossy(bytes);
@@ -119,7 +125,15 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
         match reader.read_event() {
             Err(e) => return Err(Error::Xml(e)),
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => stack.push(node_from(&e)?),
+            Ok(Event::Start(e)) => {
+                if stack.len() >= MAX_XML_DEPTH {
+                    return Err(Error::UnsupportedFormat(
+                        "XML 구조가 너무 깊습니다 — 손상됐거나 안전하지 않은 파일일 수 있습니다"
+                            .into(),
+                    ));
+                }
+                stack.push(node_from(&e)?)
+            }
             Ok(Event::Empty(e)) => {
                 let node = node_from(&e)?;
                 match stack.last_mut() {
@@ -179,18 +193,64 @@ pub struct Package {
     parts: HashMap<String, Vec<u8>>,
 }
 
+/// Decompression budget. A zip records the uncompressed size of each part in its
+/// own header, but that number is attacker-controlled: a "zip bomb" declares (and
+/// deflates to) hundreds of megabytes from a few kilobytes. We never trust it —
+/// we allocate at most this per part and read through a hard cap, rejecting a
+/// package that blows the per-part or whole-package budget before it can OOM.
+const MAX_PART_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_PARTS: usize = 65_536;
+
 impl Package {
     pub fn open(bytes: &[u8]) -> Result<Package> {
-        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))?;
+        // The zip crate's own errors are English and speak of central directory
+        // records; an office user needs to know what to do, not what a zip is.
+        if bytes.is_empty() {
+            return Err(Error::UnsupportedFormat(
+                "빈 파일입니다 — 파일이 제대로 업로드됐는지 확인해 주세요".into(),
+            ));
+        }
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).map_err(|_| {
+            Error::UnsupportedFormat(
+                "Office 파일로 열 수 없습니다 — 파일이 손상됐거나 Office 형식이 아닙니다".into(),
+            )
+        })?;
+        if zip.len() > MAX_PARTS {
+            return Err(Error::UnsupportedFormat(
+                "파일에 포함된 항목이 너무 많습니다 — 손상됐거나 안전하지 않은 파일일 수 있습니다"
+                    .into(),
+            ));
+        }
+        let too_big = || {
+            Error::UnsupportedFormat(
+                "압축을 풀면 너무 커지는 파일입니다 — 손상됐거나 안전하지 않은 파일일 수 있습니다"
+                    .into(),
+            )
+        };
         let mut parts = HashMap::new();
+        let mut total: u64 = 0;
         for i in 0..zip.len() {
             let mut file = zip.by_index(i)?;
             if file.is_dir() {
                 continue;
             }
             let name = file.name().trim_start_matches('/').to_string();
-            let mut data = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut data)?;
+            // Pre-allocate to the declared size but never past the cap, then read
+            // one byte past the cap so an over-budget part is caught, not trusted.
+            let hint = file.size().min(MAX_PART_BYTES);
+            let mut data = Vec::with_capacity(hint as usize);
+            let read = file
+                .by_ref()
+                .take(MAX_PART_BYTES + 1)
+                .read_to_end(&mut data)? as u64;
+            if read > MAX_PART_BYTES {
+                return Err(too_big());
+            }
+            total += read;
+            if total > MAX_TOTAL_BYTES {
+                return Err(too_big());
+            }
             parts.insert(name, data);
         }
         Ok(Package { parts })
@@ -418,6 +478,20 @@ mod tests {
         assert_eq!(xfrm.child("off").unwrap().attr_f64("x"), Some(10.0));
         assert_eq!(sp.descendants("t").len(), 1);
         assert_eq!(sp.all_text().trim(), "안녕");
+    }
+
+    #[test]
+    fn deeply_nested_xml_is_rejected_instead_of_overflowing_the_stack() {
+        // A hostile part nested past the limit must return an error, never build
+        // a tree deep enough to overflow the stack when it is walked or dropped.
+        let deep = format!("{}{}", "<a>".repeat(5000), "</a>".repeat(5000));
+        let err = parse_xml(deep.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, Error::UnsupportedFormat(_)),
+            "expected a friendly rejection, got {err:?}"
+        );
+        // A normally-nested part still parses.
+        assert!(parse_xml(b"<a><b><c/></b></a>").is_ok());
     }
 
     #[test]

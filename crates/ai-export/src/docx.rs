@@ -9,7 +9,7 @@ use serde_json::Value as Json;
 
 use crate::mdruns::{parse_markdown, Block, Run};
 use crate::ooxml::{
-    emu, esc, hex, image_content_type, image_size, pt, relationships, twip, Package, Result,
+    emu, esc, font_pt, hex, image_content_type, image_size, relationships, twip, Package, Result,
 };
 
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -72,6 +72,16 @@ fn run_xml(run: &Run, style: Option<&Override>) -> String {
     let mut props = String::new();
     if run.code {
         props.push_str("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/>");
+    } else if let Some(font) = run
+        .font
+        .as_deref()
+        .or_else(|| string_of("font"))
+        .filter(|f| ai_format::font::is_substitution(f))
+    {
+        let font = esc(font);
+        props.push_str(&format!(
+            "<w:rFonts w:ascii=\"{font}\" w:hAnsi=\"{font}\" w:eastAsia=\"{font}\" w:cs=\"{font}\"/>"
+        ));
     }
     if run.bold || flag("bold") {
         props.push_str("<w:b/>");
@@ -85,7 +95,7 @@ fn run_xml(run: &Run, style: Option<&Override>) -> String {
     if run.strike {
         props.push_str("<w:strike/>");
     }
-    if let Some(color) = string_of("color") {
+    if let Some(color) = run.color.as_deref().or_else(|| string_of("color")) {
         props.push_str(&format!("<w:color w:val=\"{}\"/>", hex(color)));
     }
     // 형광펜. `w:highlight` only takes Word's sixteen named colours, so an
@@ -100,7 +110,7 @@ fn run_xml(run: &Run, style: Option<&Override>) -> String {
         // w:sz is in half-points.
         props.push_str(&format!(
             "<w:sz w:val=\"{}\"/>",
-            (pt(size) * 2.0).round() as i64
+            (font_pt(size) * 2.0).round() as i64
         ));
     }
     let props = if props.is_empty() {
@@ -109,10 +119,15 @@ fn run_xml(run: &Run, style: Option<&Override>) -> String {
         format!("<w:rPr>{props}</w:rPr>")
     };
 
-    format!(
-        "<w:r>{props}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
-        esc(&run.text)
-    )
+    // A newline inside a run is the paragraph's own line break — Shift+Enter
+    // in a paragraph, `<br>` in a table cell — and Word spells it `<w:br/>`.
+    let text = run
+        .text
+        .split('\n')
+        .map(|line| format!("<w:t xml:space=\"preserve\">{}</w:t>", esc(line)))
+        .collect::<Vec<_>>()
+        .join("<w:br/>");
+    format!("<w:r>{props}{text}</w:r>")
 }
 
 fn runs_xml(runs: &[Run], style: Option<&Override>, hyperlinks: &mut Vec<String>) -> String {
@@ -201,6 +216,10 @@ struct Ctx<'a> {
     dir: &'a Path,
     media: Media,
     hyperlinks: Vec<String>,
+    /// Ordered lists seen so far. Each gets its own `w:num` instance with a
+    /// `startOverride`, or Word runs one 1-2-3 straight through the document
+    /// and the second list starts at 4.
+    ordered_lists: usize,
 }
 
 fn block_xml(
@@ -210,6 +229,9 @@ fn block_xml(
     ctx: &mut Ctx,
 ) -> String {
     match block {
+        // The editor's Ctrl+Enter, as Word's own page break rather than the
+        // comment text it is stored as.
+        Block::PageBreak => "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>".to_string(),
         Block::Heading { level, runs } => {
             let props = paragraph_props(
                 style,
@@ -230,20 +252,30 @@ fn block_xml(
             if let Some(align) = style.and_then(|o| o.align.as_deref()) {
                 extra.push_str(&format!("<w:jc w:val=\"{}\"/>", alignment(align)));
             }
-            let mut quote_style = style.cloned().unwrap_or_default();
-            quote_style.style.insert("italic".into(), Json::Bool(true));
+            // The border and indent are what make it a quote; forcing the
+            // runs italic made every export→import round grow `*…*` marks
+            // the author never wrote.
             format!(
                 "<w:p><w:pPr>{extra}</w:pPr>{}</w:p>",
-                runs_xml(runs, Some(&quote_style), &mut ctx.hyperlinks)
+                runs_xml(runs, style, &mut ctx.hyperlinks)
             )
         }
-        Block::List { ordered, items } => items
+        Block::List { ordered, items } => {
+            let num_id = if *ordered {
+                ctx.ordered_lists += 1;
+                // Instance ids 100+ are the per-list decimal counters;
+                // 1 stays the shared bullet definition.
+                99 + ctx.ordered_lists
+            } else {
+                1
+            };
+            items
             .iter()
             .map(|item| {
                 let numbering = format!(
                     "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
                     item.level.min(2),
-                    if *ordered { 2 } else { 1 }
+                    num_id
                 );
                 let props = paragraph_props(
                     style,
@@ -254,7 +286,8 @@ fn block_xml(
                     runs_xml(&item.runs, style, &mut ctx.hyperlinks)
                 )
             })
-            .collect(),
+            .collect()
+        }
         Block::Code { text, .. } => text
             .split('\n')
             .map(|line| {
@@ -348,6 +381,18 @@ fn block_xml(
                     let format = spec.cells.get(&ai_formula::refs::to_ref(c, r));
                     if let Some(fill) = cell_fill(&spec, format, r) {
                         props.push_str(&format!("<w:shd w:val=\"clear\" w:fill=\"{fill}\"/>"));
+                    }
+                    // Vertical alignment lives in the cell properties, not the
+                    // paragraph. The reader stores it as top/middle/bottom; Word
+                    // spells the middle "center". Without this the round trip
+                    // silently drops a cell's vertical centring.
+                    if let Some(valign) = format.and_then(|f| f.valign.as_deref()) {
+                        let w = match valign {
+                            "middle" => "center",
+                            "bottom" => "bottom",
+                            _ => "top",
+                        };
+                        props.push_str(&format!("<w:vAlign w:val=\"{w}\"/>"));
                     }
 
                     let empty: Vec<Run> = Vec::new();
@@ -544,11 +589,24 @@ fn read_asset(dir: &Path, src: &str) -> Option<(Vec<u8>, String)> {
     if lower.starts_with("http:") || lower.starts_with("https:") || lower.starts_with("data:") {
         return None;
     }
-    let relative = src.trim_start_matches("./");
-    let abs = ai_format::project::resolve_inside(dir, relative).ok()?;
-    if !abs.is_file() {
+    // A markdown path is relative to the item folder (`slides/…`), so its
+    // canonical form is `../assets/x.png` — the very path the upload API hands
+    // back. Resolve it against the project root the way the editor's screen
+    // and the HTTP asset route do, and only from inside `assets/`.
+    let mut relative = src;
+    loop {
+        if let Some(rest) = relative.strip_prefix("./") {
+            relative = rest;
+        } else if let Some(rest) = relative.strip_prefix("../") {
+            relative = rest;
+        } else {
+            break;
+        }
+    }
+    if !relative.starts_with("assets/") {
         return None;
     }
+    let abs = ai_format::project::resolve_existing_inside(dir, relative).ok()?;
     let ext = abs.extension()?.to_string_lossy().into_owned();
     let data = std::fs::read(&abs).ok()?;
     Some((data, ext))
@@ -558,7 +616,11 @@ fn read_asset(dir: &Path, src: &str) -> Option<(Vec<u8>, String)> {
 ///
 /// The three slots are laid out with a centre and a right tab stop, which is how
 /// Word itself writes a header — and why an imported one splits on tabs.
-fn running_xml(running: &ai_format::model::Running, kind: &str) -> String {
+fn running_xml(
+    running: &ai_format::model::Running,
+    kind: &str,
+    page: &ai_format::model::Page,
+) -> String {
     let field = |token: &str, instruction: &str| {
         // A field rather than a literal number: the whole point of a page number
         // is that Word recomputes it per page.
@@ -611,9 +673,15 @@ fn running_xml(running: &ai_format::model::Running, kind: &str) -> String {
         runs(&running.right)
     );
     let element = if kind == "header" { "hdr" } else { "ftr" };
+    // The tab stops sit at the middle and the right edge of the *printable*
+    // width of this section's own paper. Hardcoding portrait-A4 positions put
+    // "대외비" seven centimetres from the edge of a landscape page.
+    let (page_w, _) = page.dimensions();
+    let printable = twip(page_w - page.margin.left - page.margin.right).max(0);
+    let center = printable / 2;
     format!(
         "<w:{element} xmlns:w=\"{NS_W}\" xmlns:r=\"{NS_R}\">\
-         <w:p><w:pPr><w:tabs><w:tab w:val=\"center\" w:pos=\"4680\"/><w:tab w:val=\"right\" w:pos=\"9360\"/></w:tabs></w:pPr>{body}</w:p>\
+         <w:p><w:pPr><w:tabs><w:tab w:val=\"center\" w:pos=\"{center}\"/><w:tab w:val=\"right\" w:pos=\"{printable}\"/></w:tabs></w:pPr>{body}</w:p>\
          </w:{element}>"
     )
 }
@@ -624,12 +692,18 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
         dir: &project.dir,
         media: Media::new(),
         hyperlinks: Vec::new(),
+        ordered_lists: 0,
     };
 
     let sections = project.sections();
     // Header and footer parts, one pair per section that has them.
     let mut running_parts: Vec<(String, String, &'static str)> = Vec::new();
     let mut body = String::new();
+    // Whether any earlier section carried a header/footer. Word inherits a
+    // missing reference from the previous section, so a later section that has
+    // none must say so explicitly with an empty part, or the paper shows a
+    // footer the screen does not.
+    let mut seen: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
     for (i, section) in sections.iter().enumerate() {
         let mut references: Vec<(String, &str)> = Vec::new();
         for (kind, running) in [
@@ -637,14 +711,26 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
             ("footer", section.page.footer.as_ref()),
         ] {
             let Some(running) = running.filter(|r| !r.is_empty()) else {
+                if seen.get(kind).copied().unwrap_or(false) {
+                    let number = running_parts.len() + 1;
+                    let file = format!("{kind}{number}.xml");
+                    let id = format!("rIdRun{number}");
+                    running_parts.push((
+                        file,
+                        running_xml(&ai_format::model::Running::default(), kind, &section.page),
+                        if kind == "header" { "header" } else { "footer" },
+                    ));
+                    references.push((id, if kind == "header" { "header" } else { "footer" }));
+                }
                 continue;
             };
+            seen.insert(kind, true);
             let number = running_parts.len() + 1;
             let file = format!("{kind}{number}.xml");
             let id = format!("rIdRun{number}");
             running_parts.push((
                 file,
-                running_xml(running, kind),
+                running_xml(running, kind, &section.page),
                 if kind == "header" { "header" } else { "footer" },
             ));
             references.push((id, if kind == "header" { "header" } else { "footer" }));
@@ -752,7 +838,7 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     pkg.add_xml("word/document.xml", &document);
     pkg.add_xml("word/_rels/document.xml.rels", &relationships(&rels));
     pkg.add_xml("word/styles.xml", &styles_xml());
-    pkg.add_xml("word/numbering.xml", &numbering_xml());
+    pkg.add_xml("word/numbering.xml", &numbering_xml(ctx.ordered_lists));
     for (path, data, _) in ctx.media.parts {
         pkg.add(&format!("word/{path}"), data);
     }
@@ -791,7 +877,7 @@ fn styles_xml() -> String {
 }
 
 /// Two numbering definitions: bullets (numId 1) and decimals (numId 2).
-fn numbering_xml() -> String {
+fn numbering_xml(ordered_lists: usize) -> String {
     let mut out = format!("<w:numbering xmlns:w=\"{NS_W}\">");
     for (abstract_id, ordered) in [(0, false), (1, true)] {
         out.push_str(&format!(
@@ -815,6 +901,16 @@ fn numbering_xml() -> String {
     }
     out.push_str("<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>");
     out.push_str("<w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/></w:num>");
+    // One counter per ordered list, restarting at 1 — two separate numbered
+    // clauses in a policy document must both read 1, 2, 3.
+    for i in 0..ordered_lists {
+        out.push_str(&format!(
+            "<w:num w:numId=\"{}\"><w:abstractNumId w:val=\"1\"/>\
+             <w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"1\"/></w:lvlOverride>\
+             </w:num>",
+            100 + i
+        ));
+    }
     out.push_str("</w:numbering>");
     out
 }
@@ -872,7 +968,7 @@ mod tests {
 
     #[test]
     fn numbering_defines_both_list_kinds() {
-        let xml = numbering_xml();
+        let xml = numbering_xml(1);
         assert!(xml.contains("<w:num w:numId=\"1\">"));
         assert!(xml.contains("<w:num w:numId=\"2\">"));
         assert!(xml.contains("w:val=\"decimal\""));

@@ -359,3 +359,105 @@ fn every_project_type_survives_a_save_load_save_cycle() {
         }
     }
 }
+
+#[test]
+fn ai_md_keeps_a_multi_line_cell_inside_its_row_bullet() {
+    // A description column with line breaks, and a header that begins with `*`,
+    // both straight out of a company workbook. Neither may break the markdown:
+    // the row must stay one bullet and the header must not fuse with `**`.
+    let ws = Workspace::new("digestcells");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "사전", false).unwrap();
+    let Items::Sheets(sheets) = &mut project.items else {
+        panic!()
+    };
+    let text = |s: &str| ai_formula::evaluate::Cell {
+        v: serde_json::json!(s),
+        t: Some("s".into()),
+        ..Default::default()
+    };
+    sheets[0].cells.insert("A1".into(), text("*데이터셋 ID"));
+    sheets[0].cells.insert("B1".into(), text("설명"));
+    sheets[0].cells.insert("A2".into(), text("DS-001"));
+    sheets[0].cells.insert(
+        "B2".into(),
+        text("1.설명: 고객 마스터\n2.범위: 국내\n3.주기: 일"),
+    );
+    let project = save_project(&project).unwrap();
+
+    let digest = read(&project.dir, "AI.md");
+    let row = digest
+        .lines()
+        .find(|l| l.contains("DS-001"))
+        .expect("the row bullet");
+    assert!(
+        row.contains("1.설명: 고객 마스터 2.범위: 국내 3.주기: 일"),
+        "line breaks collapse into the bullet: {row}"
+    );
+    assert!(digest.contains("\\*데이터셋 ID"), "{digest}");
+    assert!(!digest.contains("***데이터셋"), "{digest}");
+}
+
+#[test]
+fn shared_cell_styles_are_written_once_and_read_back_inline() {
+    // Thousands of body cells in an imported workbook carry one identical
+    // style; writing it on every cell made cells.json fifty times the xlsx.
+    let ws = Workspace::new("styletable");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "스타일표", false).unwrap();
+    let Items::Sheets(sheets) = &mut project.items else {
+        panic!()
+    };
+    let body = serde_json::json!({ "color": "#757575", "wrap": true });
+    let styled = |v: &str, style: serde_json::Value| ai_formula::evaluate::Cell {
+        v: serde_json::json!(v),
+        t: Some("s".into()),
+        extra: [("style".to_string(), style)].into_iter().collect(),
+        ..Default::default()
+    };
+    sheets[0].cells.insert(
+        "A1".into(),
+        styled("머리글", serde_json::json!({ "bold": true })),
+    );
+    sheets[0]
+        .cells
+        .insert("A2".into(), styled("동부", body.clone()));
+    sheets[0]
+        .cells
+        .insert("A3".into(), styled("서부", body.clone()));
+    let project = save_project(&project).unwrap();
+
+    let Items::Sheets(saved) = &project.items else {
+        panic!()
+    };
+    let json: serde_json::Value = serde_json::from_str(&read(
+        &project.dir,
+        saved[0]
+            .file
+            .as_deref()
+            .unwrap()
+            .replace(".md", ".cells.json")
+            .as_str(),
+    ))
+    .unwrap();
+    let table = json["styles"].as_object().expect("a style table");
+    assert_eq!(
+        table.len(),
+        1,
+        "only the shared style is interned: {table:?}"
+    );
+    assert_eq!(json["cells"]["A2"]["s"], json["cells"]["A3"]["s"]);
+    assert!(json["cells"]["A2"].get("style").is_none());
+    assert_eq!(
+        json["cells"]["A1"]["style"],
+        serde_json::json!({ "bold": true }),
+        "a style used once stays inline"
+    );
+
+    // Loading expands the table: the model never sees `s`.
+    let loaded = load_project(&project.dir).unwrap();
+    let Items::Sheets(loaded) = &loaded.items else {
+        panic!()
+    };
+    assert_eq!(loaded[0].cells["A2"].extra["style"], body);
+    assert_eq!(loaded[0].cells["A3"].extra["style"], body);
+    assert!(loaded[0].cells["A2"].extra.get("s").is_none());
+}

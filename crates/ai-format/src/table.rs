@@ -97,14 +97,38 @@ impl CellFormat {
 /// for anything markdown can express, so a hand-typed `|---:|` must win wherever
 /// the table came from.
 pub fn apply_markdown_authority(spec: &mut TableSpec, md: &str) {
-    for (reference, format) in alignment_from_markdown(md) {
-        spec.cells.entry(reference).or_default().align = format.align;
+    let cells = parse_markdown_table(md);
+    let rows = cells.len();
+
+    // `|---:|` aligns the whole column, as it does in GFM and on paper: the
+    // numbers under a right-aligned heading are what the alignment is for.
+    // Recording only the header cell left every data row flush left in the
+    // exported .pptx and .docx.
+    let has_rule = md.lines().map(str::trim).any(|l| TABLE_RULE.is_match(l));
+    if has_rule {
+        // The rule row is the whole authority: first clear, then set, so a
+        // column returned to `|---|` loses its stale alignment too.
+        for format in spec.cells.values_mut() {
+            format.align = None;
+        }
+        for (reference, format) in alignment_from_markdown(md) {
+            let Some(column) = parse_first_ref(&reference) else {
+                continue;
+            };
+            for row in 0..rows.max(1) {
+                spec.cells.entry(to_ref(column, row)).or_default().align = format.align.clone();
+            }
+        }
     }
     spec.cells.retain(|_, format| !format.is_empty());
 
-    let cells = parse_markdown_table(md);
     let columns = cells.first().map(|r| r.len()).unwrap_or(0);
-    spec.clamp_merges(columns, cells.len());
+    spec.clamp_merges(columns, rows);
+}
+
+/// The zero-based column index of a cell reference like `C1`.
+fn parse_first_ref(reference: &str) -> Option<usize> {
+    ai_formula::refs::parse_ref(reference).map(|r| r.col)
 }
 
 /// A table's layout, stored beside its markdown.
@@ -356,6 +380,26 @@ pub fn alignment_from_markdown(md: &str) -> IndexMap<String, CellFormat> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_column_alignment_reaches_every_row() {
+        let md = "| 지역 | 목표 |\n|---|---:|\n| 서울 | 12.0 |\n| 부산 | 8.5 |";
+        let mut spec = TableSpec::default();
+        apply_markdown_authority(&mut spec, md);
+        for row in ["B1", "B2", "B3"] {
+            assert_eq!(spec.cells[row].align.as_deref(), Some("right"), "{row}");
+        }
+        assert!(!spec.cells.contains_key("A1"), "left columns stay default");
+
+        // Removing the alignment from the rule clears the stale cells.
+        let mut spec = spec;
+        apply_markdown_authority(&mut spec, "| 지역 | 목표 |\n|---|---|\n| 서울 | 12.0 |");
+        assert!(spec
+            .cells
+            .get("B2")
+            .and_then(|c| c.align.as_deref())
+            .is_none());
+    }
 
     #[test]
     fn markdown_round_trips() {

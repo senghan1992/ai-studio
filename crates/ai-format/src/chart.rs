@@ -189,7 +189,10 @@ pub fn normalize_spec(raw: &serde_json::Value) -> ChartSpec {
         .and_then(ChartType::from_str)
         .unwrap_or(ChartType::Column);
 
+    // `categories` is Excel's own word for the axis labels; accept it as an
+    // alias so a chart spec authored in Office terms round-trips.
     let labels: Vec<String> = get("labels")
+        .or_else(|| get("categories"))
         .and_then(|v| v.as_array())
         .map(|a| a.iter().map(json_to_label).collect())
         .unwrap_or_default();
@@ -630,6 +633,15 @@ mod tests {
         let resolved = resolve_spec(&spec, Some(&s));
         assert_eq!(resolved.series[0].values, [Some(7.0)]);
         assert_eq!(resolved.labels, ["a"]);
+    }
+
+    #[test]
+    fn categories_is_accepted_as_an_alias_for_labels() {
+        let spec = normalize_spec(&json!({
+            "categories": ["1분기", "2분기"],
+            "series": [{"name": "매출", "values": [10, 20]}],
+        }));
+        assert_eq!(spec.labels, ["1분기", "2분기"]);
     }
 
     #[test]

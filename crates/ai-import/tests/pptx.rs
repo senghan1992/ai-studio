@@ -22,6 +22,14 @@ fn read_deck(bytes: &[u8]) -> Vec<Slide> {
         .slides
 }
 
+/// The pictures an import stored, not counting the deck's preserved design.
+fn pictures(assets: &[ai_import::Asset]) -> usize {
+    assets
+        .iter()
+        .filter(|a| a.name != ai_import::pptx::TEMPLATE_ASSET)
+        .count()
+}
+
 /* ------------------------------------------------------------- round trips */
 
 #[test]
@@ -386,7 +394,13 @@ fn emphasis_and_font_size_both_survive() {
     assert_eq!(block.md, "**굵게** 그리고 *기울임*");
     // 2400 hundredths of a point is 24pt, which is 32px.
     assert_eq!(block.style["fontSize"], serde_json::json!(32.0));
-    assert_eq!(block.style["weight"], serde_json::json!(700));
+    // Only the first run is bold; that lives in the `**` marks. Promoting it
+    // to the block made the plain half of the sentence bold too.
+    assert!(
+        block.style.get("weight").is_none(),
+        "mixed-run boldness must stay in the markdown: {:?}",
+        block.style
+    );
     assert_eq!(block.style["align"], serde_json::json!("center"));
     assert_eq!(block.style["valign"], serde_json::json!("middle"));
     assert_eq!(block.style["color"], serde_json::json!("#1f2937"));
@@ -860,7 +874,7 @@ fn an_embedded_object_becomes_the_picture_office_drew_for_it() {
     assert_eq!(blocks.len(), 1, "the preview picture came across");
     assert_eq!(blocks[0].kind, Kind::Image);
     assert_eq!(blocks[0].x, 48.0, "placed where the object was");
-    assert_eq!(imported.assets.len(), 1, "and the image was stored");
+    assert_eq!(pictures(&imported.assets), 1, "and the image was stored");
     assert!(
         imported.warnings.iter().any(|w| w.contains("OLE 개체는")),
         "{:?}",
@@ -962,7 +976,61 @@ fn a_shape_filled_with_a_picture_becomes_the_picture() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].kind, Kind::Image);
     assert_eq!((blocks[0].x, blocks[0].w), (48.0, 288.0), "the shape's box");
-    assert_eq!(imported.assets.len(), 1);
+    assert_eq!(pictures(&imported.assets), 1);
+}
+
+#[test]
+fn a_picture_keeps_its_crop_rotation_and_flip() {
+    // A photo tilted 30° and trimmed to its subject is placed that way on the
+    // slide; reading it flat re-frames the picture.
+    let pic = "<p:pic><p:nvPicPr><p:cNvPr id=\"4\" name=\"사진\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>\
+       <p:blipFill><a:blip r:embed=\"rIdImage\"/><a:srcRect l=\"10000\" t=\"5000\" r=\"0\" b=\"0\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>\
+       <p:spPr><a:xfrm rot=\"1800000\" flipH=\"1\"><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"2743200\" cy=\"1828800\"/></a:xfrm>\
+         <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>";
+    let bytes = Builder::new()
+        .slide(pic)
+        .slide_rels(&format!(
+            "<Relationship Id=\"rIdImage\" Type=\"{REL}/image\" Target=\"../media/image1.png\"/>"
+        ))
+        .part("ppt/media/image1.png", "PNG-BYTES")
+        .build();
+
+    let block = &read_deck(&bytes)[0].blocks[0];
+    assert_eq!(block.kind, Kind::Image);
+    assert_eq!(block.style["rotation"], serde_json::json!(30.0));
+    assert_eq!(block.style["flipH"], serde_json::json!(true));
+    assert!(
+        !block.style.contains_key("flipV"),
+        "no flip that was not set"
+    );
+    let crop = &block.style["crop"];
+    assert_eq!(crop["l"], serde_json::json!(10.0));
+    assert_eq!(crop["t"], serde_json::json!(5.0));
+}
+
+#[test]
+fn an_emf_image_is_reported_as_maybe_invisible() {
+    // EMF/WMF vector images cannot be drawn on the web canvas. The bytes are
+    // still stored, but the author is told the picture may not show.
+    let pic = "<p:pic><p:nvPicPr><p:cNvPr id=\"5\" name=\"도표\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>\
+       <p:blipFill><a:blip r:embed=\"rIdImage\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>\
+       <p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"2743200\" cy=\"1828800\"/></a:xfrm>\
+         <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>";
+    let bytes = Builder::new()
+        .slide(pic)
+        .slide_rels(&format!(
+            "<Relationship Id=\"rIdImage\" Type=\"{REL}/image\" Target=\"../media/image1.emf\"/>"
+        ))
+        .part("ppt/media/image1.emf", "EMF-BYTES")
+        .build();
+
+    let imported = ai_import::read(&bytes, "deck.pptx").expect("importable");
+    assert_eq!(pictures(&imported.assets), 1, "the bytes are still stored");
+    assert!(
+        imported.warnings.iter().any(|w| w.contains("EMF")),
+        "{:?}",
+        imported.warnings
+    );
 }
 
 /* ------------------------------------------------------- slide sizes */
@@ -1111,4 +1179,237 @@ fn a_placeholder_laid_out_for_another_slide_size_is_brought_onto_the_canvas() {
         block.x,
         block.w
     );
+}
+
+#[test]
+fn a_scheme_colour_solid_fill_is_resolved_through_the_theme() {
+    // `tx1` lightened with lumMod/lumOff is how PowerPoint writes most greys.
+    // Seeing no srgbClr in it left the fill empty, and a label chip's white
+    // text vanished into the white slide.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Chip"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+                   <a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>
+                   <a:solidFill><a:schemeClr val="tx1"><a:lumMod val="65000"/><a:lumOff val="35000"/></a:schemeClr></a:solidFill>
+                 </p:spPr>
+                 <p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1400" b="1"><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:rPr><a:t>과제 수행 배경</a:t></a:r></a:p></p:txBody>
+               </p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    let spec = slides[0].blocks[0].shape.as_ref().expect("a shape");
+    assert_eq!(
+        spec.fill.as_ref().map(|f| f.color.as_str()),
+        Some("#595959"),
+        "black at 65% + 35% lift is the dark grey PowerPoint draws"
+    );
+}
+
+#[test]
+fn a_blocks_colour_is_the_one_most_of_its_text_uses() {
+    // A short burgundy sub-heading over a grey body must not paint the whole
+    // block burgundy just because it came first.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="1828800"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/>
+                   <a:p><a:r><a:rPr sz="1300" b="1"><a:solidFill><a:srgbClr val="A50034"/></a:solidFill></a:rPr><a:t>핵심</a:t></a:r></a:p>
+                   <a:p><a:r><a:rPr sz="1000"><a:solidFill><a:srgbClr val="202124"/></a:solidFill></a:rPr><a:t>장시간 쿼리가 반복되어 담당자 대기 시간이 길어진다</a:t></a:r></a:p>
+                   <a:p><a:r><a:rPr sz="1000"><a:solidFill><a:srgbClr val="202124"/></a:solidFill></a:rPr><a:t>요청 양식이 팀마다 달라 재작업이 잦다</a:t></a:r></a:p>
+                 </p:txBody></p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(
+        block.style["color"],
+        serde_json::json!("#202124"),
+        "{:?}",
+        block.style
+    );
+    // Each original paragraph keeps its own line.
+    assert_eq!(block.md.lines().count(), 3, "{}", block.md);
+    // The odd run out keeps its own colour inline; the grey body has no markup.
+    assert_eq!(
+        block.md.lines().next().unwrap(),
+        "<span style=\"color:#a50034\">**핵심**</span>",
+        "{}",
+        block.md
+    );
+    assert!(
+        !block.md.lines().nth(1).unwrap().contains("<span"),
+        "{}",
+        block.md
+    );
+}
+
+#[test]
+fn a_line_break_inside_a_paragraph_is_a_new_line() {
+    // `<a:br/>` is Shift+Enter: the next run starts a new line on the slide,
+    // and must start a new line in the markdown too, not follow on a space.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="914400"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/>
+                   <a:p><a:r><a:rPr sz="1000"/><a:t>• 첫 줄</a:t></a:r><a:br/><a:r><a:rPr sz="1000"/><a:t>• 둘째 줄</a:t></a:r></a:p>
+                 </p:txBody></p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    assert_eq!(slides[0].blocks[0].md, "• 첫 줄\n• 둘째 줄");
+}
+
+#[test]
+fn a_text_boxs_font_family_is_kept_for_the_export() {
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="457200"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/>
+                   <a:p><a:r><a:rPr sz="1300" b="1"><a:latin typeface="Malgun Gothic"/><a:ea typeface="맑은 고딕"/></a:rPr><a:t>데이터 자판기</a:t></a:r></a:p>
+                 </p:txBody></p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(
+        block.style["font"],
+        serde_json::json!("맑은 고딕"),
+        "{:?}",
+        block.style
+    );
+
+    // Theme references (`+mn-lt`) are PowerPoint's business, not a family.
+    let themed = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="457200"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/>
+                   <a:p><a:r><a:rPr sz="1300"><a:latin typeface="+mn-lt"/></a:rPr><a:t>본문</a:t></a:r></a:p>
+                 </p:txBody></p:sp>"#,
+        )
+        .build();
+    assert!(read_deck(&themed)[0].blocks[0].style.get("font").is_none());
+}
+
+#[test]
+fn an_imported_deck_goes_back_out_on_its_own_design() {
+    // The master draws a logo; the slide has a text box. On export the slide
+    // must sit on the original layout, the original master part must be in the
+    // file byte for byte, and the logo must not be drawn a second time.
+    const CT: &str = concat!(
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>",
+        "<Default Extension=\"xml\" ContentType=\"application/xml\"/>",
+        "<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/>",
+        "<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/>",
+        "<Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/>",
+        "<Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>",
+        "<Override PartName=\"/ppt/slides/slide1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>",
+        "</Types>"
+    );
+    let logo = r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="LogoBar"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="12192000" cy="228600"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="A50034"/></a:solidFill></p:spPr></p:sp>"#;
+    let deck = Builder::new()
+        .master_shapes(logo)
+        .part("[Content_Types].xml", CT)
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="4572000" cy="457200"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>본문 한 줄</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        )
+        .build();
+    let original_master = Package::open(&deck)
+        .unwrap()
+        .bytes("ppt/slideMasters/slideMaster1.xml")
+        .unwrap()
+        .to_vec();
+
+    let package = Package::open(&deck).unwrap();
+    let mut warnings = Warnings::default();
+    let imported = ai_import::pptx::read(&package, &mut warnings).unwrap();
+    let template = imported
+        .assets
+        .iter()
+        .find(|a| a.name == ai_import::pptx::TEMPLATE_ASSET)
+        .expect("the design is kept as an asset");
+    let slide = &imported.slides[0];
+    assert_eq!(
+        slide.layout_part.as_deref(),
+        Some("slideLayouts/slideLayout1.xml")
+    );
+    assert!(slide.master_shapes);
+    let designed = slide
+        .blocks
+        .iter()
+        .filter(|b| b.style.get("design") == Some(&serde_json::json!(true)))
+        .count();
+    assert_eq!(
+        designed, 1,
+        "the logo bar is marked as the design's: {:?}",
+        slide.blocks
+    );
+    assert_eq!(slide.blocks.len(), 2, "logo + text box");
+
+    // Into a project folder, as the app would put it, and back out.
+    let ws = Workspace::new("pptxdesign");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "디자인", false).unwrap();
+    std::fs::create_dir_all(project.dir.join("assets")).unwrap();
+    std::fs::write(
+        project.dir.join("assets").join(&template.name),
+        &template.bytes,
+    )
+    .unwrap();
+    project.items = Items::Slides(imported.slides.clone());
+    let project = save_project(&project).unwrap();
+    let exported = export(&project, Format::Pptx).unwrap();
+    let out = Package::open(&exported).unwrap();
+
+    assert_eq!(
+        out.bytes("ppt/slideMasters/slideMaster1.xml"),
+        Some(original_master.as_slice()),
+        "the original master, byte for byte"
+    );
+    assert!(out.has("ppt/theme/theme1.xml") && out.has("ppt/slideLayouts/slideLayout1.xml"));
+    let pres = String::from_utf8_lossy(out.bytes("ppt/presentation.xml").unwrap()).into_owned();
+    assert!(
+        pres.contains("r:id=\"rIdMaster\""),
+        "the original master id list: {pres}"
+    );
+    assert!(pres.contains("<p:sldId id=\"256\""), "{pres}");
+    let rels = String::from_utf8_lossy(out.bytes("ppt/slides/_rels/slide1.xml.rels").unwrap())
+        .into_owned();
+    assert!(rels.contains("../slideLayouts/slideLayout1.xml"), "{rels}");
+    let slide_xml =
+        String::from_utf8_lossy(out.bytes("ppt/slides/slide1.xml").unwrap()).into_owned();
+    assert!(slide_xml.contains("본문 한 줄"));
+    assert!(
+        !slide_xml.contains("A50034"),
+        "the master draws the logo, not the slide: {slide_xml}"
+    );
+    let types = String::from_utf8_lossy(out.bytes("[Content_Types].xml").unwrap()).into_owned();
+    assert!(
+        types.contains("/ppt/slideMasters/slideMaster1.xml"),
+        "{types}"
+    );
+    assert!(types.contains("/ppt/slides/slide1.xml"), "{types}");
+    assert_eq!(
+        types.matches("/ppt/slides/slide1.xml").count(),
+        1,
+        "declared once: {types}"
+    );
+    assert!(types.contains("/docProps/core.xml"), "{types}");
+
+    // Reading the export finds the logo once — from the master — plus the text.
+    let again = read_deck(&exported);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].blocks.len(), 2, "{:?}", again[0].blocks);
 }

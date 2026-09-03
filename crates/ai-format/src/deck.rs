@@ -136,6 +136,12 @@ pub fn read_slide(md: &str, layout: Option<&Json>) -> Slide {
         notes: meta_str(&split.meta, "notes").unwrap_or_default(),
         canvas,
         blocks,
+        layout_part: meta_str(&split.meta, "layoutPart").filter(|s| !s.is_empty()),
+        master_shapes: split
+            .meta
+            .get("masterShapes")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         file: None,
     }
 }
@@ -195,6 +201,12 @@ pub fn write_slide(slide: &Slide) -> SlideFiles {
     meta.insert("id".into(), json!(s.id));
     meta.insert("title".into(), json!(s.title));
     meta.insert("layout".into(), json!(s.layout_name));
+    if let Some(part) = &s.layout_part {
+        meta.insert("layoutPart".into(), json!(part));
+    }
+    if !s.master_shapes {
+        meta.insert("masterShapes".into(), json!(false));
+    }
     if !s.notes.is_empty() {
         meta.insert("notes".into(), json!(s.notes));
     }
@@ -221,10 +233,11 @@ pub fn write_slide(slide: &Slide) -> SlideFiles {
         if b.locked {
             entry.insert("locked".into(), json!(true));
         }
-        if !b.style.is_empty() {
+        let style = written_style(b);
+        if !style.is_empty() {
             entry.insert(
                 "style".into(),
-                serde_json::to_value(&b.style).unwrap_or(Json::Null),
+                serde_json::to_value(&style).unwrap_or(Json::Null),
             );
         }
         if let Some(shape) = &b.shape {
@@ -249,6 +262,31 @@ pub fn write_slide(slide: &Slide) -> SlideFiles {
             "canvas": { "w": s.canvas.w, "h": s.canvas.h, "bg": s.canvas.bg.as_str() },
             "blocks": Json::Object(blocks),
         }),
+    }
+}
+
+/// The style entries worth writing: for a text block, the ones that differ from
+/// the default. `read_slide` merges the default back under whatever is saved, so
+/// an entry that equals it says nothing — the same rule Doc applies to overrides.
+/// Non-text blocks get no default merge on read, so their style is kept whole.
+fn written_style(b: &SlideBlock) -> IndexMap<String, Json> {
+    if b.kind != Kind::Text {
+        return b.style.clone();
+    }
+    let defaults = default_text_style();
+    b.style
+        .iter()
+        .filter(|(k, v)| defaults.get(*k).is_none_or(|d| !json_value_eq(d, v)))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Equality that treats `20` and `20.0` as the same number — the editor state
+/// crosses the wasm boundary, which does not preserve a number's JSON flavour.
+fn json_value_eq(a: &Json, b: &Json) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
     }
 }
 
@@ -330,6 +368,8 @@ pub fn normalize_slide(slide: &Slide) -> Slide {
         notes: slide.notes.clone(),
         canvas,
         blocks,
+        layout_part: slide.layout_part.clone(),
+        master_shapes: slide.master_shapes,
         file: slide.file.clone(),
     }
 }
@@ -507,6 +547,8 @@ pub fn make_slide(layout_name: &str, title: Option<&str>, index: usize) -> Slide
         notes: String::new(),
         canvas: DEFAULT_CANVAS,
         blocks,
+        layout_part: None,
+        master_shapes: true,
         file: None,
     }
 }
@@ -559,6 +601,50 @@ mod tests {
         let json = serde_json::to_string(&files.layout).unwrap();
         assert!(!json.contains("고유한제목입니다"), "{json}");
         assert!(!json.contains("첫 번째 항목"), "{json}");
+    }
+
+    #[test]
+    fn default_equal_style_entries_stay_out_of_the_layout() {
+        // The body block of the default layout carries only default styling, so
+        // the layout entry should say nothing about style at all — the same rule
+        // Doc applies to overrides. `20.0` exercises the wasm-boundary number.
+        let mut slide = make_slide("title-content", Some("제목"), 1);
+        slide.blocks[1]
+            .style
+            .insert("fontSize".to_string(), json!(20.0));
+        let files = write_slide(&slide);
+        let body = &files.layout["blocks"][&slide.blocks[1].id];
+        assert!(body.get("style").is_none(), "{body}");
+        // The title's non-default entries survive, the default ones do not.
+        let title = &files.layout["blocks"][&slide.blocks[0].id];
+        assert_eq!(title["style"]["fontSize"], json!(36));
+        assert!(title["style"].get("align").is_none(), "{title}");
+        // Reading back restores the defaults, so nothing was lost.
+        let back = read_slide(&files.md, Some(&files.layout));
+        assert_eq!(back.blocks[1].style["fontSize"], json!(20));
+        assert_eq!(back.blocks[0].style["valign"], json!("top"));
+    }
+
+    #[test]
+    fn a_shape_style_is_written_whole() {
+        // Non-text blocks get no default merge on read, so their style must
+        // land on disk even where it happens to match the text default.
+        let mut slide = make_slide("blank", None, 1);
+        slide.blocks.push(make_shape("rect", box_dims()));
+        let files = write_slide(&slide);
+        let entry = &files.layout["blocks"][&slide.blocks[0].id];
+        assert_eq!(entry["style"]["valign"], json!("middle"));
+        assert_eq!(entry["style"]["color"], json!("#1f2937"));
+    }
+
+    fn box_dims() -> Box {
+        Box {
+            x: 10.0,
+            y: 10.0,
+            w: 200.0,
+            h: 100.0,
+            z: 1.0,
+        }
     }
 
     #[test]

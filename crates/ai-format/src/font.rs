@@ -5,10 +5,11 @@
 //! carrying a font name on every block and still drawing the wrong thing,
 //! because the reader's machine has a different set installed than the author's.
 //!
-//! So the format has exactly one family. It ships with the app, so a document
-//! looks the same on Windows, macOS and Linux, and the same in the editor as in
-//! the file it exports. Import records which families it replaced rather than
-//! dropping them silently.
+//! So the format *draws* exactly one family. It ships with the app, so a
+//! document looks the same on Windows, macOS and Linux. Import records which
+//! families it replaced rather than dropping them silently — and carries the
+//! author's family name along as `style.font`, so an export asks Office for the
+//! font the document was written in rather than for one the reader's PC lacks.
 
 /// The family name, as written into exported OOXML and into the manifest.
 pub const FAMILY: &str = "Pretendard";
@@ -44,6 +45,38 @@ pub fn is_symbol(name: &str) -> bool {
     ["symbol", "wingding", "webding", "dingbat"]
         .iter()
         .any(|needle| lower.contains(needle))
+}
+
+/// Points → the px the editor stores, chosen so the size survives a round trip.
+///
+/// The editor works in whole px. 10pt is 13.33px and rounds to 13, which
+/// [`pt_for_px`] maps back to 10 — so a whole number is kept whenever it maps
+/// back to the size it came from. 9.5pt is 12.67px, and 13px would come back as
+/// 10pt; for such half-point sizes the px is kept to two decimals instead, which
+/// the grid and the canvas draw just as well.
+pub fn px_for_pt(pt: f64) -> f64 {
+    let px = pt / 0.75;
+    let whole = px.round();
+    if (pt_for_px(whole) - pt).abs() < 1e-6 {
+        whole
+    } else {
+        (px * 100.0).round() / 100.0
+    }
+}
+
+/// px → points for a font size, snapped to what Office offers.
+///
+/// A whole-px size is off by at most 0.375pt from the point size it was made
+/// from, so the nearest whole point is that size; anything further away is a
+/// genuine half-point size and is kept to 0.5.
+pub fn pt_for_px(px: f64) -> f64 {
+    let points = px * 0.75;
+    let whole = points.round();
+    if (points - whole).abs() <= 0.375 + 1e-9 {
+        whole
+    } else {
+        (points * 2.0).round() / 2.0
+    }
 }
 
 /// Whether a font name needs reporting when an import replaces it.

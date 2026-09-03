@@ -105,9 +105,20 @@ pub fn twip(px: f64) -> i64 {
     (px * 15.0).round() as i64
 }
 
+/// px -> points for a font size, snapped to what Office actually offers.
+///
+/// The editor works in whole px, so an imported 10pt (13.33px) is stored as
+/// 13px and would come back as 9.75pt — every cell of a re-saved workbook read
+/// a quarter-point smaller. A whole-px rounding is off by at most 0.375pt, so
+/// snapping to the nearest whole point restores every integer size exactly;
+/// anything further away is a genuine half-point size and is kept to 0.5.
+pub fn font_pt(px: f64) -> f64 {
+    ai_format::font::pt_for_px(px)
+}
+
 /// px -> hundredths of a point, the unit DrawingML uses for font sizes.
 pub fn font_size_100(px: f64) -> i64 {
-    (pt(px) * 100.0).round().max(100.0) as i64
+    (font_pt(px) * 100.0).round().max(100.0) as i64
 }
 
 /// A `_rels` part for a list of `(id, type, target)` relationships.
@@ -211,6 +222,13 @@ pub fn image_content_type(ext: &str) -> Option<&'static str> {
         "gif" => "image/gif",
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
+        // Vector and legacy raster formats Office embeds constantly — a pasted
+        // chart or diagram is EMF/WMF, scans are TIFF/BMP. Dropping them here
+        // would silently lose the image when a round-tripped file is re-saved.
+        "emf" => "image/x-emf",
+        "wmf" => "image/x-wmf",
+        "tif" | "tiff" => "image/tiff",
+        "bmp" => "image/bmp",
         _ => return None,
     })
 }
@@ -289,5 +307,32 @@ mod tests {
         assert_eq!(image_size(&jpeg), Some((40.0, 30.0)));
 
         assert_eq!(image_size(b"not an image"), None);
+    }
+
+    #[test]
+    fn font_sizes_snap_back_to_the_points_they_were_imported_from() {
+        // The editor stores whole px, so 10pt arrives as 13px; writing 9.75pt
+        // back shrank every cell of a re-saved workbook by a quarter point.
+        assert_eq!(font_pt(13.0), 10.0, "10pt");
+        assert_eq!(font_pt(17.0), 13.0, "13pt");
+        assert_eq!(font_pt(19.0), 14.0, "14pt");
+        assert_eq!(font_pt(15.0), 11.0, "11pt");
+        assert_eq!(font_pt(43.0), 32.0, "32pt");
+        // A genuine half-point size is kept as one.
+        assert_eq!(font_pt(14.0), 10.5, "10.5pt is exactly 14px");
+        assert_eq!(font_size_100(13.0), 1000);
+    }
+
+    #[test]
+    fn office_vector_and_legacy_image_types_are_kept_not_dropped() {
+        // These extensions returning None would drop the image on export, losing
+        // a pasted chart or a scanned figure from a round-tripped file.
+        assert_eq!(image_content_type("emf"), Some("image/x-emf"));
+        assert_eq!(image_content_type("WMF"), Some("image/x-wmf"));
+        assert_eq!(image_content_type("tiff"), Some("image/tiff"));
+        assert_eq!(image_content_type("tif"), Some("image/tiff"));
+        assert_eq!(image_content_type("bmp"), Some("image/bmp"));
+        assert_eq!(image_content_type("png"), Some("image/png"));
+        assert_eq!(image_content_type("xyz"), None);
     }
 }

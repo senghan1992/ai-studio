@@ -959,3 +959,301 @@ fn every_format_declares_the_one_font_the_app_draws_with() {
         "{sheet_styles}"
     );
 }
+
+#[test]
+fn a_dynamic_array_exports_as_an_array_formula() {
+    use ai_formula::evaluate::Cell;
+    use indexmap::IndexMap;
+
+    let ws = Workspace::new("spill");
+    let project = create_project(ws.path(), ProjectType::Grid, "스필", false).unwrap();
+    let mut project = load_project(&project.dir).unwrap();
+
+    if let Items::Sheets(sheets) = &mut project.items {
+        let mut cells: IndexMap<String, Cell> = IndexMap::new();
+        for (reference, text) in [("A1", "서울"), ("A2", "부산"), ("A3", "서울")] {
+            cells.insert(
+                reference.into(),
+                Cell {
+                    v: serde_json::json!(text),
+                    t: Some("s".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        cells.insert(
+            "C1".into(),
+            Cell {
+                f: Some("=UNIQUE(A1:A3)".into()),
+                ..Cell::default()
+            },
+        );
+        sheets[0].cells = cells;
+    }
+    // Saving recalculates, which is what spills the array.
+    let project = save_project(&project).unwrap();
+
+    let parts = Parts::of(&export(&project, Format::Xlsx).unwrap());
+    let sheet = parts.get("xl/worksheets/sheet1.xml");
+    // The anchor is an array formula over its spill range — Excel's own storage.
+    assert!(
+        sheet.contains("<f t=\"array\" ref=\"C1:C2\">_xlfn.UNIQUE(A1:A3)</f>"),
+        "excel stores modern functions behind _xlfn: {sheet}"
+    );
+    // The spilled cell goes out as a plain cached value, with no formula.
+    assert!(sheet.contains("r=\"C2\""), "{sheet}");
+    assert!(!sheet.contains("r=\"C2\" t=\"e\""), "{sheet}");
+    parts.assert_internally_consistent("xl");
+}
+
+#[test]
+fn an_uploaded_image_reaches_the_exported_pptx() {
+    let ws = Workspace::new("image");
+    let created = create_project(ws.path(), ProjectType::Deck, "이미지", false).unwrap();
+    // A tiny valid PNG, stored the way the upload API stores one.
+    let png: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, b'I', b'H', b'D', b'R', 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 0x0A, b'I', b'D',
+        b'A', b'T', 0x78, 0x9C, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0D, 0x0A, 0x2D, 0xB4, 0, 0, 0, 0,
+        b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::create_dir_all(created.dir.join("assets")).unwrap();
+    std::fs::write(created.dir.join("assets/로고.png"), png).unwrap();
+
+    let mut project = load_project(&created.dir).unwrap();
+    if let Items::Slides(slides) = &mut project.items {
+        // The canonical path the upload API returns, and the doubled form an
+        // older image dialog wrote — both must reach the file.
+        slides[0].blocks[0].md = "![로고](../assets/로고.png)".into();
+        slides[0].blocks[0].kind = ai_format::blocks::Kind::Image;
+        if let Some(second) = slides[0].blocks.get_mut(1) {
+            second.md = "![로고](../../assets/로고.png)".into();
+            second.kind = ai_format::blocks::Kind::Image;
+        }
+    }
+    let project = save_project(&project).unwrap();
+
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    assert!(
+        parts.names().iter().any(|n| n.starts_with("ppt/media/")),
+        "the image never made it into the package: {:?}",
+        parts.names()
+    );
+    let slide = parts.get("ppt/slides/slide1.xml");
+    assert!(slide.contains("<p:pic>"), "{slide}");
+}
+
+#[test]
+fn a_cropped_rotated_image_keeps_its_crop_and_transform() {
+    // Crop and rotation are how a slide's images are actually placed — a photo
+    // trimmed to a face, tilted for effect. Dropping them re-frames the slide.
+    let ws = Workspace::new("imagecrop");
+    let created = create_project(ws.path(), ProjectType::Deck, "자른이미지", false).unwrap();
+    let png: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, b'I', b'H', b'D', b'R', 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 0x0A, b'I', b'D',
+        b'A', b'T', 0x78, 0x9C, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0D, 0x0A, 0x2D, 0xB4, 0, 0, 0, 0,
+        b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+    ];
+    std::fs::create_dir_all(created.dir.join("assets")).unwrap();
+    std::fs::write(created.dir.join("assets/사진.png"), png).unwrap();
+
+    let mut project = load_project(&created.dir).unwrap();
+    if let Items::Slides(slides) = &mut project.items {
+        let block = &mut slides[0].blocks[0];
+        block.md = "![사진](../assets/사진.png)".into();
+        block.kind = ai_format::blocks::Kind::Image;
+        block
+            .style
+            .insert("rotation".into(), serde_json::json!(30.0));
+        block.style.insert("flipH".into(), serde_json::json!(true));
+        // Trim 10% off the left and 5% off the top — PowerPoint's srcRect.
+        block.style.insert(
+            "crop".into(),
+            serde_json::json!({ "l": 10.0, "t": 5.0, "r": 0.0, "b": 0.0 }),
+        );
+    }
+    let project = save_project(&project).unwrap();
+
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    let slide = parts.get("ppt/slides/slide1.xml");
+    // 30° in 60000ths, flip on the picture, and the crop as a srcRect.
+    assert!(slide.contains("rot=\"1800000\""), "rotation lost: {slide}");
+    assert!(slide.contains("flipH=\"1\""), "flip lost: {slide}");
+    assert!(
+        slide.contains("<a:srcRect")
+            && slide.contains("l=\"10000\"")
+            && slide.contains("t=\"5000\""),
+        "crop lost: {slide}"
+    );
+}
+
+#[test]
+fn an_imported_text_box_keeps_its_lines_and_point_size_on_export() {
+    // A real slide's text box arrives as one block whose paragraphs are joined
+    // with `\n`, at 17px (13pt rounded). On the way back out each line must be
+    // its own break and the size must read 13pt, not 12.75.
+    let ws = Workspace::new("pptxlines");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "줄바꿈", false).unwrap();
+    let Items::Slides(slides) = &mut project.items else {
+        panic!()
+    };
+    let mut style = indexmap::IndexMap::new();
+    style.insert("fontSize".to_string(), serde_json::json!(17.0));
+    slides[0].blocks.push(ai_format::model::SlideBlock {
+        id: "b_lines".into(),
+        kind: ai_format::blocks::Kind::Text,
+        md: "• 장시간 쿼리가 반복된다\n• 요청 양식이 팀마다 다르다\n• 재작업이 잦다".into(),
+        x: 96.0,
+        y: 200.0,
+        w: 600.0,
+        h: 200.0,
+        z: 9.0,
+        style,
+        shape: None,
+        table: None,
+        locked: false,
+    });
+    let project = save_project(&project).unwrap();
+
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    let slide = parts.get("ppt/slides/slide1.xml");
+    assert_eq!(
+        slide.matches("<a:br>").count(),
+        2,
+        "three lines need two breaks: {slide}"
+    );
+    assert!(
+        slide.contains("sz=\"1300\""),
+        "17px is written as 13pt: {slide}"
+    );
+    assert!(!slide.contains("sz=\"1275\""), "{slide}");
+}
+
+#[test]
+fn imported_cell_sizes_and_widths_export_back_as_they_came() {
+    // 10pt stored as 13px must export as 10, and a 17.5-character column
+    // stored as 123px must not be rounded to a whole character.
+    let ws = Workspace::new("xlsxsizes");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "크기", true).unwrap();
+    let Items::Sheets(sheets) = &mut project.items else {
+        panic!()
+    };
+    let cell = sheets[0].cells.get_mut("A1").expect("a header cell");
+    cell.extra
+        .insert("style".into(), serde_json::json!({ "fontSize": 13 }));
+    sheets[0].col_widths.insert("A".into(), 123);
+    let project = save_project(&project).unwrap();
+
+    let parts = Parts::of(&export(&project, Format::Xlsx).unwrap());
+    let styles = parts.get("xl/styles.xml");
+    assert!(styles.contains("<sz val=\"10\"/>"), "{styles}");
+    assert!(!styles.contains("<sz val=\"9.75\"/>"), "{styles}");
+    let sheet = parts.get("xl/worksheets/sheet1.xml");
+    assert!(
+        sheet.contains("width=\"17.57\""),
+        "fractional width kept: {sheet}"
+    );
+}
+
+#[test]
+fn a_blocks_font_family_is_written_into_the_slide_and_the_sheet() {
+    // Deck: a text block carrying its author's family asks PowerPoint for it.
+    let ws = Workspace::new("pptxfont");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "글꼴", false).unwrap();
+    let Items::Slides(slides) = &mut project.items else {
+        panic!()
+    };
+    let mut style = indexmap::IndexMap::new();
+    style.insert("font".to_string(), serde_json::json!("맑은 고딕"));
+    slides[0].blocks.push(ai_format::model::SlideBlock {
+        id: "b_font".into(),
+        kind: ai_format::blocks::Kind::Text,
+        md: "데이터 자판기".into(),
+        x: 96.0,
+        y: 200.0,
+        w: 600.0,
+        h: 100.0,
+        z: 9.0,
+        style,
+        shape: None,
+        table: None,
+        locked: false,
+    });
+    let project = save_project(&project).unwrap();
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    let slide = parts.get("ppt/slides/slide1.xml");
+    assert!(
+        slide.contains("<a:latin typeface=\"맑은 고딕\"/><a:ea typeface=\"맑은 고딕\"/>"),
+        "{slide}"
+    );
+
+    // Grid: the same for a cell.
+    let ws = Workspace::new("xlsxfontexport");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "글꼴", true).unwrap();
+    let Items::Sheets(sheets) = &mut project.items else {
+        panic!()
+    };
+    let cell = sheets[0].cells.get_mut("A1").expect("a header cell");
+    cell.extra
+        .insert("style".into(), serde_json::json!({ "font": "맑은 고딕" }));
+    let project = save_project(&project).unwrap();
+    let parts = Parts::of(&export(&project, Format::Xlsx).unwrap());
+    let styles = parts.get("xl/styles.xml");
+    assert!(styles.contains("<name val=\"맑은 고딕\"/>"), "{styles}");
+    // Cells without a family still get the format's own font.
+    assert!(styles.contains("<name val=\"Pretendard\"/>"), "{styles}");
+}
+
+#[test]
+fn a_run_coloured_unlike_its_block_keeps_its_colour_on_export() {
+    let ws = Workspace::new("pptxruncolor");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "런 색", false).unwrap();
+    let Items::Slides(slides) = &mut project.items else {
+        panic!()
+    };
+    let mut style = indexmap::IndexMap::new();
+    style.insert("color".to_string(), serde_json::json!("#202124"));
+    slides[0].blocks.push(ai_format::model::SlideBlock {
+        id: "b_run".into(),
+        kind: ai_format::blocks::Kind::Text,
+        md: "<span style=\"color:#a50034\">**핵심**</span>\n본문 한 줄".into(),
+        x: 96.0,
+        y: 200.0,
+        w: 600.0,
+        h: 100.0,
+        z: 9.0,
+        style,
+        shape: None,
+        table: None,
+        locked: false,
+    });
+    let project = save_project(&project).unwrap();
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    let slide = parts.get("ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:srgbClr val=\"A50034\"/>"), "{slide}");
+    assert!(slide.contains("<a:srgbClr val=\"202124\"/>"), "{slide}");
+    assert!(
+        !slide.contains("<span"),
+        "no HTML leaks into the slide: {slide}"
+    );
+
+    // The same markup in a document colours the Word run.
+    let ws = Workspace::new("docxruncolor");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "런 색", false).unwrap();
+    let Items::Sections(sections) = &mut project.items else {
+        panic!()
+    };
+    sections[0].blocks.push(ai_format::model::DocBlock {
+        id: "p_run".into(),
+        md: "<span style=\"color:#a50034\">핵심</span> 본문".into(),
+        block_type: ai_format::mdblocks::BlockType::Paragraph,
+        format_override: None,
+        table: None,
+    });
+    let project = save_project(&project).unwrap();
+    let parts = Parts::of(&export(&project, Format::Docx).unwrap());
+    let doc = parts.get("word/document.xml");
+    assert!(doc.contains("<w:color w:val=\"A50034\"/>"), "{doc}");
+    assert!(!doc.contains("<span"), "{doc}");
+}

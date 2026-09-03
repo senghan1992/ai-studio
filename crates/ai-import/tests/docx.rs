@@ -319,6 +319,46 @@ fn a_table_keeps_its_grid_merges_and_cell_shading() {
 }
 
 #[test]
+fn a_cells_vertical_alignment_survives_the_round_trip() {
+    // A middle-aligned cell read from Word must be written back with `w:vAlign`,
+    // not silently flattened to the default top alignment on export.
+    let sections = read_doc(&doc_of(
+        r#"<w:tbl>
+             <w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>
+             <w:tr>
+               <w:tc><w:tcPr><w:vAlign w:val="center"/></w:tcPr><w:p><w:r><w:t>가운데</w:t></w:r></w:p></w:tc>
+               <w:tc><w:tcPr><w:vAlign w:val="bottom"/></w:tcPr><w:p><w:r><w:t>아래</w:t></w:r></w:p></w:tc>
+             </w:tr>
+           </w:tbl>"#,
+    ));
+    assert_eq!(
+        sections[0].blocks[0].table.as_ref().unwrap().cells["A1"]
+            .valign
+            .as_deref(),
+        Some("middle"),
+        "read as middle"
+    );
+
+    // Round-trip it through export and back.
+    let ws = Workspace::new("docxvalign");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "정렬", false).unwrap();
+    let Items::Sections(project_sections) = &mut project.items else {
+        panic!()
+    };
+    project_sections[0].blocks = sections[0].blocks.clone();
+    let project = save_project(&project).unwrap();
+
+    let after = read_doc(&export(&project, Format::Docx).unwrap());
+    let spec = after[0]
+        .blocks
+        .iter()
+        .find_map(|b| b.table.as_ref())
+        .expect("the table survived");
+    assert_eq!(spec.cells["A1"].valign.as_deref(), Some("middle"));
+    assert_eq!(spec.cells["B1"].valign.as_deref(), Some("bottom"));
+}
+
+#[test]
 fn a_vertical_merge_spans_the_rows_it_covers() {
     let sections = read_doc(&doc_of(
         r#"<w:tbl>
@@ -386,6 +426,49 @@ fn an_image_becomes_an_asset_and_a_markdown_reference() {
         "![분기별 매출](../assets/image1.png)"
     );
     assert_eq!(document.sections[0].blocks[0].block_type, BlockType::Image);
+}
+
+#[test]
+fn a_caption_typed_beside_an_image_is_not_dropped() {
+    // A picture with text in the same paragraph — a figure and its caption —
+    // must keep both. The image path used to win and the words were lost.
+    let document = r#"<?xml version="1.0"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+        <w:body><w:p>
+          <w:r><w:drawing><wp:inline>
+            <wp:docPr id="1" name="Picture 1" descr="도표"/>
+            <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill>
+            </pic:pic></a:graphicData></a:graphic>
+          </wp:inline></w:drawing></w:r>
+          <w:r><w:t>그림 1. 분기별 매출</w:t></w:r>
+        </w:p></w:body></w:document>"#;
+    let rels = r#"<?xml version="1.0"?>
+      <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId5"
+          Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+          Target="media/image1.png"/>
+      </Relationships>"#;
+    let parts = vec![
+        ("word/document.xml".to_string(), document.to_string()),
+        ("word/_rels/document.xml.rels".to_string(), rels.to_string()),
+        ("word/media/image1.png".to_string(), "PNGBYTES".to_string()),
+    ];
+    let bytes = fixture::zip_of(&parts);
+
+    let package = Package::open(&bytes).unwrap();
+    let mut warnings = Warnings::default();
+    let document = ai_import::docx::read(&package, &mut warnings).unwrap();
+    assert_eq!(document.assets.len(), 1, "the image is still kept");
+    let md = &document.sections[0].blocks[0].md;
+    assert!(
+        md.contains("![도표](../assets/image1.png)"),
+        "image kept: {md}"
+    );
+    assert!(md.contains("그림 1. 분기별 매출"), "caption kept: {md}");
 }
 
 /* ------------------------------------------------------------- page setup */
@@ -721,4 +804,67 @@ fn a_table_inside_a_table_keeps_its_words() {
         "{}",
         table.md
     );
+}
+
+#[test]
+fn a_paragraphs_font_family_survives_the_round_trip() {
+    let sections = read_doc(&doc_of(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Malgun Gothic" w:eastAsia="맑은 고딕"/></w:rPr><w:t>본문 한 줄</w:t></w:r></w:p>"#,
+    ));
+    let over = sections[0].blocks[0]
+        .format_override
+        .as_ref()
+        .expect("the family is an override");
+    assert_eq!(over.style["font"], serde_json::json!("맑은 고딕"));
+
+    let ws = Workspace::new("docxfont");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "글꼴", false).unwrap();
+    let Items::Sections(project_sections) = &mut project.items else {
+        panic!()
+    };
+    project_sections[0].blocks = sections[0].blocks.clone();
+    let project = save_project(&project).unwrap();
+    let after = read_doc(&export(&project, Format::Docx).unwrap());
+    let over = after[0].blocks[0].format_override.as_ref().expect("kept");
+    assert_eq!(over.style["font"], serde_json::json!("맑은 고딕"));
+}
+
+#[test]
+fn a_run_coloured_unlike_its_paragraph_is_marked_inline_and_survives_the_round_trip() {
+    // A burgundy lead-in on a grey paragraph: the grey is the paragraph's
+    // colour (the override), the lead-in keeps its own inline. A black run
+    // among default runs is not a colour and gets no markup.
+    let sections = read_doc(&doc_of(
+        r#"<w:p>
+             <w:r><w:rPr><w:b/><w:color w:val="A50034"/></w:rPr><w:t xml:space="preserve">핵심 </w:t></w:r>
+             <w:r><w:rPr><w:color w:val="202124"/></w:rPr><w:t xml:space="preserve">본문 첫 부분 </w:t></w:r>
+             <w:r><w:rPr><w:color w:val="202124"/></w:rPr><w:t>본문 둘째 부분</w:t></w:r>
+           </w:p>
+           <w:p>
+             <w:r><w:rPr><w:color w:val="000000"/></w:rPr><w:t xml:space="preserve">검정 </w:t></w:r>
+             <w:r><w:t>기본</w:t></w:r>
+           </w:p>"#,
+    ));
+    let first = &sections[0].blocks[0];
+    assert_eq!(
+        first.md, "<span style=\"color:#a50034\">**핵심**</span> 본문 첫 부분 본문 둘째 부분",
+        "{}",
+        first.md
+    );
+    assert_eq!(
+        first.format_override.as_ref().unwrap().style["color"],
+        serde_json::json!("#202124"),
+        "the colour most of the text carries is the paragraph's"
+    );
+    assert_eq!(sections[0].blocks[1].md, "검정 기본");
+
+    let ws = Workspace::new("docxruninline");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "런", false).unwrap();
+    let Items::Sections(project_sections) = &mut project.items else {
+        panic!()
+    };
+    project_sections[0].blocks = sections[0].blocks.clone();
+    let project = save_project(&project).unwrap();
+    let again = read_doc(&export(&project, Format::Docx).unwrap());
+    assert_eq!(again[0].blocks[0].md, first.md, "idempotent through Word");
 }

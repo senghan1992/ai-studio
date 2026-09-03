@@ -14,7 +14,7 @@ use ai_format::model::{Dims, Frozen, Sheet, SheetChart};
 use ai_formula::evaluate::Cell;
 use ai_formula::refs::{index_to_col, parse_range, parse_ref, shift_formula, CellRange};
 
-use crate::ooxml::{color, px, px_from_half_point, Node, Package, Result};
+use crate::ooxml::{color, px, Node, Package, Result};
 use crate::Warnings;
 
 /// Excel column width is in characters; the editor stores px.
@@ -114,6 +114,8 @@ fn read_sheet(
         }
     }
 
+    mark_spilled_cells(&mut cells);
+
     let merges = worksheet
         .child("mergeCells")
         .map(|m| {
@@ -193,6 +195,33 @@ fn read_sheet(
     })
 }
 
+/// The cells an array formula's `ref` covers become that anchor's spilled
+/// values — the file stores them as plain cached cells, exactly the shape this
+/// format keeps, so only the `spillFrom` marker is missing.
+fn mark_spilled_cells(cells: &mut IndexMap<String, Cell>) {
+    let spills: Vec<(String, String)> = cells
+        .iter()
+        .filter_map(|(anchor, cell)| cell.spill.clone().map(|range| (anchor.clone(), range)))
+        .collect();
+    for (anchor, range) in spills {
+        let Some(parsed) = parse_range(&range) else {
+            continue;
+        };
+        for reference in ai_formula::refs::expand_range(&parsed) {
+            if reference == anchor {
+                continue;
+            }
+            // Only a bare value can be someone's spill; a cell with its own
+            // formula is its own cell, whatever the ref claimed.
+            if let Some(covered) = cells.get_mut(&reference) {
+                if covered.f.is_none() {
+                    covered.spill_from = Some(anchor.clone());
+                }
+            }
+        }
+    }
+}
+
 fn read_cell(
     c: &Node,
     reference: &str,
@@ -209,11 +238,24 @@ fn read_cell(
         let is_shared = f.attr("t") == Some("shared");
 
         if !text.is_empty() {
+            // Excel stores `E2#` as `_xlfn.ANCHORARRAY(E2)` and modern
+            // functions as `_xlfn.XLOOKUP` — keep the readable forms this
+            // engine actually recognises.
+            let text = ai_formula::refs::strip_xlfn_prefixes(
+                &ai_formula::refs::anchorarray_to_spill_refs(&text),
+            );
             cell.f = Some(format!("={text}"));
             // The master of a shared group: remember where it was, so the cells
             // that only reference it can be shifted off it.
             if let (true, Some(index)) = (is_shared, index) {
                 shared.insert(index, (reference.to_string(), text));
+            }
+            // An array formula (dynamic or legacy CSE) says which range it
+            // covers; the covered cells become this anchor's spilled values.
+            if f.attr("t") == Some("array") {
+                if let Some(range) = f.attr("ref").filter(|r| r.contains(':')) {
+                    cell.spill = Some(range.to_uppercase());
+                }
             }
         } else if let Some((master, formula)) = index.and_then(|i| shared.get(&i)) {
             cell.f = Some(shifted_from(master, reference, formula));
@@ -322,12 +364,17 @@ fn apply_style(cell: &mut Cell, c: &Node, styles: &Styles) {
         if let Some(c) = &font.color {
             style.insert("color".into(), json!(c));
         }
+        // The screen draws Pretendard regardless; the name rides along so an
+        // export asks Excel for the author's font rather than one their PC
+        // may not have.
+        if let Some(name) = &font.name {
+            style.insert("font".into(), json!(name));
+        }
         // Only a size the grid would not have drawn anyway: a workbook states
         // 11pt on every cell, and carrying that would put a style on all of
         // them for no visible difference.
         if let Some(size) = font
             .size_px
-            .map(|px| px.round())
             .filter(|px| *px != ai_format::grid::CELL_PX.round())
         {
             style.insert("fontSize".into(), json!(size));
@@ -338,6 +385,12 @@ fn apply_style(cell: &mut Cell, c: &Node, styles: &Styles) {
     }
     if let Some(align) = &xf.align {
         style.insert("align".into(), json!(align));
+    }
+    if let Some(valign) = &xf.valign {
+        style.insert("valign".into(), json!(valign));
+    }
+    if xf.wrap {
+        style.insert("wrap".into(), json!(true));
     }
     if let Some(border) = styles.borders.get(xf.border).and_then(|b| b.as_ref()) {
         style.insert("border".into(), json!(border));
@@ -391,6 +444,17 @@ fn apply_rules(
         }
     }
     rules.sort_by_key(|(priority, ..)| *priority);
+
+    // The rules are baked against cached values. A formula cell saved without a
+    // cached result (some third-party writers omit them) makes the baked style
+    // guesswork, so we say so rather than paint a confidently wrong colour.
+    let uncached = rules.iter().any(|(_, _, refs)| {
+        refs.iter().any(|r| {
+            snapshot
+                .get(r)
+                .is_some_and(|c| c.f.is_some() && c.v.is_null())
+        })
+    });
 
     let mut decided: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (_, rule, refs) in rules {
@@ -501,6 +565,11 @@ fn apply_rules(
     }
     if approximated {
         warnings.note("데이터 막대·아이콘 집합은 표현할 방법이 없어 넘어갔습니다");
+    }
+    if uncached {
+        warnings.note(
+            "일부 셀에 저장된 계산값이 없어 조건부 서식을 원본과 다르게 적용했을 수 있습니다 (Excel에서 다시 저장하면 값이 채워집니다)",
+        );
     }
 }
 
@@ -1024,6 +1093,8 @@ struct Font {
     underline: bool,
     color: Option<String>,
     size_px: Option<f64>,
+    /// The family the file asked for, when it is not the one this format draws.
+    name: Option<String>,
 }
 
 struct XfEntry {
@@ -1032,6 +1103,8 @@ struct XfEntry {
     fill: usize,
     border: usize,
     align: Option<String>,
+    valign: Option<String>,
+    wrap: bool,
 }
 
 /// A conditional format's own formatting: the part of a cell style a rule
@@ -1127,10 +1200,18 @@ impl Styles {
 
         if let Some(container) = sheet.child("fonts") {
             for font in container.children_named("font") {
+                // Presence alone is not "on". `<b val="0"/>` switches bold off,
+                // and Apache POI writes `<u val="none"/>` on every font it
+                // emits — reading that as underlined put a line under every
+                // cell of a real company workbook.
+                let on = |name: &str| {
+                    font.child(name)
+                        .is_some_and(|n| !matches!(n.attr("val"), Some("0" | "false" | "none")))
+                };
                 styles.fonts.push(Font {
-                    bold: font.child("b").is_some(),
-                    italic: font.child("i").is_some(),
-                    underline: font.child("u").is_some(),
+                    bold: on("b"),
+                    italic: on("i"),
+                    underline: on("u"),
                     color: font
                         .child("color")
                         .and_then(|c| c.attr("rgb"))
@@ -1138,7 +1219,13 @@ impl Styles {
                     size_px: font
                         .child("sz")
                         .and_then(|s| s.attr_f64("val"))
-                        .map(|pt| px_from_half_point((pt * 2.0).round() as i64)),
+                        .map(|pt| ai_format::font::px_for_pt((pt * 2.0).round() / 2.0)),
+                    name: font
+                        .child("name")
+                        .and_then(|n| n.attr("val"))
+                        .map(str::trim)
+                        .filter(|n| ai_format::font::is_substitution(n))
+                        .map(str::to_string),
                 });
             }
         }
@@ -1163,16 +1250,34 @@ impl Styles {
 
         if let Some(container) = sheet.child("borders") {
             for border in container.children_named("border") {
-                let edge = |name: &str| {
-                    border
-                        .child(name)
-                        .is_some_and(|e| e.attr("style").is_some_and(|s| s != "none"))
+                // An edge is `true` for the plain thin line the editor draws by
+                // default, or `{style, color}` when the file asked for more — a
+                // light dotted separator is how a real data template keeps its
+                // grid quiet, and flattening it to a dark solid line changed the
+                // whole look of the sheet on export.
+                let edge = |name: &str| -> Option<serde_json::Value> {
+                    let e = border.child(name)?;
+                    let style = e.attr("style").filter(|s| *s != "none")?;
+                    let color = e.child("color").and_then(|c| c.attr("rgb")).and_then(color);
+                    Some(match (style, color) {
+                        // The editor's own line, as it exports it, folds back
+                        // to the plain form so a round trip is a no-op.
+                        ("thin", None) => json!(true),
+                        ("thin", Some(c)) if c == "#9ca3af" => json!(true),
+                        (style, None) => json!({ "style": style }),
+                        (style, Some(c)) => json!({ "style": style, "color": c }),
+                    })
                 };
-                let (t, b, l, r) = (edge("top"), edge("bottom"), edge("left"), edge("right"));
-                styles.borders.push(if t || b || l || r {
-                    Some(json!({ "t": t, "b": b, "l": l, "r": r }))
-                } else {
+                let mut edges = serde_json::Map::new();
+                for (key, name) in [("t", "top"), ("b", "bottom"), ("l", "left"), ("r", "right")] {
+                    if let Some(value) = edge(name) {
+                        edges.insert(key.into(), value);
+                    }
+                }
+                styles.borders.push(if edges.is_empty() {
                     None
+                } else {
+                    Some(serde_json::Value::Object(edges))
                 });
             }
         }
@@ -1184,16 +1289,28 @@ impl Styles {
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(0)
                 };
+                let alignment = xf.child("alignment");
                 styles.xfs.push(XfEntry {
                     num_fmt: index("numFmtId"),
                     font: index("fontId"),
                     fill: index("fillId"),
                     border: index("borderId"),
-                    align: xf
-                        .child("alignment")
+                    align: alignment
                         .and_then(|a| a.attr("horizontal"))
                         .filter(|h| matches!(*h, "left" | "center" | "right"))
                         .map(str::to_string),
+                    // Excel's default vertical alignment is bottom; `center` and
+                    // `top` are the ones worth carrying. `wrapText` turns a cell's
+                    // long label into a multi-line cell — dropping it reflowed the
+                    // sheet on open and lost the setting on the next save.
+                    // The model (and the grid editor) name the centre "middle";
+                    // OOXML calls it "center". Normalise so a re-export and the
+                    // on-screen rendering both agree.
+                    valign: alignment
+                        .and_then(|a| a.attr("vertical"))
+                        .filter(|v| matches!(*v, "top" | "center" | "middle" | "bottom"))
+                        .map(|v| if v == "center" { "middle" } else { v }.to_string()),
+                    wrap: alignment.is_some_and(|a| a.attr_bool("wrapText")),
                 });
             }
         }

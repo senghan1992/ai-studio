@@ -8,6 +8,8 @@ use ai_format::chart::{parse_chart_block, ChartSpec, ChartType, PALETTE_LIGHT};
 use ai_format::model::{Project, Slide, SlideBlock};
 use ai_format::shape::ShapeSpec;
 use ai_format::table::{parse_markdown_table, TableSpec, TableStyle};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::Value as Json;
 
 use crate::mdruns::{image_alt, image_source, parse_markdown, runs_to_text, Block, Run};
@@ -60,8 +62,12 @@ fn run_props(
     size_px: f64,
     color: &str,
     bold_default: bool,
+    font: Option<&str>,
     links: &mut Vec<String>,
 ) -> String {
+    // A run marked inline outranks its block.
+    let color = run.color.as_deref().unwrap_or(color);
+    let font = run.font.as_deref().or(font);
     let mut out = format!(
         "<a:rPr lang=\"ko-KR\" altLang=\"en-US\" sz=\"{}\"",
         font_size_100(size_px)
@@ -82,6 +88,11 @@ fn run_props(
     ));
     if run.code {
         out.push_str("<a:latin typeface=\"Consolas\"/>");
+    } else if let Some(font) = font {
+        out.push_str(&format!(
+            "<a:latin typeface=\"{0}\"/><a:ea typeface=\"{0}\"/>",
+            esc(font)
+        ));
     }
     if let Some(url) = &run.link {
         links.push(url.clone());
@@ -100,6 +111,10 @@ struct Paragraph {
     align: &'static str,
     size_px: f64,
     bold: bool,
+    /// The family the block asked for, carried over from an imported deck. The
+    /// editor draws everything in one font, but a re-exported slide should ask
+    /// PowerPoint for the font its author chose, not for one their PC lacks.
+    font: Option<String>,
     runs: Vec<Run>,
 }
 
@@ -133,11 +148,14 @@ fn paragraph_xml(p: &Paragraph, color: &str, line_height: f64, links: &mut Vec<S
 
     let mut runs = String::new();
     for run in p.runs.iter().filter(|r| !r.text.is_empty()) {
-        runs.push_str(&format!(
-            "<a:r>{}<a:t>{}</a:t></a:r>",
-            run_props(run, p.size_px, color, p.bold, links),
-            esc(&run.text)
-        ));
+        let props = run_props(run, p.size_px, color, p.bold, p.font.as_deref(), links);
+        // A newline inside a run is a line break within the paragraph.
+        for (i, line) in run.text.split('\n').enumerate() {
+            if i > 0 {
+                runs.push_str(&format!("<a:br>{props}</a:br>"));
+            }
+            runs.push_str(&format!("<a:r>{props}<a:t>{}</a:t></a:r>", esc(line)));
+        }
     }
 
     format!("<a:p>{props}{runs}</a:p>")
@@ -155,11 +173,17 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
     let base_bold = style_num(style, "weight")
         .map(|w| w >= 600.0)
         .unwrap_or(false);
+    let font = style_str(style, "font")
+        .filter(|f| ai_format::font::is_substitution(f))
+        .map(str::to_string);
 
     let mut out = Vec::new();
     for block in parse_markdown(md) {
         match block {
+            // A slide has no pages to break.
+            Block::PageBreak => {}
             Block::Heading { level, runs } => out.push(Paragraph {
+                font: font.clone(),
                 bullet: None,
                 align,
                 // The editor draws a heading as a multiple of the block's own
@@ -169,6 +193,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                 runs,
             }),
             Block::Paragraph { runs } | Block::Quote { runs } => out.push(Paragraph {
+                font: font.clone(),
                 bullet: None,
                 align,
                 size_px: base_size,
@@ -178,6 +203,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::List { ordered, items } => {
                 for item in items {
                     out.push(Paragraph {
+                        font: font.clone(),
                         bullet: Some((item.level, ordered)),
                         align,
                         size_px: base_size
@@ -190,6 +216,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::Code { text, .. } => {
                 for line in text.split('\n') {
                     out.push(Paragraph {
+                        font: font.clone(),
                         bullet: None,
                         align: "l",
                         size_px: base_size * 0.85,
@@ -210,6 +237,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                         .collect::<Vec<_>>()
                         .join("  |  ");
                     out.push(Paragraph {
+                        font: font.clone(),
                         bullet: None,
                         align,
                         size_px: base_size * 0.9,
@@ -221,6 +249,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::Image { alt, .. } => {
                 if !alt.is_empty() {
                     out.push(Paragraph {
+                        font: font.clone(),
                         bullet: None,
                         align,
                         size_px: base_size,
@@ -234,6 +263,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                 }
             }
             Block::Hr => out.push(Paragraph {
+                font: font.clone(),
                 bullet: None,
                 align,
                 size_px: base_size,
@@ -398,24 +428,89 @@ fn shape_text_body(block: &SlideBlock, links: &mut Vec<String>) -> String {
 }
 
 fn picture_shape(id: usize, block: &SlideBlock, rel_id: &str, natural: (f64, f64)) -> String {
-    // Contain: the image keeps its aspect ratio inside the block's box.
-    let (nw, nh) = natural;
-    let scale = (block.w / nw.max(1.0)).min(block.h / nh.max(1.0));
-    let (w, h) = (nw * scale, nh * scale);
-    let x = block.x + (block.w - w) / 2.0;
-    let y = block.y + (block.h - h) / 2.0;
+    let rotation = block
+        .style
+        .get("rotation")
+        .and_then(Json::as_f64)
+        .unwrap_or(0.0);
+    let flip_h = block
+        .style
+        .get("flipH")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
+    let flip_v = block
+        .style
+        .get("flipV")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
+    let crop = block.style.get("crop").filter(|c| c.is_object());
+
+    // A cropped picture fills the block box exactly — the crop already chose what
+    // shows. An uncropped one is contained, keeping its aspect ratio centred in
+    // the box, the same as the editor draws it.
+    let (x, y, w, h) = if crop.is_some() {
+        (block.x, block.y, block.w, block.h)
+    } else {
+        let (nw, nh) = natural;
+        let scale = (block.w / nw.max(1.0)).min(block.h / nh.max(1.0));
+        let (w, h) = (nw * scale, nh * scale);
+        (
+            block.x + (block.w - w) / 2.0,
+            block.y + (block.h - h) / 2.0,
+            w,
+            h,
+        )
+    };
+
+    let mut xfrm_attrs = String::new();
+    if rotation != 0.0 {
+        xfrm_attrs.push_str(&format!(
+            " rot=\"{}\"",
+            (rotation * 60_000.0).round() as i64
+        ));
+    }
+    if flip_h {
+        xfrm_attrs.push_str(" flipH=\"1\"");
+    }
+    if flip_v {
+        xfrm_attrs.push_str(" flipV=\"1\"");
+    }
+    let src_rect = crop.map(crop_src_rect).unwrap_or_default();
 
     format!(
         "<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Picture {id}\" descr=\"{}\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>\
-<p:blipFill><a:blip r:embed=\"{rel_id}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>\
-<p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>\
+<p:blipFill><a:blip r:embed=\"{rel_id}\"/>{src_rect}<a:stretch><a:fillRect/></a:stretch></p:blipFill>\
+<p:spPr><a:xfrm{xfrm_attrs}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>\
 <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>",
         esc(&image_alt(&block.md)),
         emu(x),
         emu(y),
-        emu(w),
-        emu(h),
+        emu(w.max(1.0)),
+        emu(h.max(1.0)),
     )
+}
+
+/// `<a:srcRect>` from a crop `{ l, t, r, b }` in percent, back to OOXML's
+/// 1/1000-of-a-percent edges. A zero edge is omitted, matching what Office writes.
+fn crop_src_rect(crop: &Json) -> String {
+    let edge =
+        |name: &str| (crop.get(name).and_then(Json::as_f64).unwrap_or(0.0) * 1000.0).round() as i64;
+    let mut attrs = String::new();
+    for (name, v) in [
+        ("l", edge("l")),
+        ("t", edge("t")),
+        ("r", edge("r")),
+        ("b", edge("b")),
+    ] {
+        if v != 0 {
+            attrs.push_str(&format!(" {name}=\"{v}\""));
+        }
+    }
+    if attrs.is_empty() {
+        String::new()
+    } else {
+        format!("<a:srcRect{attrs}/>")
+    }
 }
 
 /// A table PowerPoint can edit: a real `a:tbl`, with the spans and banding the
@@ -502,7 +597,14 @@ fn table_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String
                     }
                     runs.push_str(&format!(
                         "<a:r>{}<a:t>{}</a:t></a:r>",
-                        run_props(&run, base_size, color, is_header || is_first_col, links),
+                        run_props(
+                            &run,
+                            base_size,
+                            color,
+                            is_header || is_first_col,
+                            None,
+                            links
+                        ),
                         esc(&run.text)
                     ));
                 }
@@ -784,20 +886,40 @@ fn read_asset(dir: &Path, src: &str) -> Option<(Vec<u8>, String)> {
     if lower.starts_with("http:") || lower.starts_with("https:") || lower.starts_with("data:") {
         return None;
     }
-    let abs = ai_format::project::resolve_inside(dir, src.trim_start_matches("./")).ok()?;
-    if !abs.is_file() {
+    // A markdown path is relative to the item folder (`slides/…`), so its
+    // canonical form is `../assets/x.png` — the very path the upload API hands
+    // back. Resolve it against the project root the way the editor's screen
+    // and the HTTP asset route do, and only from inside `assets/`.
+    let mut relative = src;
+    loop {
+        if let Some(rest) = relative.strip_prefix("./") {
+            relative = rest;
+        } else if let Some(rest) = relative.strip_prefix("../") {
+            relative = rest;
+        } else {
+            break;
+        }
+    }
+    if !relative.starts_with("assets/") {
         return None;
     }
+    let abs = ai_format::project::resolve_existing_inside(dir, relative).ok()?;
     let ext = abs.extension()?.to_string_lossy().into_owned();
     Some((std::fs::read(&abs).ok()?, ext))
 }
 
-fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets) -> SlidePart {
+fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets, on_design: bool) -> SlidePart {
     let mut shapes = String::new();
     let mut rels: Vec<(String, String, String)> = Vec::new();
     let mut links: Vec<String> = Vec::new();
 
-    let mut ordered: Vec<&SlideBlock> = slide.blocks.iter().collect();
+    // On the preserved design the master draws its own logo and footer; the
+    // copies the import baked into the slide would draw them a second time.
+    let mut ordered: Vec<&SlideBlock> = slide
+        .blocks
+        .iter()
+        .filter(|b| !(on_design && b.style.get("design").and_then(Json::as_bool) == Some(true)))
+        .collect();
     ordered.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
 
     // Shape ids start at 2: the group shape holding them all is 1.
@@ -811,7 +933,9 @@ fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets) -> SlidePart {
                         let content_type = image_content_type(&ext)?;
                         let natural = image_size(&data).unwrap_or((block.w, block.h));
                         let index = assets.media.len() + 1;
-                        let path = format!("media/image{index}.{}", ext.to_ascii_lowercase());
+                        // `aistudio` rather than `image`: a preserved design ships its own
+                        // `media/image1.png`, and two parts cannot share a name.
+                        let path = format!("media/aistudio{index}.{}", ext.to_ascii_lowercase());
                         assets.media.push((path.clone(), data, content_type));
                         Some((path, natural))
                     });
@@ -867,8 +991,14 @@ fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets) -> SlidePart {
         String::new()
     };
 
+    // An imported slide that hid its master's shapes says so again.
+    let show = if on_design && !slide.master_shapes {
+        " showMasterSp=\"0\""
+    } else {
+        ""
+    };
     let xml = format!(
-        "<p:sld xmlns:p=\"{NS_P}\" xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\"><p:cSld>{background}\
+        "<p:sld xmlns:p=\"{NS_P}\" xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\"{show}><p:cSld>{background}\
 <p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
 <p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>\
 {shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"
@@ -916,10 +1046,11 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     let slides = project.slides();
     let canvas = slides.first().map(|s| s.canvas).unwrap_or_default();
 
+    let template = Template::load(&project.dir);
     let mut assets = Assets::default();
     let parts: Vec<SlidePart> = slides
         .iter()
-        .map(|s| slide_part(s, &project.dir, &mut assets))
+        .map(|s| slide_part(s, &project.dir, &mut assets, template.is_some()))
         .collect();
     let notes_indices: Vec<usize> = parts
         .iter()
@@ -928,6 +1059,14 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
         .collect();
 
     let mut pkg = Package::new();
+
+    // Where the notes slides point: the preserved design's notes master when it
+    // has one, else the one written below.
+    let template_notes_master = template.as_ref().and_then(Template::notes_master);
+    let notes_master_path = template_notes_master
+        .clone()
+        .unwrap_or_else(|| "notesMasters/notesMaster1.xml".to_string());
+    let writes_notes_master = !notes_indices.is_empty() && template_notes_master.is_none();
 
     /* ------------------------------------------------------- presentation */
     let mut presentation = format!(
@@ -977,13 +1116,30 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     }
 
     /* ---------------------------------------------------------- structure */
-    pkg.add_xml("ppt/presentation.xml", &presentation);
-    pkg.add_xml(
-        "ppt/_rels/presentation.xml.rels",
-        &relationships(&presentation_rels),
-    );
-    pkg.add_xml("ppt/slideMasters/slideMaster1.xml", &slide_master_xml());
-    pkg.add_xml(
+    match &template {
+        Some(t) => {
+            // The design as it was: its masters, layouts, theme and pictures go
+            // in verbatim, and its presentation part is rewritten only where
+            // the slides are listed.
+            for (name, bytes) in &t.parts {
+                pkg.add(name, bytes.clone());
+            }
+            let ours = writes_notes_master.then_some(notes_master_path.as_str());
+            let (pres, rels) = t.presentation(slides.len(), canvas, ours);
+            pkg.add_xml("ppt/presentation.xml", &pres);
+            pkg.add_xml("ppt/_rels/presentation.xml.rels", &rels);
+        }
+        None => {
+            pkg.add_xml("ppt/presentation.xml", &presentation);
+            pkg.add_xml(
+                "ppt/_rels/presentation.xml.rels",
+                &relationships(&presentation_rels),
+            );
+        }
+    }
+    if template.is_none() {
+        pkg.add_xml("ppt/slideMasters/slideMaster1.xml", &slide_master_xml());
+        pkg.add_xml(
         "ppt/slideMasters/_rels/slideMaster1.xml.rels",
         &relationships(&[
             (
@@ -998,27 +1154,32 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
             ),
         ]),
     );
-    pkg.add_xml("ppt/slideLayouts/slideLayout1.xml", &slide_layout_xml());
-    pkg.add_xml(
-        "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
-        &relationships(&[(
-            "rId1".to_string(),
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster",
-            "../slideMasters/slideMaster1.xml".to_string(),
-        )]),
-    );
-    pkg.add_xml(
-        "ppt/theme/theme1.xml",
-        &theme_xml(&project.manifest.theme.accent),
-    );
+        pkg.add_xml("ppt/slideLayouts/slideLayout1.xml", &slide_layout_xml());
+        pkg.add_xml(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            &relationships(&[(
+                "rId1".to_string(),
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster",
+                "../slideMasters/slideMaster1.xml".to_string(),
+            )]),
+        );
+        pkg.add_xml(
+            "ppt/theme/theme1.xml",
+            &theme_xml(&project.manifest.theme.accent),
+        );
+    }
 
     for (i, part) in parts.iter().enumerate() {
         pkg.add_xml(&format!("ppt/slides/slide{}.xml", i + 1), &part.xml);
 
+        let layout = match &template {
+            Some(t) => t.layout_for(&slides[i]),
+            None => "slideLayouts/slideLayout1.xml".to_string(),
+        };
         let mut rels: Vec<(String, String, String)> = vec![(
             "rId1".to_string(),
             "slideLayout".to_string(),
-            "../slideLayouts/slideLayout1.xml".to_string(),
+            format!("../{layout}"),
         )];
         rels.extend(part.rels.clone());
         if part.notes.is_some() {
@@ -1055,16 +1216,22 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     }
 
     /* -------------------------------------------------------------- notes */
-    if !notes_indices.is_empty() {
+    if writes_notes_master {
+        let theme = template
+            .as_ref()
+            .and_then(Template::theme)
+            .unwrap_or_else(|| "theme/theme1.xml".to_string());
         pkg.add_xml("ppt/notesMasters/notesMaster1.xml", &notes_master_xml());
         pkg.add_xml(
             "ppt/notesMasters/_rels/notesMaster1.xml.rels",
             &relationships(&[(
                 "rId1".to_string(),
                 "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
-                "../theme/theme1.xml".to_string(),
+                format!("../{theme}"),
             )]),
         );
+    }
+    if !notes_indices.is_empty() {
         for (n, slide_index) in notes_indices.iter().enumerate() {
             let notes = parts[*slide_index].notes.as_deref().unwrap_or("");
             pkg.add_xml(
@@ -1077,7 +1244,7 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
                     (
                         "rId1".to_string(),
                         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster",
-                        "../notesMasters/notesMaster1.xml".to_string(),
+                        format!("../{notes_master_path}"),
                     ),
                     (
                         "rId2".to_string(),
@@ -1098,15 +1265,10 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     }
 
     /* ------------------------------------------------------ content types */
+    // The parts this export writes itself; the design's own are declared by
+    // the template's list when there is one, by the fixed header when not.
     let mut content_types = String::from(
-        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
-<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
-<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
-<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/>\
-<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/>\
-<Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/>\
-<Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>\
-<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>",
+        "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>",
     );
     for i in 0..slides.len() {
         content_types.push_str(&format!(
@@ -1114,8 +1276,10 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
             i + 1
         ));
     }
-    if !notes_indices.is_empty() {
+    if writes_notes_master {
         content_types.push_str("<Override PartName=\"/ppt/notesMasters/notesMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml\"/>");
+    }
+    if !notes_indices.is_empty() {
         for n in 0..notes_indices.len() {
             content_types.push_str(&format!(
                 "<Override PartName=\"/ppt/notesSlides/notesSlide{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml\"/>",
@@ -1134,7 +1298,19 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
             "<Override PartName=\"/ppt/{path}\" ContentType=\"{content_type}\"/>"
         ));
     }
-    content_types.push_str("</Types>");
+    let content_types = match &template {
+        Some(t) => t.content_types(&content_types),
+        None => format!(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/>\
+<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/>\
+<Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/>\
+<Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>\
+{content_types}</Types>"
+        ),
+    };
 
     pkg.add_xml("[Content_Types].xml", &content_types);
     pkg.add_xml(
@@ -1158,6 +1334,290 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
     );
 
     pkg.finish()
+}
+
+/// The Office design an imported deck was kept with: `assets/office-template.zip`,
+/// written by the importer, holding the original masters, layouts, theme, notes
+/// master and the pictures they draw, plus the original presentation part and
+/// content-type list to rewrite from. With it, an exported deck comes back on
+/// the template it left — the company logo, footer, fonts and colours are the
+/// author's own rather than this format's.
+struct Template {
+    /// Design parts to write verbatim, by package path.
+    parts: Vec<(String, Vec<u8>)>,
+    presentation: String,
+    rels: String,
+    content_types: String,
+}
+
+/// The asset name the importer uses; kept in step with `ai-import`.
+const TEMPLATE_ASSET: &str = "office-template.zip";
+
+static XML_TAG_ATTR: Lazy<Regex> = Lazy::new(|| Regex::new(r#"([A-Za-z:]+)="([^"]*)""#).unwrap());
+static RELATIONSHIP: Lazy<Regex> = Lazy::new(|| Regex::new(r"<Relationship\b[^>]*/>").unwrap());
+static CONTENT_TYPE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<(?:Default|Override)\b[^>]*/>").unwrap());
+static SLD_ID_LST: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?s)<p:sldIdLst>.*?</p:sldIdLst>|<p:sldIdLst\s*/>").unwrap());
+static SLD_SZ: Lazy<Regex> = Lazy::new(|| Regex::new(r"<p:sldSz\b[^>]*/>").unwrap());
+static XML_DECL: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*<\?xml[^>]*\?>\s*").unwrap());
+
+fn attr_of(tag: &str, name: &str) -> Option<String> {
+    XML_TAG_ATTR
+        .captures_iter(tag)
+        .find(|c| &c[1] == name)
+        .map(|c| c[2].to_string())
+}
+
+/// `../slideLayouts/x.xml` against `ppt/` -> `ppt/slideLayouts/x.xml`.
+fn resolve_in_ppt(target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.to_string();
+    }
+    let mut parts: Vec<&str> = vec!["ppt"];
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+/// Natural order for `slideLayout2.xml` vs `slideLayout10.xml`.
+fn part_number(name: &str) -> usize {
+    name.trim_end_matches(".xml")
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
+impl Template {
+    fn load(dir: &Path) -> Option<Template> {
+        let bytes = std::fs::read(dir.join("assets").join(TEMPLATE_ASSET)).ok()?;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+        let mut parts = Vec::new();
+        let mut presentation = None;
+        let mut rels = None;
+        let mut content_types = None;
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i).ok()?;
+            if file.is_dir() {
+                continue;
+            }
+            let name = file.name().trim_start_matches('/').to_string();
+            let mut data = Vec::with_capacity(file.size() as usize);
+            std::io::Read::read_to_end(&mut file, &mut data).ok()?;
+            match name.as_str() {
+                "ppt/presentation.xml" => {
+                    presentation = Some(String::from_utf8_lossy(&data).into_owned())
+                }
+                "ppt/_rels/presentation.xml.rels" => {
+                    rels = Some(String::from_utf8_lossy(&data).into_owned())
+                }
+                "[Content_Types].xml" => {
+                    content_types = Some(String::from_utf8_lossy(&data).into_owned())
+                }
+                _ => parts.push((name, data)),
+            }
+        }
+        let has_master = parts.iter().any(|(n, _)| {
+            n.starts_with("ppt/slideMasters/") && n.ends_with(".xml") && !n.contains("/_rels/")
+        });
+        if !has_master {
+            return None;
+        }
+        Some(Template {
+            parts,
+            presentation: presentation?,
+            rels: rels?,
+            content_types: content_types?,
+        })
+    }
+
+    /// Whether the export will contain this part — a design part, or the
+    /// presentation part this export rewrites.
+    fn has(&self, name: &str) -> bool {
+        name == "ppt/presentation.xml" || self.parts.iter().any(|(n, _)| n == name)
+    }
+
+    /// Design parts under a folder, in natural order, as `slideLayouts/x.xml`.
+    fn under(&self, folder: &str) -> Vec<String> {
+        let prefix = format!("ppt/{folder}/");
+        let mut found: Vec<String> = self
+            .parts
+            .iter()
+            .filter(|(n, _)| {
+                n.starts_with(&prefix) && n.ends_with(".xml") && !n.contains("/_rels/")
+            })
+            .filter_map(|(n, _)| n.strip_prefix("ppt/").map(str::to_string))
+            .collect();
+        found.sort_by_key(|n| part_number(n));
+        found
+    }
+
+    /// The layout a slide goes back on: its own when the design still has it,
+    /// else the design's first — which is what PowerPoint offers a new slide.
+    fn layout_for(&self, slide: &Slide) -> String {
+        if let Some(part) = &slide.layout_part {
+            if self.has(&format!("ppt/{part}")) {
+                return part.clone();
+            }
+        }
+        self.under("slideLayouts")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "slideLayouts/slideLayout1.xml".to_string())
+    }
+
+    fn notes_master(&self) -> Option<String> {
+        self.under("notesMasters").into_iter().next()
+    }
+
+    fn theme(&self) -> Option<String> {
+        self.under("theme").into_iter().next()
+    }
+
+    /// The original presentation part with our slides listed in place of its
+    /// own, and its relationships trimmed to the parts this export carries.
+    fn presentation(
+        &self,
+        slide_count: usize,
+        canvas: ai_format::geometry::Canvas,
+        own_notes_master: Option<&str>,
+    ) -> (String, String) {
+        const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let mut kept: Vec<String> = Vec::new();
+        let mut max_id = 0usize;
+        for tag in RELATIONSHIP.find_iter(&self.rels).map(|m| m.as_str()) {
+            let Some(target) = attr_of(tag, "Target") else {
+                continue;
+            };
+            if attr_of(tag, "TargetMode").as_deref() == Some("External") {
+                continue;
+            }
+            if !self.has(&resolve_in_ppt(&target)) {
+                continue;
+            }
+            if let Some(n) = attr_of(tag, "Id")
+                .and_then(|id| id.strip_prefix("rId").and_then(|n| n.parse::<usize>().ok()))
+            {
+                max_id = max_id.max(n);
+            }
+            kept.push(tag.to_string());
+        }
+        let mut next = max_id + 1;
+        let mut slide_ids = String::new();
+        for i in 0..slide_count {
+            kept.push(format!(
+                "<Relationship Id=\"rId{next}\" Type=\"{REL}/slide\" Target=\"slides/slide{}.xml\"/>",
+                i + 1
+            ));
+            slide_ids.push_str(&format!("<p:sldId id=\"{}\" r:id=\"rId{next}\"/>", 256 + i));
+            next += 1;
+        }
+        let notes_list = own_notes_master.map(|path| {
+            kept.push(format!(
+                "<Relationship Id=\"rId{next}\" Type=\"{REL}/notesMaster\" Target=\"{path}\"/>"
+            ));
+            let list = format!(
+                "<p:notesMasterIdLst><p:notesMasterId r:id=\"rId{next}\"/></p:notesMasterIdLst>"
+            );
+            next += 1;
+            list
+        });
+        let _ = next;
+        let rels = format!(
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{}</Relationships>",
+            kept.join("")
+        );
+
+        let mut pres = XML_DECL.replace(&self.presentation, "").into_owned();
+        // Lists that point at parts this export does not carry.
+        for element in [
+            "embeddedFontLst",
+            "handoutMasterIdLst",
+            "custShowLst",
+            "custDataLst",
+        ] {
+            let re = Regex::new(&format!(
+                r"(?s)<p:{element}>.*?</p:{element}>|<p:{element}\s*/>"
+            ))
+            .unwrap();
+            pres = re.replace_all(&pres, "").into_owned();
+        }
+        // Sections and other extensions name slide ids that no longer exist.
+        if let Some(start) = pres.find("<p:extLst>") {
+            if let Some(end) = pres.rfind("</p:extLst>") {
+                pres.replace_range(start..end + "</p:extLst>".len(), "");
+            }
+        }
+        let list = format!(
+            "{}<p:sldIdLst>{slide_ids}</p:sldIdLst>",
+            notes_list.unwrap_or_default()
+        );
+        pres = if SLD_ID_LST.is_match(&pres) {
+            SLD_ID_LST.replace(&pres, list.as_str()).into_owned()
+        } else {
+            pres.replacen(
+                "</p:sldMasterIdLst>",
+                &format!("</p:sldMasterIdLst>{list}"),
+                1,
+            )
+        };
+        let size = format!(
+            "<p:sldSz cx=\"{}\" cy=\"{}\"/>",
+            emu(canvas.w),
+            emu(canvas.h)
+        );
+        pres = SLD_SZ.replace(&pres, size.as_str()).into_owned();
+        (pres, rels)
+    }
+
+    /// The original content-type list, kept for the parts this export carries,
+    /// with the export's own declarations appended.
+    fn content_types(&self, ours: &str) -> String {
+        let mut out = String::from(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+        );
+        let mut has_rels = false;
+        let mut has_xml = false;
+        for tag in CONTENT_TYPE
+            .find_iter(&self.content_types)
+            .map(|m| m.as_str())
+        {
+            if tag.starts_with("<Default") {
+                match attr_of(tag, "Extension").as_deref() {
+                    Some("rels") => has_rels = true,
+                    Some("xml") => has_xml = true,
+                    _ => {}
+                }
+                out.push_str(tag);
+            } else if let Some(part) = attr_of(tag, "PartName") {
+                if self.has(part.trim_start_matches('/')) {
+                    out.push_str(tag);
+                }
+            }
+        }
+        if !has_rels {
+            out.push_str("<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>");
+        }
+        if !has_xml {
+            out.push_str("<Default Extension=\"xml\" ContentType=\"application/xml\"/>");
+        }
+        out.push_str(ours);
+        out.push_str("</Types>");
+        out
+    }
 }
 
 /// The minimum master a valid package needs. Slides carry their own geometry, so

@@ -4,10 +4,11 @@ use indexmap::IndexMap;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value as Json};
+use std::collections::{HashMap, HashSet};
 
 use ai_formula::evaluate::{display_value, parse_cell_input, recalc_sheet, Book, Cell, Names};
 use ai_formula::jsnum;
-use ai_formula::refs::{index_to_col, parse_ref, to_ref};
+use ai_formula::refs::{index_to_col, parse_ref, shift_formula, to_ref};
 
 use crate::chart::{
     chart_to_markdown_table, describe_chart, normalize_spec, resolve_spec, CellSource,
@@ -47,7 +48,8 @@ pub fn read_sheet(md: &str, cells_json: Option<&Json>) -> Sheet {
 
     if has_cells {
         let mut parsed: Sheet =
-            serde_json::from_value(cells_json.unwrap().clone()).unwrap_or_else(|_| empty_sheet());
+            serde_json::from_value(expand_style_table(cells_json.unwrap().clone()))
+                .unwrap_or_else(|_| empty_sheet());
         if parsed.id.is_empty() {
             parsed.id = meta_id.unwrap_or_else(new_sheet_id);
         }
@@ -154,6 +156,18 @@ pub fn normalize_sheet(sheet: &Sheet) -> Sheet {
         if let Some(fmt) = &cell.fmt {
             if !fmt.is_empty() {
                 next.fmt = Some(fmt.clone());
+            }
+        }
+        // Spill bookkeeping survives only in the shape recalculation writes it:
+        // a parsable range on a formula cell, a parsable anchor on a value cell.
+        if let Some(spill) = &cell.spill {
+            if next.f.is_some() && ai_formula::refs::parse_range(&spill.to_uppercase()).is_some() {
+                next.spill = Some(spill.to_uppercase());
+            }
+        }
+        if let Some(anchor) = &cell.spill_from {
+            if next.f.is_none() && parse_ref(anchor).is_some() {
+                next.spill_from = Some(anchor.to_uppercase());
             }
         }
         for key in ["style", "note"] {
@@ -274,11 +288,29 @@ pub fn recalculated(sheet: &Sheet) -> Sheet {
 /// `=요약!B4` is most of what a summary sheet contains, and a reader that
 /// recalculates one sheet in isolation cannot resolve it.
 pub fn recalculated_in(sheet: &Sheet, book: &Book<'_>) -> Sheet {
-    let out = ai_formula::evaluate::recalc_sheet_in(&sheet.cells, &sheet.names, &sheet.name, book);
+    let out = ai_formula::evaluate::recalc_sheet_blocked(
+        &sheet.cells,
+        &sheet.names,
+        &sheet.name,
+        book,
+        &merge_covered(&sheet.merges),
+    );
     Sheet {
         cells: out.cells,
         ..sheet.clone()
     }
+}
+
+/// Every cell a merge touches. A spill may not enter (or leave) any of them —
+/// a value written under a merge cover would be in the file but never on the
+/// screen.
+pub fn merge_covered(merges: &[Json]) -> std::collections::HashSet<String> {
+    merges
+        .iter()
+        .filter_map(|m| m.as_str())
+        .filter_map(|spec| ai_formula::refs::parse_range(&spec.to_uppercase()))
+        .flat_map(|range| ai_formula::refs::expand_range(&range))
+        .collect()
 }
 
 /// Every sheet in a workbook, addressable by name.
@@ -321,12 +353,86 @@ pub fn write_sheet_in(sheet: &Sheet, book: &Book<'_>) -> SheetFiles {
     if !s.charts.is_empty() {
         cells.insert("charts".into(), json!(s.charts));
     }
-    cells.insert("cells".into(), json!(strip_empty(&with_values.cells)));
+    let (styles, cell_values) = intern_style_table(json!(strip_empty(&with_values.cells)));
+    if let Some(styles) = styles {
+        cells.insert("styles".into(), styles);
+    }
+    cells.insert("cells".into(), cell_values);
 
     SheetFiles {
         md: render_sheet_markdown(&with_values),
         cells: Json::Object(cells),
     }
+}
+
+/// Pull every cell style used by two or more cells into a `styles` table and
+/// leave an `s` reference in its place.
+///
+/// A workbook's body is one style repeated: a 50KB sheet arrived from Excel as
+/// a 2.4MB `cells.json` because six thousand cells each spelled out the same
+/// font, fill, alignment and border. A style used once stays inline, so a small
+/// sheet reads as plainly as before; the table only appears when it pays.
+fn intern_style_table(cells: Json) -> (Option<Json>, Json) {
+    let Json::Object(mut cells) = cells else {
+        return (None, cells);
+    };
+    // Count by serialised form so two equal styles written in any key order
+    // still fold together.
+    let mut uses: HashMap<String, usize> = HashMap::new();
+    for cell in cells.values() {
+        if let Some(style @ Json::Object(_)) = cell.get("style") {
+            *uses.entry(style.to_string()).or_insert(0) += 1;
+        }
+    }
+    if !uses.values().any(|n| *n >= 2) {
+        return (None, Json::Object(cells));
+    }
+    let mut table = serde_json::Map::new();
+    let mut ids: HashMap<String, String> = HashMap::new();
+    for cell in cells.values_mut() {
+        let Json::Object(fields) = cell else { continue };
+        let Some(style @ Json::Object(_)) = fields.get("style") else {
+            continue;
+        };
+        let key = style.to_string();
+        if uses.get(&key).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        let id = ids.entry(key).or_insert_with(|| {
+            let id = format!("st{}", table.len() + 1);
+            table.insert(id.clone(), style.clone());
+            id
+        });
+        let id = id.clone();
+        fields.remove("style");
+        fields.insert("s".into(), Json::String(id));
+    }
+    (Some(Json::Object(table)), Json::Object(cells))
+}
+
+/// The inverse: a cell's `s` reference becomes its inline `style` again, so the
+/// in-memory model — and every editor, exporter and formula path — never sees
+/// the table. A file with only inline styles passes through untouched.
+fn expand_style_table(mut sheet: Json) -> Json {
+    let Json::Object(top) = &mut sheet else {
+        return sheet;
+    };
+    let table = match top.remove("styles") {
+        Some(Json::Object(table)) => table,
+        _ => return sheet,
+    };
+    if let Some(Json::Object(cells)) = top.get_mut("cells") {
+        for cell in cells.values_mut() {
+            let Json::Object(fields) = cell else { continue };
+            let Some(Json::String(id)) = fields.remove("s") else {
+                continue;
+            };
+            if let Some(style) = table.get(&id) {
+                fields.entry("style").or_insert_with(|| style.clone());
+            }
+        }
+    }
+    sheet
 }
 
 fn strip_empty(cells: &IndexMap<String, Cell>) -> IndexMap<String, Cell> {
@@ -342,6 +448,100 @@ fn strip_empty(cells: &IndexMap<String, Cell>) -> IndexMap<String, Cell> {
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+/// A cell's displayed value, with an explicit placeholder for a blank result so
+/// a formula line never trails off into nothing.
+fn shown_value(cell: &Cell) -> String {
+    let shown = display_value(cell);
+    if shown.is_empty() {
+        "(빈 값)".to_string()
+    } else {
+        shown
+    }
+}
+
+/// Fewer than this many shift-equal cells in a column read fine listed one by
+/// one; a longer run is a dragged fill and collapses to a single range line.
+const FILL_RUN_MIN: usize = 4;
+
+/// One formula in the projection: a lone cell, or a run of cells filled down a
+/// column from the same dragged formula.
+pub enum FormulaEntry<'a> {
+    Single(&'a str, &'a Cell),
+    FillDown {
+        anchor: &'a str,
+        anchor_cell: &'a Cell,
+        end: String,
+        count: usize,
+    },
+}
+
+/// Formula cells for the projection, with dragged fill-down runs collapsed.
+///
+/// A column dragged down thousands of rows (`=F2-G2`, `=F3-G3`, …) is one
+/// gesture to the user; listing every row buries the sheet's distinct formulas
+/// and bloats the digest. Consecutive cells in a column whose formula is the
+/// row-shift of the one above collapse into a single `H2:H3001` entry. Dynamic
+/// arrays keep their own line so the spill note survives.
+pub fn formula_entries(sheet: &Sheet) -> Vec<FormulaEntry<'_>> {
+    let mut refs: Vec<(usize, usize, &String, &Cell)> = sheet
+        .cells
+        .iter()
+        .filter(|(_, c)| c.f.is_some())
+        .filter_map(|(r, c)| parse_ref(r).map(|p| (p.col, p.row, r, c)))
+        .collect();
+
+    let by_pos: HashMap<(usize, usize), (&String, &Cell)> = refs
+        .iter()
+        .map(|(col, row, r, c)| ((*col, *row), (*r, *c)))
+        .collect();
+
+    // Column-major so a fill-down run is walked contiguously.
+    refs.sort_by_key(|(col, row, _, _)| (*col, *row));
+    let mut anchors: HashMap<&str, (String, usize)> = HashMap::new();
+    let mut consumed: HashSet<(usize, usize)> = HashSet::new();
+
+    for (col, row, r, c) in &refs {
+        if consumed.contains(&(*col, *row)) || c.spill.is_some() {
+            continue;
+        }
+        let mut len = 1usize;
+        let mut prev_f = c.f.as_deref().unwrap_or("");
+        while let Some(&(_, next)) = by_pos.get(&(*col, row + len)) {
+            let (Some(nf), None) = (next.f.as_deref(), next.spill.as_ref()) else {
+                break;
+            };
+            if shift_formula(prev_f, 0, 1) != nf {
+                break;
+            }
+            prev_f = nf;
+            len += 1;
+        }
+        if len >= FILL_RUN_MIN {
+            for k in 0..len {
+                consumed.insert((*col, row + k));
+            }
+            anchors.insert(r.as_str(), (to_ref(*col, row + len - 1), len));
+        }
+    }
+
+    // Emit in the projection's usual row-major order.
+    refs.sort_by_key(|(col, row, _, _)| (*row, *col));
+    let mut out = Vec::new();
+    for (col, row, r, c) in refs {
+        if let Some((end, count)) = anchors.get(r.as_str()) {
+            out.push(FormulaEntry::FillDown {
+                anchor: r,
+                anchor_cell: c,
+                end: end.clone(),
+                count: *count,
+            });
+        } else if !consumed.contains(&(col, row)) {
+            out.push(FormulaEntry::Single(r, c));
+        }
+    }
+    out
 }
 
 /// Render the AI-readable markdown projection of a sheet.
@@ -386,25 +586,41 @@ pub fn render_sheet_markdown(sheet: &Sheet) -> String {
         }
     }
 
-    let mut formulas: Vec<(&String, &Cell)> =
-        sheet.cells.iter().filter(|(_, c)| c.f.is_some()).collect();
-    formulas.sort_by_key(|(reference, _)| ref_order(reference));
-
-    if !formulas.is_empty() {
+    let entries = formula_entries(sheet);
+    let formula_count = sheet.cells.values().filter(|c| c.f.is_some()).count();
+    if !entries.is_empty() {
         lines.push(String::new());
         lines.push("### 수식".to_string());
         lines.push(String::new());
-        for (reference, cell) in &formulas {
-            let shown = display_value(cell);
-            let shown = if shown.is_empty() {
-                "(빈 값)".to_string()
-            } else {
-                shown
-            };
-            lines.push(format!(
-                "- `{reference}` = `{}` → {shown}",
-                cell.f.as_deref().unwrap_or("")
-            ));
+        for entry in &entries {
+            match entry {
+                FormulaEntry::Single(reference, cell) => {
+                    let shown = shown_value(cell);
+                    // A dynamic array names the range it spilled over, so a reader
+                    // knows the neighbouring values belong to this formula.
+                    let spilled = cell
+                        .spill
+                        .as_deref()
+                        .map(|range| format!(" ({range}로 스필)"))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "- `{reference}` = `{}` → {shown}{spilled}",
+                        cell.f.as_deref().unwrap_or("")
+                    ));
+                }
+                FormulaEntry::FillDown {
+                    anchor,
+                    anchor_cell,
+                    end,
+                    count,
+                } => {
+                    lines.push(format!(
+                        "- `{anchor}:{end}` = `{}` (아래로 {count}개 채움, 예: `{anchor}` → {})",
+                        anchor_cell.f.as_deref().unwrap_or(""),
+                        shown_value(anchor_cell)
+                    ));
+                }
+            }
         }
     }
 
@@ -479,7 +695,7 @@ pub fn render_sheet_markdown(sheet: &Sheet) -> String {
         "cols".into(),
         json!(range.map(|r| r.max_col + 1).unwrap_or(0)),
     );
-    meta.insert("formulas".into(), json!(formulas.len()));
+    meta.insert("formulas".into(), json!(formula_count));
     serialize_frontmatter(&meta, &lines.join("\n"))
 }
 
@@ -513,12 +729,6 @@ fn md_cell(cell: Option<&Cell>) -> String {
 
 fn escape_pipes(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
-}
-
-fn ref_order(reference: &str) -> usize {
-    parse_ref(reference)
-        .map(|p| p.row * 1000 + p.col)
-        .unwrap_or(0)
 }
 
 /// Where the leading table ends: the row before the first completely blank row.
@@ -601,6 +811,22 @@ pub struct ColumnSummary {
     pub max: Option<String>,
 }
 
+/// The row that labels the columns.
+///
+/// Excel users freeze the header rows, so the last frozen row is the header when
+/// a sheet freezes any — a merged banner title sits in the rows above it, and
+/// treating row 0 as the header there yields "(머리글 없음)" columns and folds the
+/// real header into the data. Falls back to the first non-empty row.
+fn header_row(sheet: &Sheet, range: &UsedRange) -> usize {
+    let frozen = sheet.frozen.rows as usize;
+    let candidate = if frozen >= 1 {
+        frozen - 1
+    } else {
+        range.first_row
+    };
+    candidate.clamp(range.first_row, range.max_row)
+}
+
 /// Per-column statistics appended to the markdown.
 ///
 /// A model asking "what is in column C?" gets an answer without scanning rows —
@@ -610,8 +836,9 @@ pub fn summarize_columns(sheet: &Sheet) -> Vec<ColumnSummary> {
     let Some(range) = used_range(&sheet.cells) else {
         return Vec::new();
     };
+    let head = header_row(sheet, &range);
     let last_row = table_extent(&sheet.cells, range.max_row, range.max_col);
-    let data_rows: Vec<usize> = (1..=last_row)
+    let data_rows: Vec<usize> = (head + 1..=last_row)
         .filter(|r| !is_aggregate_row(&sheet.cells, *r, range.max_col))
         .collect();
 
@@ -619,7 +846,7 @@ pub fn summarize_columns(sheet: &Sheet) -> Vec<ColumnSummary> {
     for col in 0..=range.max_col {
         let header = sheet
             .cells
-            .get(&to_ref(col, 0))
+            .get(&to_ref(col, head))
             .map(display_value)
             .unwrap_or_default();
         let mut count = 0usize;
@@ -655,7 +882,7 @@ pub fn summarize_columns(sheet: &Sheet) -> Vec<ColumnSummary> {
         let fmt = data_rows
             .first()
             .copied()
-            .or(Some(1))
+            .or(Some(head + 1))
             .and_then(|r| sheet.cells.get(&to_ref(col, r)))
             .and_then(|c| c.fmt.clone());
         let stat = |v: f64| format_stat(v, fmt.as_deref());
@@ -696,13 +923,19 @@ pub struct SummaryScope {
 /// Rows the summary is based on, so the markdown can say so explicitly.
 pub fn summary_scope(sheet: &Sheet) -> Option<SummaryScope> {
     let range = used_range(&sheet.cells)?;
+    let head = header_row(sheet, &range);
     let last_row = table_extent(&sheet.cells, range.max_row, range.max_col);
-    let excluded = (1..=last_row)
+    // Nothing below the header row is data — a header-only or single-row table
+    // has no scope to report, and rendering it would print a reversed range.
+    if last_row <= head {
+        return None;
+    }
+    let excluded = (head + 1..=last_row)
         .filter(|r| is_aggregate_row(&sheet.cells, *r, range.max_col))
         .map(|r| r + 1)
         .collect();
     Some(SummaryScope {
-        first_row: 2,
+        first_row: head + 2,
         last_row: last_row + 1,
         excluded,
         truncated: last_row < range.max_row,
@@ -993,6 +1226,37 @@ mod tests {
     }
 
     #[test]
+    fn a_spill_lands_in_the_json_the_projection_and_the_round_trip() {
+        let sheet = sheet_of(&[
+            ("A1", text("서울")),
+            ("A2", text("부산")),
+            ("A3", text("서울")),
+            ("C1", formula("=UNIQUE(A1:A3)")),
+        ]);
+        let files = write_sheet(&sheet);
+
+        // The JSON carries the anchor's range and the spilled cells' values.
+        let cells = &files.cells["cells"];
+        assert_eq!(cells["C1"]["spill"], json!("C1:C2"));
+        assert_eq!(cells["C2"]["v"], json!("부산"));
+        assert_eq!(cells["C2"]["spillFrom"], json!("C1"));
+
+        // The projection shows the spilled value in the table and names the
+        // spill on the formula line.
+        assert!(files.md.contains("부산"), "{}", files.md);
+        assert!(files.md.contains("(C1:C2로 스필)"), "{}", files.md);
+
+        // Reading it back keeps the structure.
+        let back = read_sheet(&files.md, Some(&files.cells));
+        assert_eq!(back.cells["C1"].spill.as_deref(), Some("C1:C2"));
+        assert_eq!(back.cells["C2"].spill_from.as_deref(), Some("C1"));
+
+        // And a re-save of the unchanged sheet writes the same cells.
+        let again = write_sheet(&normalize_sheet(&back));
+        assert_eq!(files.cells["cells"], again.cells["cells"]);
+    }
+
+    #[test]
     fn the_used_range_ignores_truly_empty_cells() {
         let s = sheet_of(&[("A1", text("a")), ("C3", number(1.0))]);
         let r = used_range(&s.cells).unwrap();
@@ -1074,6 +1338,94 @@ mod tests {
             .unwrap();
         assert_eq!(b.sum.as_deref(), Some("10"), "999 sits past the blank row");
         assert!(summary_scope(&s).unwrap().truncated);
+    }
+
+    #[test]
+    fn a_frozen_header_row_below_a_banner_title_is_used() {
+        // Row 0 is a merged report title; the real header sits on row 1, which
+        // the sheet freezes (frozen.rows = 2). The summary must read its labels
+        // from row 1 and treat row 2 onward as data — not call B "(머리글 없음)"
+        // and fold the header into the numbers.
+        let mut s = sheet_of(&[
+            ("A1", text("2026년 3분기 실적")),
+            ("A2", text("항목")),
+            ("B2", text("금액")),
+            ("A3", text("x")),
+            ("B3", number(10.0)),
+            ("A4", text("y")),
+            ("B4", number(20.0)),
+        ]);
+        s.frozen.rows = 2;
+        let b = summarize_columns(&s)
+            .into_iter()
+            .find(|c| c.col == "B")
+            .unwrap();
+        assert_eq!(
+            b.header, "금액",
+            "header comes from the frozen row, not row 0"
+        );
+        assert_eq!(b.count, 2, "only rows 3–4 are data");
+        assert_eq!(b.sum.as_deref(), Some("30"));
+
+        let scope = summary_scope(&s).unwrap();
+        assert_eq!(
+            (scope.first_row, scope.last_row),
+            (3, 4),
+            "scope starts after the header row and never reverses"
+        );
+    }
+
+    #[test]
+    fn a_header_only_table_reports_no_scope() {
+        // A single labelled row with no data below must not print "2–1행".
+        let mut s = sheet_of(&[
+            ("A1", text("제목")),
+            ("A2", text("항목")),
+            ("B2", text("금액")),
+        ]);
+        s.frozen.rows = 2;
+        assert!(
+            summary_scope(&s).is_none(),
+            "no data rows means no scope to report"
+        );
+    }
+
+    #[test]
+    fn a_dragged_column_collapses_into_one_range_line() {
+        // Six rows dragged down from =A2*2; the projection must show one range
+        // line, not six near-identical rows, while an unrelated single formula
+        // stays on its own.
+        let mut pairs = vec![("C1", text("배수"))];
+        let owned: Vec<(String, Cell)> = (2..=7)
+            .map(|r| (format!("C{r}"), formula(&format!("=A{r}*2"))))
+            .collect();
+        for (k, v) in &owned {
+            pairs.push((k.as_str(), v.clone()));
+        }
+        pairs.push(("E1", formula("=SUM(C2:C7)")));
+        let s = recalculated(&sheet_of(&pairs));
+
+        let entries = formula_entries(&s);
+        let fill = entries
+            .iter()
+            .find_map(|e| match e {
+                FormulaEntry::FillDown {
+                    anchor, end, count, ..
+                } => Some((*anchor, end.clone(), *count)),
+                _ => None,
+            })
+            .expect("the dragged column collapses");
+        assert_eq!(fill, ("C2", "C7".to_string(), 6));
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, FormulaEntry::Single(r, _) if *r == "E1")),
+            "the standalone SUM stays a single line"
+        );
+
+        let md = render_sheet_markdown(&s);
+        assert!(md.contains("`C2:C7` = `=A2*2` (아래로 6개 채움"), "{md}");
+        assert!(!md.contains("`C5` = "), "the middle rows are folded away");
     }
 
     #[test]

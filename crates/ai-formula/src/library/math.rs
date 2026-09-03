@@ -186,7 +186,7 @@ pub fn call(name: &str, args: &[Value]) -> Option<Value> {
         },
         "FACT" | "FACTDOUBLE" => match num_of(args.first().unwrap_or(&Value::Blank)) {
             Err(e) => e,
-            Ok(x) if x < 0.0 || x > 170.0 => err(NUM_ERR),
+            Ok(x) if !(0.0..=170.0).contains(&x) => err(NUM_ERR),
             Ok(x) => {
                 let n = x.trunc() as u64;
                 let step = if name == "FACT" { 1 } else { 2 };

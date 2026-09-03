@@ -10,6 +10,19 @@ use serde_json::Value as Json;
 use ai_formula::evaluate::{Cell, Names};
 
 use crate::blocks::Kind;
+
+/// Deserialize a field, treating an explicit `null` the same as a missing key.
+///
+/// `#[serde(default)]` only fires when the key is absent; a hand-edited or
+/// third-party file that writes `"style": null` would otherwise fail the whole
+/// load. Office files in the wild do this, so we tolerate it.
+fn null_to_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
 use crate::chart::{CellSource, ChartSpec};
 use crate::geometry::{Box, Canvas};
 use crate::mdblocks::BlockType;
@@ -161,7 +174,7 @@ pub struct SlideBlock {
     pub z: f64,
     /// Text formatting: font size, weight, alignment, colour. Open-ended on
     /// purpose — the editors add keys here as they grow.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub style: IndexMap<String, Json>,
     /// Geometry and outline for a `shape` block. Typed rather than folded into
     /// `style` because the importer and the exporter both depend on the exact
@@ -211,9 +224,34 @@ pub struct Slide {
     pub notes: String,
     pub canvas: Canvas,
     pub blocks: Vec<SlideBlock>,
+    /// The layout part this slide sat on in the Office file it came from
+    /// (`slideLayouts/slideLayout2.xml`), so an export can put it back on that
+    /// layout of the preserved design. `None` for a slide made here.
+    #[serde(
+        rename = "layoutPart",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub layout_part: Option<String>,
+    /// Whether the design's own shapes (logo, footer, rule) draw behind this
+    /// slide. Only an imported slide that said `showMasterSp="0"` is `false`.
+    #[serde(
+        rename = "masterShapes",
+        default = "default_true",
+        skip_serializing_if = "is_true"
+    )]
+    pub master_shapes: bool,
     /// Relative path of the markdown file this came from, when loaded from disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /* --------------------------------------------------------------------- doc */
@@ -415,7 +453,11 @@ pub struct Override {
     pub indent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacing: Option<Spacing>,
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "IndexMap::is_empty"
+    )]
     pub style: IndexMap<String, Json>,
 }
 
@@ -597,6 +639,16 @@ pub struct ProjectSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slide_block_tolerates_an_explicit_null_style() {
+        let block: SlideBlock = serde_json::from_value(serde_json::json!({
+            "id": "b1", "kind": "text", "md": "안녕", "x": 0.0, "y": 0.0,
+            "w": 100.0, "h": 50.0, "z": 0.0, "style": null,
+        }))
+        .expect("null style must load as an empty map, not fail");
+        assert!(block.style.is_empty());
+    }
 
     #[test]
     fn a_named_paper_needs_no_explicit_size() {

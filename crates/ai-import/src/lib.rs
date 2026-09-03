@@ -62,7 +62,7 @@ impl Warnings {
                 n => format!("{} 외 {n}개", shown.join(", ")),
             };
             self.notes.push(format!(
-                "글꼴은 모두 {}로 바꿔 열었습니다 ({list})",
+                "화면에서는 글꼴을 {}로 표시합니다 ({list}) — 내보낼 때는 원래 글꼴 이름을 유지합니다",
                 ai_format::font::FAMILY
             ));
         }
@@ -219,6 +219,23 @@ mod tests {
     fn the_old_binary_formats_say_what_to_do() {
         let error = read(b"not a zip", "old.ppt").unwrap_err();
         assert!(error.to_string().contains(".pptx"), "{error}");
+    }
+
+    #[test]
+    fn a_corrupt_office_file_says_so_in_plain_korean() {
+        let error = read(b"this is not a zip at all", "보고서.docx").unwrap_err();
+        let msg = error.to_string();
+        assert!(msg.contains("손상") || msg.contains("Office 형식"), "{msg}");
+        assert!(
+            !msg.to_lowercase().contains("central directory"),
+            "no zip jargon: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_empty_upload_is_named_as_empty() {
+        let error = read(b"", "빈.xlsx").unwrap_err();
+        assert!(error.to_string().contains("빈 파일"), "{error}");
     }
 
     #[test]

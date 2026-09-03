@@ -351,6 +351,37 @@ fn a_cell_font_size_survives_the_round_trip() {
 }
 
 #[test]
+fn vertical_alignment_and_wrapping_survive_the_round_trip() {
+    // A cell centred vertically with wrapped text — the reader used to keep only
+    // the horizontal alignment, so re-opening the sheet flattened it to the
+    // default bottom-aligned, single-line cell.
+    let ws = Workspace::new("xlsxwrap");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "정렬", true).unwrap();
+    let Items::Sheets(sheets) = &mut project.items else {
+        panic!()
+    };
+    let cell = sheets[0].cells.get_mut("A1").expect("a header cell");
+    cell.extra.insert(
+        "style".into(),
+        serde_json::json!({ "valign": "middle", "wrap": true }),
+    );
+    let project = save_project(&project).unwrap();
+
+    let read = round_trip(&project);
+    let style = read[0].cells["A1"].extra.get("style").expect("styling");
+    assert_eq!(
+        style.get("valign").and_then(|v| v.as_str()),
+        Some("middle"),
+        "vertical centring kept: {style}"
+    );
+    assert_eq!(
+        style.get("wrap").and_then(|v| v.as_bool()),
+        Some(true),
+        "text wrapping kept: {style}"
+    );
+}
+
+#[test]
 fn a_cell_at_the_sheets_own_size_carries_no_size() {
     // 11pt is what the grid already draws, so every cell in a plain workbook
     // would otherwise arrive carrying a style that changes nothing.
@@ -637,5 +668,320 @@ fn data_bars_are_reported_rather_than_painted() {
     assert!(
         warnings.iter().any(|w| w.contains("데이터 막대")),
         "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_spill_survives_the_round_trip() {
+    use ai_formula::evaluate::Cell;
+
+    let ws = Workspace::new("spill");
+    let created = create_project(ws.path(), ProjectType::Grid, "스필", false).unwrap();
+    let mut project = ai_format::project::load_project(&created.dir).unwrap();
+
+    if let Items::Sheets(sheets) = &mut project.items {
+        let mut cells: indexmap::IndexMap<String, Cell> = indexmap::IndexMap::new();
+        for (reference, text) in [("A1", "서울"), ("A2", "부산"), ("A3", "서울")] {
+            cells.insert(
+                reference.to_string(),
+                Cell {
+                    v: serde_json::json!(text),
+                    t: Some("s".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        cells.insert(
+            "C1".into(),
+            Cell {
+                f: Some("=UNIQUE(A1:A3)".into()),
+                ..Cell::default()
+            },
+        );
+        sheets[0].cells = cells;
+    }
+    // Saving recalculates, which spills the array before it is exported.
+    let project = ai_format::project::save_project(&project).unwrap();
+
+    let sheets = round_trip(&project);
+    let cells = &sheets[0].cells;
+    assert_eq!(cells["C1"].spill.as_deref(), Some("C1:C2"), "{cells:?}");
+    assert_eq!(cells["C1"].f.as_deref(), Some("=UNIQUE(A1:A3)"));
+    assert_eq!(cells["C2"].spill_from.as_deref(), Some("C1"));
+    assert_eq!(cells["C2"].v, serde_json::json!("부산"));
+    assert!(cells["C2"].f.is_none(), "a spilled cell has no formula");
+}
+
+#[test]
+fn a_spill_reference_survives_the_round_trip_as_anchorarray() {
+    use ai_formula::evaluate::Cell;
+
+    let ws = Workspace::new("spillref");
+    let created = create_project(ws.path(), ProjectType::Grid, "스필 참조", false).unwrap();
+    let mut project = ai_format::project::load_project(&created.dir).unwrap();
+
+    if let Items::Sheets(sheets) = &mut project.items {
+        let mut cells: indexmap::IndexMap<String, Cell> = indexmap::IndexMap::new();
+        for (reference, n) in [("A1", 3.0), ("A2", 1.0), ("A3", 3.0)] {
+            cells.insert(
+                reference.to_string(),
+                Cell {
+                    v: serde_json::json!(n),
+                    t: Some("n".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        cells.insert(
+            "C1".into(),
+            Cell {
+                f: Some("=UNIQUE(A1:A3)".into()),
+                ..Cell::default()
+            },
+        );
+        cells.insert(
+            "E1".into(),
+            Cell {
+                f: Some("=SUM(C1#)".into()),
+                ..Cell::default()
+            },
+        );
+        sheets[0].cells = cells;
+    }
+    let project = ai_format::project::save_project(&project).unwrap();
+
+    // On the way out, `C1#` is stored the way Excel stores it…
+    let bytes = ai_export::export(&project, ai_export::Format::Xlsx).unwrap();
+    let text = {
+        use std::io::Read;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut s = String::new();
+        zip.by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        s
+    };
+    assert!(text.contains("SUM(_xlfn.ANCHORARRAY(C1))"), "{text}");
+    assert!(
+        !text.contains("C1#"),
+        "the raw # form never reaches the file"
+    );
+
+    // …and on the way back it is `C1#` again, with the value intact.
+    let sheets = round_trip(&project);
+    let cells = &sheets[0].cells;
+    assert_eq!(cells["E1"].f.as_deref(), Some("=SUM(C1#)"));
+    assert_eq!(cells["E1"].v, serde_json::json!(4.0));
+}
+
+#[test]
+fn a_cross_sheet_named_range_survives_the_round_trip() {
+    use ai_formula::evaluate::Cell;
+    use serde_json::json;
+
+    let ws = Workspace::new("xname");
+    let created = create_project(ws.path(), ProjectType::Grid, "이름범위", false).unwrap();
+    let mut project = ai_format::project::load_project(&created.dir).unwrap();
+
+    if let Items::Sheets(sheets) = &mut project.items {
+        sheets[0].name = "실적".into();
+        for (reference, n) in [("B2", 100.0), ("B3", 250.0)] {
+            sheets[0].cells.insert(
+                reference.to_string(),
+                Cell {
+                    v: json!(n),
+                    t: Some("n".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut summary = ai_format::grid::make_sheet("요약", false);
+        summary.cells.insert(
+            "B1".into(),
+            Cell {
+                f: Some("=SUM(실적범위)".into()),
+                ..Cell::default()
+            },
+        );
+        // The name points into the other sheet — the shape FORMAT.md documents.
+        summary.names.insert("실적범위".into(), json!("실적!B2:B3"));
+        // …and, as an import would have it, the first sheet carries it too.
+        sheets[0]
+            .names
+            .insert("실적범위".into(), json!("실적!B2:B3"));
+        sheets.push(summary);
+    }
+    let project = ai_format::project::save_project(&project).unwrap();
+
+    // The name reaches the workbook exactly once, owned by the right sheet.
+    let bytes = ai_export::export(&project, ai_export::Format::Xlsx).unwrap();
+    let workbook = {
+        use std::io::Read;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut s = String::new();
+        zip.by_name("xl/workbook.xml")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        s
+    };
+    assert_eq!(
+        workbook.matches("definedName name=\"실적범위\"").count(),
+        1,
+        "{workbook}"
+    );
+    assert!(workbook.contains("'실적'!$B$2:$B$3"), "{workbook}");
+
+    // And coming back, the summary still computes rather than #NAME?.
+    let sheets = round_trip(&project);
+    let summary = sheets.iter().find(|s| s.name == "요약").expect("요약 시트");
+    assert_eq!(
+        summary.cells["B1"].v,
+        json!(350.0),
+        "{:?}",
+        summary.cells["B1"]
+    );
+}
+
+#[test]
+fn a_font_that_states_no_underline_is_not_underlined() {
+    // Apache POI writes `<u val="none"/>` on every font it emits, and Excel
+    // writes `<b val="0"/>` to switch bold off. Reading presence as "on" put a
+    // line under every cell of a real company workbook — and exported it.
+    let sheet = r#"<?xml version="1.0"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData>
+            <row r="1"><c r="A1" s="1" t="inlineStr"><is><t>없음</t></is></c>
+                       <c r="B1" s="2" t="inlineStr"><is><t>있음</t></is></c></row>
+          </sheetData>
+        </worksheet>"#;
+    let styles = r#"<?xml version="1.0"?>
+        <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <fonts count="3">
+            <font><sz val="11"/></font>
+            <font><b val="0"/><i val="false"/><u val="none"/><sz val="10"/></font>
+            <font><b/><u/><sz val="10"/></font>
+          </fonts>
+          <cellXfs count="3">
+            <xf numFmtId="0" fontId="0"/><xf numFmtId="0" fontId="1"/><xf numFmtId="0" fontId="2"/>
+          </cellXfs>
+        </styleSheet>"#;
+    let bytes = tiny_workbook(sheet, styles);
+    let package = Package::open(&bytes).unwrap();
+    let sheets = ai_import::xlsx::read(&package).unwrap();
+
+    let a1 = sheets[0].cells["A1"].extra.get("style");
+    let flag = |style: Option<&serde_json::Value>, key: &str| {
+        style.and_then(|s| s.get(key)).and_then(|v| v.as_bool())
+    };
+    assert_eq!(
+        flag(a1, "underline"),
+        None,
+        "val=none is no underline: {a1:?}"
+    );
+    assert_eq!(flag(a1, "bold"), None, "val=0 is not bold: {a1:?}");
+    assert_eq!(flag(a1, "italic"), None, "val=false is not italic: {a1:?}");
+    let b1 = sheets[0].cells["B1"].extra.get("style");
+    assert_eq!(flag(b1, "underline"), Some(true), "a bare <u/> still is");
+    assert_eq!(flag(b1, "bold"), Some(true));
+}
+
+#[test]
+fn a_dotted_light_border_keeps_its_line_and_colour_through_the_round_trip() {
+    // A company data template draws its grid with a light dotted right edge
+    // and a thin bottom edge. Both used to come out as the same dark solid
+    // line; the sheet's whole look changed on export.
+    let sheet = r#"<?xml version="1.0"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>항목</t></is></c></row></sheetData>
+        </worksheet>"#;
+    let styles = r#"<?xml version="1.0"?>
+        <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <borders count="2">
+            <border><left/><right/><top/><bottom/></border>
+            <border><left/><right style="dotted"><color rgb="FFE5E5E5"/></right><top/>
+                    <bottom style="thin"/></border>
+          </borders>
+          <cellXfs count="2"><xf numFmtId="0" borderId="0"/><xf numFmtId="0" borderId="1"/></cellXfs>
+        </styleSheet>"#;
+    let bytes = tiny_workbook(sheet, styles);
+    let package = Package::open(&bytes).unwrap();
+    let sheets = ai_import::xlsx::read(&package).unwrap();
+    let border = sheets[0].cells["A1"].extra["style"]["border"].clone();
+    assert_eq!(
+        border,
+        serde_json::json!({ "b": true, "r": { "style": "dotted", "color": "#e5e5e5" } }),
+        "a plain thin edge stays `true`; a styled one carries style and colour"
+    );
+
+    // And back out through the exporter unchanged.
+    let ws = Workspace::new("xlsxborder");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "테두리", true).unwrap();
+    let Items::Sheets(project_sheets) = &mut project.items else {
+        panic!()
+    };
+    let cell = project_sheets[0]
+        .cells
+        .get_mut("A1")
+        .expect("a header cell");
+    cell.extra
+        .insert("style".into(), serde_json::json!({ "border": border }));
+    let project = save_project(&project).unwrap();
+    let read = round_trip(&project);
+    assert_eq!(
+        read[0].cells["A1"].extra["style"]["border"],
+        serde_json::json!({ "b": true, "r": { "style": "dotted", "color": "#e5e5e5" } })
+    );
+}
+
+#[test]
+fn the_authors_font_name_rides_along_to_the_export() {
+    // The screen draws Pretendard, but a workbook written in 맑은 고딕 must ask
+    // Excel for 맑은 고딕 again on export — Pretendard is not on a company PC.
+    let sheet = r#"<?xml version="1.0"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>항목</t></is></c>
+                                <c r="B1" s="2" t="inlineStr"><is><t>기본</t></is></c></row></sheetData>
+        </worksheet>"#;
+    let styles = r#"<?xml version="1.0"?>
+        <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <fonts count="3">
+            <font><sz val="11"/><name val="Calibri"/></font>
+            <font><sz val="10"/><name val="맑은 고딕"/></font>
+            <font><sz val="10"/><name val="Pretendard"/></font>
+          </fonts>
+          <cellXfs count="3">
+            <xf numFmtId="0" fontId="0"/><xf numFmtId="0" fontId="1"/><xf numFmtId="0" fontId="2"/>
+          </cellXfs>
+        </styleSheet>"#;
+    let bytes = tiny_workbook(sheet, styles);
+    let package = Package::open(&bytes).unwrap();
+    let sheets = ai_import::xlsx::read(&package).unwrap();
+    assert_eq!(
+        sheets[0].cells["A1"].extra["style"]["font"],
+        serde_json::json!("맑은 고딕")
+    );
+    assert!(
+        sheets[0].cells["B1"].extra["style"].get("font").is_none(),
+        "the format's own font is the default and is not recorded"
+    );
+
+    let ws = Workspace::new("xlsxfont");
+    let mut project = create_project(ws.path(), ProjectType::Grid, "글꼴", true).unwrap();
+    let Items::Sheets(project_sheets) = &mut project.items else {
+        panic!()
+    };
+    let cell = project_sheets[0]
+        .cells
+        .get_mut("A1")
+        .expect("a header cell");
+    cell.extra
+        .insert("style".into(), serde_json::json!({ "font": "맑은 고딕" }));
+    let project = save_project(&project).unwrap();
+    let read = round_trip(&project);
+    assert_eq!(
+        read[0].cells["A1"].extra["style"]["font"],
+        serde_json::json!("맑은 고딕")
     );
 }

@@ -141,6 +141,25 @@ fn sum_ignores_text_count_counts_only_numbers() {
 }
 
 #[test]
+fn numeric_looking_text_in_a_range_is_ignored_but_a_direct_argument_is_coerced() {
+    // A cell holding the text "5" (a number typed with a leading apostrophe, or
+    // imported as text) is a label as far as SUM is concerned — Excel skips it —
+    // so summing the column must not silently add it in.
+    let c = cells(&[("A1", n(1.0)), ("A2", s("5")), ("A3", n(3.0))]);
+    assert_eq!(
+        eval_in("=SUM(A1:A3)", &c),
+        n(4.0),
+        "text '5' in a range is skipped"
+    );
+    // But a text argument passed directly is still coerced, as Excel does.
+    assert_eq!(
+        eval_in("=SUM(\"5\",A1)", &c),
+        n(6.0),
+        "direct text '5' is coerced"
+    );
+}
+
+#[test]
 fn if_and_iferror() {
     assert_eq!(eval_bare("=IF(1>0,\"yes\",\"no\")"), s("yes"));
     assert_eq!(eval_bare("=IF(1<0,\"yes\",\"no\")"), s("no"));

@@ -7,6 +7,7 @@ pub mod font;
 pub mod frontmatter;
 pub mod geometry;
 pub mod grid;
+pub mod history;
 pub mod ids;
 pub mod json;
 pub mod mdblocks;

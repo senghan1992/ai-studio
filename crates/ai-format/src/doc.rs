@@ -330,6 +330,7 @@ pub struct OutlineItem {
 }
 
 pub fn build_outline(blocks: &[DocBlock]) -> Vec<OutlineItem> {
+    let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     blocks
         .iter()
         .filter_map(|b| {
@@ -341,13 +342,45 @@ pub fn build_outline(blocks: &[DocBlock]) -> Vec<OutlineItem> {
             if text.is_empty() {
                 return None;
             }
+            // The anchor comes from the heading itself, not the block id: an
+            // unformatted heading gets a fresh id on every read, and an anchor
+            // that changes on every save is diff noise pretending to be data.
+            let slug = anchor_slug(&text);
+            let n = taken.entry(slug.clone()).or_insert(0);
+            *n += 1;
+            let anchor = if *n == 1 { slug } else { format!("{slug}-{n}") };
             Some(OutlineItem {
                 level,
                 text,
-                anchor: b.id.clone(),
+                anchor,
             })
         })
         .collect()
+}
+
+/// A heading's text reduced to a stable anchor: whitespace runs become one `-`,
+/// ASCII letters lowercase, and characters that would need escaping in a URL
+/// fragment or a filename are dropped. Two headings with the same text get
+/// `-2`, `-3`, … suffixes so every anchor still names exactly one heading.
+fn anchor_slug(text: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+    for c in text.trim().chars() {
+        if c.is_whitespace() || c == '-' {
+            pending_dash = !out.is_empty();
+        } else if c.is_alphanumeric() || c == '_' {
+            if pending_dash {
+                out.push('-');
+                pending_dash = false;
+            }
+            out.extend(c.to_lowercase());
+        }
+    }
+    if out.is_empty() {
+        "제목".to_string()
+    } else {
+        out
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -530,6 +563,28 @@ mod tests {
         assert_eq!(files.meta["outline"][1]["level"], json!(2));
         assert_eq!(files.meta["stats"]["blocks"], json!(3));
         assert!(files.meta["stats"]["words"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn outline_anchors_are_stable_across_saves() {
+        // An unformatted heading gets a fresh block id on every read, so the
+        // anchor must come from the heading text or every save is a diff.
+        let md = "# 핵심 성과\n\n본문\n\n## 배경\n";
+        let first = write_section(&read_section(md, None));
+        let second = write_section(&read_section(&first.md, Some(&first.meta)));
+        assert_eq!(first.meta["outline"], second.meta["outline"]);
+        assert_eq!(first.meta["outline"][0]["anchor"], json!("핵심-성과"));
+        assert_eq!(first.meta["outline"][1]["anchor"], json!("배경"));
+    }
+
+    #[test]
+    fn duplicate_headings_get_distinct_anchors() {
+        let section = read_section("# 요약\n\n## 요약\n\n### F&A: 100%!\n", None);
+        let outline = build_outline(&section.blocks);
+        assert_eq!(outline[0].anchor, "요약");
+        assert_eq!(outline[1].anchor, "요약-2");
+        // Punctuation drops out, ASCII lowercases, words join with one dash.
+        assert_eq!(outline[2].anchor, "fa-100");
     }
 
     #[test]

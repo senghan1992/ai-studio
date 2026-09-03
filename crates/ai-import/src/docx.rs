@@ -53,6 +53,7 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Document> {
         numbering: &numbering,
         notes: &notes,
         pending_notes: std::cell::RefCell::new(Vec::new()),
+        inline: std::cell::RefCell::new(InlineBase::default()),
         warnings,
         assets: Vec::new(),
     };
@@ -100,6 +101,19 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Document> {
             sections.len(),
             &running,
         ));
+    }
+
+    // Word's model: a section that declares no header or footer of its own
+    // continues the previous section's. A policy document defines the page
+    // number once, up front — without this, every section after the first
+    // lost it on the way in.
+    for i in 1..sections.len() {
+        if sections[i].page.header.is_none() {
+            sections[i].page.header = sections[i - 1].page.header.clone();
+        }
+        if sections[i].page.footer.is_none() {
+            sections[i].page.footer = sections[i - 1].page.footer.clone();
+        }
     }
 
     Ok(Document {
@@ -449,6 +463,9 @@ struct DocCtx<'a> {
     /// Notes referred to since the last section break, in order, waiting to be
     /// written under the section that referred to them.
     pending_notes: std::cell::RefCell<Vec<String>>,
+    /// The paragraph being read: what its runs' colour and family are measured
+    /// against, so only a run unlike the rest of its paragraph is marked inline.
+    inline: std::cell::RefCell<InlineBase>,
     warnings: &'a mut Warnings,
     assets: Vec<Asset>,
 }
@@ -461,12 +478,33 @@ impl DocCtx<'_> {
             .and_then(|s| s.attr("val"))
             .unwrap_or("");
 
-        // A paragraph holding only a picture is an image block.
-        if let Some(block) = self.image_block(p) {
-            return Some(block);
-        }
-
+        // Runs that differ from the paragraph in colour or family are marked
+        // inline; the paragraph-wide colour and family go into the override.
+        let runs: Vec<&Node> = p.children_named("r").collect();
+        self.inline.replace(InlineBase {
+            active: true,
+            color: uniform_colour(&runs),
+            font: uniform_font(&runs),
+        });
         let text = self.runs_to_markdown(p);
+        self.inline.replace(InlineBase::default());
+
+        // A paragraph holding only a picture is an image block. But a picture
+        // often sits beside text — an inline icon, or a figure with its caption
+        // typed on the same line. Taking the image path unconditionally dropped
+        // that text, so we only do it when the paragraph has none of its own;
+        // otherwise the image markdown is folded into the text below.
+        let image_block = self.image_block(p);
+        if let Some(block) = &image_block {
+            if text.trim().is_empty() {
+                return Some(block.clone());
+            }
+        }
+        let image_md = image_block.map(|b| b.md);
+        let text = match image_md {
+            Some(img) => format!("{img} {text}"),
+            None => text,
+        };
         let level = self.styles.heading_level(style_id);
         let list = self.list_marker(properties, style_id);
 
@@ -584,18 +622,11 @@ impl DocCtx<'_> {
         // emphasis: a paragraph in 18px grey is formatting, and marking each run
         // with `**` instead would be wrong.
         let runs: Vec<&Node> = p.children_named("r").collect();
-        let colors: Vec<String> = runs
-            .iter()
-            .filter_map(|r| r.path(&["rPr", "color"]))
-            .filter_map(|c| c.attr("val"))
-            .filter_map(crate::ooxml::color)
-            .collect();
-        let uniform_colour = !colors.is_empty()
-            && colors.len() == runs.len()
-            && colors.iter().all(|c| *c == colors[0])
-            && colors[0] != "#000000";
-        if uniform_colour {
-            out.style.insert("color".into(), json!(colors[0]));
+        if let Some(colour) = uniform_colour(&runs) {
+            out.style.insert("color".into(), json!(colour));
+        }
+        if let Some(font) = uniform_font(&runs) {
+            out.style.insert("font".into(), json!(font));
         }
         let sizes: Vec<f64> = runs
             .iter()
@@ -626,7 +657,10 @@ impl DocCtx<'_> {
         } else {
             ai_format::doc::BODY_PX
         };
-        if let Some(size) = size.map(|s| s.round()).filter(|s| *s != expected.round()) {
+        if let Some(size) = size
+            .map(|s| ai_format::font::px_for_pt(ai_format::font::pt_for_px(s)))
+            .filter(|s| *s != expected.round())
+        {
             out.style.insert("fontSize".into(), json!(size));
         }
 
@@ -801,6 +835,30 @@ impl DocCtx<'_> {
             (true, false) => core = format!("**{core}**"),
             (false, true) => core = format!("*{core}*"),
             (false, false) => {}
+        }
+
+        // A colour or family this run has and its paragraph does not — the one
+        // burgundy lead-in of a grey paragraph. The paragraph-wide case is the
+        // override's; a black run among default (black) runs is not a colour.
+        let base = self.inline.borrow();
+        if base.active {
+            let own_colour = run_colour(r).filter(|c| {
+                base.color.as_deref() != Some(c.as_str())
+                    && (base.color.is_some() || c != "#000000")
+            });
+            let own_font = run_font(r)
+                .filter(|f| !f.contains(['"', '<', '>', ';']))
+                .filter(|f| base.font.as_deref() != Some(f.as_str()));
+            let mut css: Vec<String> = Vec::new();
+            if let Some(c) = own_colour {
+                css.push(format!("color:{c}"));
+            }
+            if let Some(f) = own_font {
+                css.push(format!("font-family:{f}"));
+            }
+            if !css.is_empty() {
+                core = format!("<span style=\"{}\">{core}</span>", css.join(";"));
+            }
         }
         format!("{leading}{core}{trailing}")
     }
@@ -1009,6 +1067,82 @@ fn cell_format(tc: &Node) -> Option<CellFormat> {
         color: None,
     };
     (!format.is_empty()).then_some(format)
+}
+
+/// What a paragraph's runs are measured against when marking one inline.
+#[derive(Default)]
+struct InlineBase {
+    active: bool,
+    color: Option<String>,
+    font: Option<String>,
+}
+
+/// A run's stated colour, as `#rrggbb`. `auto` and theme colours are not stated.
+fn run_colour(r: &Node) -> Option<String> {
+    r.path(&["rPr", "color"])
+        .and_then(|c| c.attr("val"))
+        .and_then(crate::ooxml::color)
+}
+
+/// A run's family, when it names a real one. Korean documents put it in
+/// `eastAsia`; `ascii` is the Latin fallback beside it.
+fn run_font(r: &Node) -> Option<String> {
+    r.path(&["rPr", "rFonts"])
+        .and_then(|f| f.attr("eastAsia").or_else(|| f.attr("ascii")))
+        .map(str::trim)
+        .filter(|f| ai_format::font::is_substitution(f))
+        .map(str::to_string)
+}
+
+/// Non-blank characters in a run, so a colour's weight is the text it covers.
+fn run_weight(r: &Node) -> usize {
+    r.descendants("t")
+        .iter()
+        .map(|t| t.all_text().chars().filter(|c| !c.is_whitespace()).count())
+        .sum::<usize>()
+        .max(1)
+}
+
+/// The value most of a paragraph's text carries, when every run states one.
+///
+/// A paragraph's colour is formatting only if it applies to the whole
+/// paragraph, so a run left at the default must veto it — otherwise that run
+/// would take the paragraph's colour on screen. When every run does state a
+/// colour, the one covering the most characters is the paragraph's and the
+/// minority runs are marked inline.
+fn dominant_stated<F>(runs: &[&Node], stated: F) -> Option<String>
+where
+    F: Fn(&Node) -> Option<String>,
+{
+    if runs.is_empty() {
+        return None;
+    }
+    let mut weights: Vec<(String, usize)> = Vec::new();
+    for run in runs {
+        let value = stated(run)?;
+        match weights.iter_mut().find(|(v, _)| *v == value) {
+            Some((_, w)) => *w += run_weight(run),
+            None => weights.push((value, run_weight(run))),
+        }
+    }
+    let mut best: Option<(String, usize)> = None;
+    for (value, weight) in weights {
+        if best.as_ref().is_none_or(|(_, w)| weight > *w) {
+            best = Some((value, weight));
+        }
+    }
+    best.map(|(value, _)| value)
+}
+
+/// The paragraph's colour — see `dominant_stated`. Plain black is the default
+/// and not worth an override.
+fn uniform_colour(runs: &[&Node]) -> Option<String> {
+    dominant_stated(runs, run_colour).filter(|c| c != "#000000")
+}
+
+/// The paragraph's family — see `dominant_stated`.
+fn uniform_font(runs: &[&Node]) -> Option<String> {
+    dominant_stated(runs, run_font)
 }
 
 fn has_left_border(properties: &Node) -> bool {
