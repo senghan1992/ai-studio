@@ -469,6 +469,9 @@ function Block({
     color: style.color,
     lineHeight: style.lineHeight,
     fontStyle: style.italic ? 'italic' : undefined,
+    // Paragraph spacing an imported slide states (px); unset keeps the editor's.
+    '--space-before': style.spaceBefore != null ? `${style.spaceBefore}px` : undefined,
+    '--space-after': style.spaceAfter != null ? `${style.spaceAfter}px` : undefined,
     display: 'flex',
     flexDirection: 'column',
     justifyContent: style.valign === 'middle' ? 'center' : style.valign === 'bottom' ? 'flex-end' : 'flex-start',

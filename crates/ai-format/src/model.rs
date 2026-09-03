@@ -241,6 +241,10 @@ pub struct Slide {
         skip_serializing_if = "is_true"
     )]
     pub master_shapes: bool,
+    /// A slide the author hid (`show="0"`): kept, editable, and hidden again on
+    /// export — it must not turn up in the presented deck.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
     /// Relative path of the markdown file this came from, when loaded from disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -252,6 +256,10 @@ fn default_true() -> bool {
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /* --------------------------------------------------------------------- doc */

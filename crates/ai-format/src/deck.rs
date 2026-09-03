@@ -148,6 +148,11 @@ pub fn read_slide(md: &str, layout: Option<&Json>) -> Slide {
             .get("masterShapes")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        hidden: split
+            .meta
+            .get("hidden")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         file: None,
     }
 }
@@ -212,6 +217,9 @@ pub fn write_slide(slide: &Slide) -> SlideFiles {
     }
     if !s.master_shapes {
         meta.insert("masterShapes".into(), json!(false));
+    }
+    if s.hidden {
+        meta.insert("hidden".into(), json!(true));
     }
     if !s.notes.is_empty() {
         meta.insert("notes".into(), json!(s.notes));
@@ -376,6 +384,7 @@ pub fn normalize_slide(slide: &Slide) -> Slide {
         blocks,
         layout_part: slide.layout_part.clone(),
         master_shapes: slide.master_shapes,
+        hidden: slide.hidden,
         file: slide.file.clone(),
     }
 }
@@ -555,6 +564,7 @@ pub fn make_slide(layout_name: &str, title: Option<&str>, index: usize) -> Slide
         blocks,
         layout_part: None,
         master_shapes: true,
+        hidden: false,
         file: None,
     }
 }

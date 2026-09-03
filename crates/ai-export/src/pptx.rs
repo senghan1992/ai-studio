@@ -127,6 +127,7 @@ fn paragraph_xml(
     p: &Paragraph,
     color: &str,
     line_height: Option<f64>,
+    space: (Option<f64>, Option<f64>),
     links: &mut Vec<String>,
 ) -> String {
     let mut props = format!("<a:pPr algn=\"{}\" lnSpcReduction=\"0\"", p.align);
@@ -150,6 +151,16 @@ fn paragraph_xml(
             "<a:lnSpc><a:spcPct val=\"{}\"/></a:lnSpc>",
             (lines * 100_000.0).round() as i64
         ));
+    }
+    // Space before/after a paragraph, in hundredths of a point; zero is the
+    // default and is left unsaid.
+    for (tag, px) in [("spcBef", space.0), ("spcAft", space.1)] {
+        if let Some(px) = px.filter(|v| *v > 0.05) {
+            props.push_str(&format!(
+                "<a:{tag}><a:spcPts val=\"{}\"/></a:{tag}>",
+                (px * 0.75 * 100.0).round() as i64
+            ));
+        }
     }
     match p.bullet {
         None => props.push_str("<a:buNone/>"),
@@ -337,16 +348,20 @@ fn text_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String 
     }
     let color = style_str(&block.style, "color").unwrap_or("#1f2937");
     let line_height = style_num(&block.style, "lineHeight");
+    let space = (
+        style_num(&block.style, "spaceBefore"),
+        style_num(&block.style, "spaceAfter"),
+    );
     let anchor = anchor_attr(&block.style);
 
     let body: String = paragraphs
         .iter()
-        .map(|p| paragraph_xml(p, color, line_height, links))
+        .map(|p| paragraph_xml(p, color, line_height, space, links))
         .collect();
     format!(
         "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
-<p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"18000\" tIns=\"18000\" rIns=\"18000\" bIns=\"18000\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody></p:sp>",
+<p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"18000\" tIns=\"18000\" rIns=\"18000\" bIns=\"18000\"/><a:lstStyle/>{body}</p:txBody></p:sp>",
         xfrm(block)
     )
 }
@@ -437,13 +452,17 @@ fn shape_text_body(block: &SlideBlock, links: &mut Vec<String>) -> String {
     }
     let color = style_str(&block.style, "color").unwrap_or("#1f2937");
     let line_height = style_num(&block.style, "lineHeight");
+    let space = (
+        style_num(&block.style, "spaceBefore"),
+        style_num(&block.style, "spaceAfter"),
+    );
     let anchor = anchor_attr(&block.style);
     let body: String = paragraphs
         .iter()
-        .map(|p| paragraph_xml(p, color, line_height, links))
+        .map(|p| paragraph_xml(p, color, line_height, space, links))
         .collect();
     format!(
-        "<p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"45720\" tIns=\"45720\" rIns=\"45720\" bIns=\"45720\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody>"
+        "<p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"45720\" tIns=\"45720\" rIns=\"45720\" bIns=\"45720\"/><a:lstStyle/>{body}</p:txBody>"
     )
 }
 
@@ -1037,12 +1056,15 @@ fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets, on_design: bool) -
         String::new()
     };
 
-    // An imported slide that hid its master's shapes says so again.
-    let show = if on_design && !slide.master_shapes {
-        " showMasterSp=\"0\""
-    } else {
-        ""
-    };
+    // An imported slide that hid its master's shapes says so again, and a
+    // hidden slide stays hidden — it is part of the file, not of the show.
+    let mut show = String::new();
+    if on_design && !slide.master_shapes {
+        show.push_str(" showMasterSp=\"0\"");
+    }
+    if slide.hidden {
+        show.push_str(" show=\"0\"");
+    }
     let xml = format!(
         "<p:sld xmlns:p=\"{NS_P}\" xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\"{show}><p:cSld>{background}\
 <p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\

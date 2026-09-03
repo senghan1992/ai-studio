@@ -54,6 +54,36 @@ struct TextDefaults {
     align: Option<String>,
     /// Line spacing as a multiplier, from `lnSpc/spcPct`.
     line: Option<f64>,
+    /// Space before and after each paragraph, from `spcBef`/`spcAft`.
+    space_before: Option<Spacing>,
+    space_after: Option<Spacing>,
+}
+
+/// Paragraph spacing as PowerPoint states it: a share of a line, or points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spacing {
+    Lines(f64),
+    Points(f64),
+}
+
+impl Spacing {
+    fn read(node: Option<&Node>) -> Option<Spacing> {
+        let node = node?;
+        if let Some(pct) = node.child("spcPct").and_then(|n| n.attr_i64("val")) {
+            return Some(Spacing::Lines(pct as f64 / 100_000.0));
+        }
+        node.child("spcPts")
+            .and_then(|n| n.attr_i64("val"))
+            .map(|pts| Spacing::Points(pts as f64 / 100.0))
+    }
+
+    /// In px, for text of the given size: a line is the font's own height.
+    fn px(self, size_px: f64) -> f64 {
+        match self {
+            Spacing::Lines(lines) => lines * size_px * ai_format::deck::SINGLE_SPACING,
+            Spacing::Points(points) => points / 0.75,
+        }
+    }
 }
 
 impl TextDefaults {
@@ -67,6 +97,8 @@ impl TextDefaults {
         self.color = self.color.clone().or_else(|| weaker.color.clone());
         self.align = self.align.clone().or_else(|| weaker.align.clone());
         self.line = self.line.or(weaker.line);
+        self.space_before = self.space_before.or(weaker.space_before);
+        self.space_after = self.space_after.or(weaker.space_after);
         self
     }
 
@@ -77,6 +109,8 @@ impl TextDefaults {
             && self.color.is_none()
             && self.align.is_none()
             && self.line.is_none()
+            && self.space_before.is_none()
+            && self.space_after.is_none()
     }
 }
 
@@ -144,6 +178,8 @@ fn defaults_from_props(properties: &Node, theme: &Theme) -> TextDefaults {
             .and_then(align_name)
             .map(str::to_string),
         line: line_spacing(properties),
+        space_before: Spacing::read(properties.child("spcBef")),
+        space_after: Spacing::read(properties.child("spcAft")),
     }
 }
 
@@ -708,6 +744,7 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Deck> {
             blocks,
             layout_part,
             master_shapes,
+            hidden: sld.attr("show").is_some_and(|v| v == "0"),
             file: None,
         });
     }
@@ -2295,6 +2332,8 @@ fn text_style(
         color: dominant_run_color(body, theme),
         align: None,
         line: None,
+        space_before: None,
+        space_after: None,
     };
     let resolved = from_run.under(&from_paragraph).under(&inherited);
 
@@ -2311,6 +2350,21 @@ fn text_style(
         .map(|v| v as f64 / 100_000.0)
         .unwrap_or(0.0);
 
+    // Paragraph spacing, written even when it is zero: PowerPoint's default is
+    // none, the editor's is a little, and an imported body must not gain gaps.
+    let base_px = resolved.size.map(|s| s * scale).unwrap_or(24.0);
+    let before = resolved.space_before.map_or(0.0, |s| s.px(base_px));
+    let after = resolved.space_after.map_or(0.0, |s| s.px(base_px));
+    style.insert(
+        "spaceBefore".to_string(),
+        json!((before * 10.0).round() / 10.0),
+    );
+    if after > 0.05 {
+        style.insert(
+            "spaceAfter".to_string(),
+            json!((after * 10.0).round() / 10.0),
+        );
+    }
     if let Some(size) = resolved.size {
         let size = size * scale;
         let size = if list_level > 0 {

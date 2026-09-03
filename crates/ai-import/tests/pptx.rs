@@ -1460,3 +1460,88 @@ fn a_numbered_title_typed_as_text_stays_text_through_the_export() {
         block.style.get("weight")
     );
 }
+
+#[test]
+fn a_hidden_slide_stays_hidden_and_a_hairline_keeps_its_height() {
+    // `show="0"` is a slide the author hid; it must not appear in the exported
+    // show. And a 2px rule must stay 2px, not swell to a grabbable bar.
+    let deck = Builder::new()
+        .slide_attrs(r#" show="0""#)
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Rule"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3963000" cy="18000"/></a:xfrm>
+                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="6B1F2A"/></a:solidFill></p:spPr>
+               </p:sp>"#,
+        )
+        .build();
+    let slides = read_deck(&deck);
+    assert!(slides[0].hidden, "show=0 is hidden");
+    assert_eq!(slides[0].blocks[0].h, 2.0, "hairline height kept");
+
+    let ws = Workspace::new("pptxhidden");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "숨김", false).unwrap();
+    project.items = Items::Slides(slides.clone());
+    let project = save_project(&project).unwrap();
+    let exported = export(&project, Format::Pptx).unwrap();
+    let xml = String::from_utf8_lossy(
+        Package::open(&exported)
+            .unwrap()
+            .bytes("ppt/slides/slide1.xml")
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(xml.contains("show=\"0\""), "{xml}");
+    assert!(
+        !xml.contains("normAutofit"),
+        "no autofit the author did not ask for: {xml}"
+    );
+    assert!(read_deck(&exported)[0].hidden);
+}
+
+#[test]
+fn paragraph_spacing_from_the_master_is_kept_and_written_back() {
+    // Office's default body style puts 20% of a line before every bullet. Text
+    // exported as a plain text box has to say so itself or the bullets pack
+    // tight.
+    let deck = Builder::new()
+        .master_styles(
+            "<p:txStyles><p:titleStyle><a:lvl1pPr><a:buNone/></a:lvl1pPr></p:titleStyle>\
+             <p:bodyStyle><a:lvl1pPr><a:spcBef><a:spcPct val=\"20000\"/></a:spcBef><a:buChar char=\"•\"/><a:defRPr sz=\"2400\"/></a:lvl1pPr></p:bodyStyle>\
+             <p:otherStyle><a:lvl1pPr/></p:otherStyle></p:txStyles>",
+        )
+        .slide(&placeholder(
+            "body",
+            "<a:bodyPr/><a:p><a:r><a:t>첫 항목</a:t></a:r></a:p><a:p><a:r><a:t>둘째 항목</a:t></a:r></a:p>",
+        ))
+        .build();
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    // 24pt = 32px; 20% of a 1.2 line = 7.7px.
+    assert_eq!(
+        block.style["spaceBefore"],
+        serde_json::json!(7.7),
+        "{:?}",
+        block.style
+    );
+
+    let ws = Workspace::new("pptxspacing");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "간격", false).unwrap();
+    project.items = Items::Slides(slides.clone());
+    let project = save_project(&project).unwrap();
+    let exported = export(&project, Format::Pptx).unwrap();
+    let xml = String::from_utf8_lossy(
+        Package::open(&exported)
+            .unwrap()
+            .bytes("ppt/slides/slide1.xml")
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(
+        xml.contains("<a:spcBef><a:spcPts val=\"578\"/></a:spcBef>"),
+        "{xml}"
+    );
+    assert_eq!(
+        read_deck(&exported)[0].blocks[0].style["spaceBefore"],
+        serde_json::json!(7.7)
+    );
+}

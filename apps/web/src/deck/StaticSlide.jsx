@@ -107,6 +107,8 @@ function BlockContent({ block, scale, folder, canvasBg }) {
         textAlign: style.align,
         color: style.color,
         lineHeight: style.lineHeight ?? 1.45,
+        '--space-before': style.spaceBefore != null ? `${style.spaceBefore * scale}px` : undefined,
+        '--space-after': style.spaceAfter != null ? `${style.spaceAfter * scale}px` : undefined,
         height: '100%',
         display: 'flex',
         flexDirection: 'column',

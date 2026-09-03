@@ -166,10 +166,14 @@ pub fn auto_layout(index: usize, total: usize, canvas: &Canvas) -> Box {
     }
 }
 
-/// Clamp a box inside the canvas but never below a usable minimum size.
+/// Clamp a box inside the canvas and to at least one pixel a side.
+///
+/// The minimum used to be 40×28 so a block stayed easy to grab, but a slide's
+/// hairline rules are 2px tall and came in as 28px bars behind the text. The
+/// editor keeps its own grab affordances; the file keeps the author's sizes.
 pub fn clamp_box(b: Box, canvas: &Canvas) -> Box {
-    let w = js_round(b.w).max(40.0).min(canvas.w);
-    let h = js_round(b.h).max(28.0).min(canvas.h);
+    let w = js_round(b.w).max(1.0).min(canvas.w);
+    let h = js_round(b.h).max(1.0).min(canvas.h);
     Box {
         x: js_round(b.x).max(0.0).min(canvas.w - w),
         y: js_round(b.y).max(0.0).min(canvas.h - h),
@@ -229,7 +233,7 @@ mod tests {
         assert_eq!(clamp_box(b(2000.0, 0.0, 100.0, 100.0), &c).x, 1180.0);
         // A box smaller than the minimum grows rather than vanishing.
         let tiny = clamp_box(b(0.0, 0.0, 1.0, 1.0), &c);
-        assert_eq!((tiny.w, tiny.h), (40.0, 28.0));
+        assert_eq!((tiny.w, tiny.h), (1.0, 1.0));
     }
 
     #[test]
