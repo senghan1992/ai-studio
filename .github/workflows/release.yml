@@ -1,35 +1,70 @@
 name: release
 
-# Builds the downloadable app for every desktop OS, plus the headless server.
-# Tag a version (`v0.1.0`) to publish, or run it by hand to check the matrix.
+# Builds the downloadable desktop app plus the headless server and attaches
+# them to a draft GitHub release.
+#
+#   git tag v0.1.0 && git push origin v0.1.0     → Windows build, draft release
+#   Actions → release → Run workflow              → pick platforms; give a tag to
+#                                                    publish, leave it empty to
+#                                                    only build artifacts
+#
+# Windows is the default for now: it is what the first users run, and the
+# other OSes have never been exercised. Pick `all` in the manual run (or
+# change the default below) once they are wanted. The repo is public, so
+# Actions minutes are free on every runner.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Which desktop builds to make'
+        type: choice
+        default: windows
+        options: [windows, all]
+      tag:
+        description: 'Release tag to create/attach to (e.g. v0.1.0). Empty = build only.'
+        type: string
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
+  # Turns the trigger + inputs into the build matrix, so one workflow serves
+  # both "Windows only" and "every OS".
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          PLATFORMS: ${{ inputs.platforms || 'windows' }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        run: |
+          windows='{"label":"Windows (x64)","os":"windows-latest","target":"x86_64-pc-windows-msvc"}'
+          mac_arm='{"label":"macOS (Apple silicon)","os":"macos-latest","target":"aarch64-apple-darwin"}'
+          mac_x64='{"label":"macOS (Intel)","os":"macos-latest","target":"x86_64-apple-darwin"}'
+          linux='{"label":"Linux (x64)","os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}'
+          if [ "$PLATFORMS" = "all" ]; then
+            include="[$windows,$mac_arm,$mac_x64,$linux]"
+          else
+            include="[$windows]"
+          fi
+          echo "matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "platforms=$PLATFORMS tag=${TAG:-<none>}"
+
   desktop:
+    needs: plan
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - label: macOS (Apple silicon)
-            os: macos-latest
-            target: aarch64-apple-darwin
-          - label: macOS (Intel)
-            os: macos-latest
-            target: x86_64-apple-darwin
-          - label: Windows (x64)
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - label: Linux (x64)
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -49,12 +84,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      # Must match the `wasm-bindgen` crate in Cargo.lock, or the CLI refuses
+      # to run ("rust crate version mismatch").
       - uses: jetli/wasm-bindgen-action@v0.2.0
         with:
-          version: latest
+          version: '0.2.127'
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -63,26 +102,30 @@ jobs:
       - name: build web
         run: npm run build:web
 
+      # No `tauriScript`: the action installs `@tauri-apps/cli` itself. The
+      # `cargo tauri` binary is not on the runners.
       - name: build desktop app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: crates/ai-studio-app
-          tauriScript: cargo tauri
           args: --target ${{ matrix.target }}
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: AI Studio ${{ github.ref_name }}
+          tagName: ${{ needs.plan.outputs.tag }}
+          releaseName: AI Studio ${{ needs.plan.outputs.tag }}
           releaseBody: |
             OS에 맞는 파일을 내려받아 실행하세요. 별도 설치나 런타임이 필요하지 않습니다.
 
             | OS | 파일 |
             |---|---|
-            | Windows | `.msi` 또는 `.exe` |
+            | Windows | `.msi` 또는 `-setup.exe` |
             | macOS | `.dmg` |
             | Linux | `.AppImage`, `.deb`, `.rpm` |
 
-            서버로 쓰려면 `ai-studio-serve` 바이너리를 내려받아
+            Windows는 코드 서명이 없어 처음 실행 시 SmartScreen 경고가 뜹니다.
+            "추가 정보 → 실행"을 누르면 됩니다.
+
+            서버로 쓰려면 `ai-studio-serve-*` 바이너리를 내려받아
             `ai-studio-serve --workspace ./documents --open` 을 실행하세요.
           releaseDraft: true
           includeUpdaterJson: false
@@ -110,8 +153,9 @@ jobs:
           path: out/*
 
       - name: attach server to the release
-        if: github.ref_type == 'tag'
+        if: needs.plan.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.plan.outputs.tag }}
           files: out/*
           draft: true

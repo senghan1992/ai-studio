@@ -41,12 +41,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # Must match the `wasm-bindgen` crate in Cargo.lock.
       - uses: jetli/wasm-bindgen-action@v0.2.0
         with:
-          version: latest
+          version: '0.2.127'
+      # 22: `node --test` with glob patterns (package.json test:web) needs ≥21.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
