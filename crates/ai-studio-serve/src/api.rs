@@ -2,16 +2,18 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use serde::Deserialize;
 
+use self::extract::{Json, Query};
+
 use ai_core::{
-    CreateRequest, Error, ImportRequest, ProjectPayload, RecalcRequest, RenameRequest, Studio,
-    UploadAssetRequest,
+    CreateRequest, Error, ImportRequest, ProjectPayload, RecalcRequest, RenameRequest,
+    RestoreRequest, Studio, UploadAssetRequest,
 };
 
 pub type Shared = Arc<Studio>;
@@ -42,6 +44,74 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
+/// JSON body and query extractors that reject in Korean, JSON-shaped like every
+/// other error the client sees. Axum's own rejections are English plain text,
+/// which would surface untranslated the moment a request body is malformed.
+mod extract {
+    use axum::extract::rejection::JsonRejection;
+    use axum::extract::{FromRequest, FromRequestParts, Request};
+    use axum::http::request::Parts;
+    use axum::response::{IntoResponse, Response};
+    use serde::de::DeserializeOwned;
+
+    use ai_core::Error;
+
+    use super::ApiError;
+
+    pub struct Json<T>(pub T);
+
+    impl<T, S> FromRequest<S> for Json<T>
+    where
+        T: DeserializeOwned,
+        S: Send + Sync,
+    {
+        type Rejection = ApiError;
+
+        async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+            match axum::Json::<T>::from_request(req, state).await {
+                Ok(axum::Json(value)) => Ok(Json(value)),
+                Err(rejection) => {
+                    let message = match rejection {
+                        JsonRejection::MissingJsonContentType(_) => {
+                            "요청 형식이 JSON이 아닙니다 (Content-Type: application/json 필요)"
+                        }
+                        JsonRejection::JsonDataError(_) => {
+                            "요청 본문에 필요한 항목이 없거나 형식이 맞지 않습니다"
+                        }
+                        _ => "요청 본문을 JSON으로 해석할 수 없습니다 — 형식이 올바른지 확인해 주세요",
+                    };
+                    Err(ApiError(Error::BadRequest(message.into())))
+                }
+            }
+        }
+    }
+
+    impl<T: serde::Serialize> IntoResponse for Json<T> {
+        fn into_response(self) -> Response {
+            axum::Json(self.0).into_response()
+        }
+    }
+
+    pub struct Query<T>(pub T);
+
+    impl<T, S> FromRequestParts<S> for Query<T>
+    where
+        T: DeserializeOwned,
+        S: Send + Sync,
+    {
+        type Rejection = ApiError;
+
+        async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+            match axum::extract::Query::<T>::from_request_parts(parts, state).await {
+                Ok(axum::extract::Query(value)) => Ok(Query(value)),
+                Err(_) => Err(ApiError(Error::BadRequest(
+                    "요청 파라미터가 올바르지 않습니다".into(),
+                ))),
+            }
+        }
+    }
+}
+
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/health", get(health))
@@ -55,6 +125,8 @@ pub fn routes() -> Router<Shared> {
                 .delete(delete_project),
         )
         .route("/projects/{folder}/files", get(project_files))
+        .route("/projects/{folder}/history", get(history))
+        .route("/projects/{folder}/restore", post(restore))
         .route("/projects/{folder}/file", get(read_file))
         .route("/projects/{folder}/digest", get(digest))
         .route("/projects/{folder}/preview", post(preview))
@@ -127,6 +199,21 @@ async fn project_files(
     Path(folder): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(studio.project_files(&folder)?))
+}
+
+async fn history(
+    State(studio): State<Shared>,
+    Path(folder): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(studio.history(&folder)?))
+}
+
+async fn restore(
+    State(studio): State<Shared>,
+    Path(folder): Path<String>,
+    Json(request): Json<RestoreRequest>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(studio.restore(&folder, &request.snapshot)?))
 }
 
 #[derive(Deserialize)]

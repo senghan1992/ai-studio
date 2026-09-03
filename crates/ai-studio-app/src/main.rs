@@ -62,6 +62,8 @@ fn main() {
             commands::delete_project,
             commands::project_files,
             commands::read_file,
+            commands::history,
+            commands::restore_snapshot,
             commands::digest,
             commands::list_assets,
             commands::upload_asset,

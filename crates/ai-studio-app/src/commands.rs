@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tauri::State;
 
 use ai_core::{
-    AssetEntry, AssetList, CreateRequest, FileBody, FileList, Health, ImportRequest,
+    AssetEntry, AssetList, CreateRequest, FileBody, FileList, Health, HistoryList, ImportRequest,
     ImportResponse, ProjectList, ProjectPayload, RecalcRequest, RecalcResponse, Studio,
     UploadAssetRequest,
 };
@@ -84,6 +84,20 @@ pub fn project_files(studio: State<'_, Studio>, folder: String) -> Result<FileLi
 #[tauri::command]
 pub fn read_file(studio: State<'_, Studio>, folder: String, path: String) -> Result<FileBody> {
     Ok(studio.read_file(&folder, &path)?)
+}
+
+#[tauri::command]
+pub fn history(studio: State<'_, Studio>, folder: String) -> Result<HistoryList> {
+    Ok(studio.history(&folder)?)
+}
+
+#[tauri::command]
+pub fn restore_snapshot(
+    studio: State<'_, Studio>,
+    folder: String,
+    snapshot: String,
+) -> Result<ProjectPayload> {
+    Ok(studio.restore(&folder, &snapshot)?)
 }
 
 #[tauri::command]

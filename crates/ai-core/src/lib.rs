@@ -26,6 +26,11 @@ pub enum Error {
     BadRequest(String),
     #[error("문서를 찾을 수 없습니다: {0}")]
     NotFound(String),
+    /// The document changed on disk after the client loaded it. Saving anyway
+    /// would silently discard someone else's work — an agent's, another tab's —
+    /// so the save is refused and the client decides.
+    #[error("다른 곳에서 문서가 수정되었습니다 — {0}")]
+    Conflict(String),
     #[error(transparent)]
     Project(#[from] fsproj::Error),
     #[error(transparent)]
@@ -42,6 +47,7 @@ impl Error {
         match self {
             Error::BadRequest(_) => 400,
             Error::NotFound(_) => 404,
+            Error::Conflict(_) => 409,
             Error::Project(fsproj::Error::Escape(_)) => 400,
             Error::Project(fsproj::Error::NotAProject(_)) => 400,
             Error::Project(fsproj::Error::UnknownType(_)) => 400,
@@ -71,12 +77,26 @@ pub struct ProjectPayload {
     pub folder: String,
     #[serde(default)]
     pub manifest: ManifestPayload,
+    /// The `manifest.modified` the client loaded or last saved. When present,
+    /// the save is refused with 409 if the disk has moved past it. Omitting it
+    /// keeps the old overwrite behaviour — an agent that just wants to write
+    /// does not have to read first.
+    #[serde(
+        default,
+        rename = "baseModified",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub base_modified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slides: Option<Vec<Slide>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sections: Option<Vec<Section>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheets: Option<Vec<Sheet>>,
+    /// What could not be read as written — a broken layout JSON replaced by
+    /// defaults, for the editor to show before an autosave makes it permanent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// The manifest as the API exposes it: the typed fields plus the item list under
@@ -127,6 +147,8 @@ impl ProjectPayload {
 
         ProjectPayload {
             project_type: project.project_type.as_str().to_string(),
+            base_modified: None,
+            warnings: Vec::new(),
             dir: project.dir.to_string_lossy().into_owned(),
             folder: project
                 .dir
@@ -151,22 +173,29 @@ impl ProjectPayload {
 
     /// Rebuild a `Project` from what a client sent.
     ///
-    /// `base` is the manifest already on disk: the folder is authoritative for
+    /// `base` is the project already on disk: the folder is authoritative for
     /// where the project lives, and for `id` and `created`, which a client has
-    /// no business inventing.
-    fn into_project(
-        self,
-        dir: PathBuf,
-        project_type: ProjectType,
-        base: Manifest,
-    ) -> Result<Project> {
+    /// no business inventing. A payload that omits its items array altogether —
+    /// a title-only PATCH-style save — keeps the items on disk; sending the
+    /// array (empty included) replaces them.
+    fn into_project(self, dir: PathBuf, project_type: ProjectType, base: Project) -> Project {
         let items = match project_type {
-            ProjectType::Deck => Items::Slides(self.slides.unwrap_or_default()),
-            ProjectType::Doc => Items::Sections(self.sections.unwrap_or_default()),
-            ProjectType::Grid => Items::Sheets(self.sheets.unwrap_or_default()),
+            ProjectType::Deck => match self.slides {
+                Some(slides) => Items::Slides(slides),
+                None => base.items.clone(),
+            },
+            ProjectType::Doc => match self.sections {
+                Some(sections) => Items::Sections(sections),
+                None => base.items.clone(),
+            },
+            ProjectType::Grid => match self.sheets {
+                Some(sheets) => Items::Sheets(sheets),
+                None => base.items.clone(),
+            },
         };
+        let base = base.manifest;
         let m = self.manifest;
-        Ok(Project {
+        Project {
             project_type,
             dir,
             manifest: Manifest {
@@ -180,7 +209,7 @@ impl ProjectPayload {
                 entries: Vec::new(),
             },
             items,
-        })
+        }
     }
 }
 
@@ -248,6 +277,10 @@ pub struct RecalcRequest {
     /// The workbook's other sheets, for cross-sheet formulas.
     #[serde(default)]
     pub others: Vec<SheetCells>,
+    /// Merge ranges ("B1:C2") on the sheet being recalculated: a dynamic array
+    /// refuses to spill into (or out of) a merged cell.
+    #[serde(default)]
+    pub merges: Vec<Json>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -271,6 +304,19 @@ pub struct RecalcResponse {
 #[derive(Debug, Serialize)]
 pub struct FileList {
     pub files: Vec<fsproj::FileEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryList {
+    pub snapshots: Vec<ai_format::history::SnapshotEntry>,
+    /// How many versions are kept before the oldest falls off.
+    pub keep: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreRequest {
+    /// A snapshot name from the history listing.
+    pub snapshot: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,7 +395,7 @@ impl Studio {
     pub fn create_project(&self, request: CreateRequest) -> Result<ProjectPayload> {
         let Some(project_type) = ProjectType::from_name(&request.project_type) else {
             return Err(Error::BadRequest(format!(
-                "알 수 없는 문서 종류: {}",
+                "알 수 없는 문서 종류: {} — deck · doc · grid 중 하나여야 합니다",
                 request.project_type
             )));
         };
@@ -368,17 +414,35 @@ impl Studio {
 
     pub fn get_project(&self, folder: &str) -> Result<ProjectPayload> {
         let dir = self.dir_of(folder)?;
-        Ok(ProjectPayload::of(&fsproj::load_project(&dir)?))
+        let (project, warnings) = fsproj::load_project_with_warnings(&dir)?;
+        let mut payload = ProjectPayload::of(&project);
+        payload.warnings = warnings;
+        Ok(payload)
     }
 
     /// Save what a client sent, then hand back what actually landed on disk.
+    ///
+    /// A payload carrying `baseModified` is saved only if the disk still has
+    /// that timestamp; otherwise the document changed under the client — the
+    /// other tab, the desktop app, an agent over the API — and overwriting
+    /// would silently discard that work. The refusal is 409 and the client
+    /// chooses: reload, or resend without `baseModified` to overwrite.
     pub fn save_project(&self, folder: &str, payload: ProjectPayload) -> Result<ProjectPayload> {
         let dir = self.dir_of(folder)?;
         let Some(project_type) = fsproj::type_from_path(&dir) else {
             return Err(Error::BadRequest("AI Studio 프로젝트가 아닙니다".into()));
         };
-        let base = fsproj::load_project(&dir)?.manifest;
-        let project = payload.into_project(dir, project_type, base)?;
+        let base = fsproj::load_project(&dir)?;
+        if let Some(expected) = payload.base_modified.as_deref().filter(|s| !s.is_empty()) {
+            if expected != base.manifest.modified {
+                return Err(Error::Conflict(format!(
+                    "디스크의 저장 시각은 {}, 이 화면이 아는 시각은 {}입니다. \
+                     다시 불러오거나, 덮어쓰려면 baseModified 없이 저장하세요.",
+                    base.manifest.modified, expected
+                )));
+            }
+        }
+        let project = payload.into_project(dir, project_type, base);
         Ok(ProjectPayload::of(&fsproj::save_project(&project)?))
     }
 
@@ -399,6 +463,30 @@ impl Studio {
     pub fn delete_project(&self, folder: &str) -> Result<()> {
         self.dir_of(folder)?;
         Ok(fsproj::delete_project(&self.workspace, folder)?)
+    }
+
+    /// The kept versions of a project, newest first.
+    pub fn history(&self, folder: &str) -> Result<HistoryList> {
+        let dir = self.dir_of(folder)?;
+        Ok(HistoryList {
+            snapshots: ai_format::history::list(&dir)?,
+            keep: ai_format::history::HISTORY_KEEP,
+        })
+    }
+
+    /// Put a kept version back as the current document.
+    ///
+    /// The state being replaced is snapshotted first, so a restore is itself
+    /// undoable from the same list. Returns the project as it now stands.
+    pub fn restore(&self, folder: &str, snapshot: &str) -> Result<ProjectPayload> {
+        let dir = self.dir_of(folder)?;
+        let Some(project_type) = fsproj::type_from_path(&dir) else {
+            return Err(Error::BadRequest("AI Studio 프로젝트가 아닙니다".into()));
+        };
+        ai_format::history::restore(&dir, project_type, snapshot)?;
+        // Re-save to renumber files and regenerate AI.md from the restored state.
+        let project = fsproj::load_project(&dir)?;
+        Ok(ProjectPayload::of(&fsproj::save_project(&project)?))
     }
 
     pub fn project_files(&self, folder: &str) -> Result<FileList> {
@@ -424,7 +512,7 @@ impl Studio {
     pub fn export(&self, folder: &str, ext: &str) -> Result<ExportBody> {
         let Some(format) = Format::from_ext(ext) else {
             return Err(Error::BadRequest(format!(
-                "지원하지 않는 내보내기 형식: {ext}"
+                "내보낼 수 없는 형식입니다: {ext} — pptx · docx · xlsx · csv로 내보낼 수 있습니다. PDF는 앱에서 Ctrl+P(인쇄)로 저장하세요"
             )));
         };
         let dir = self.dir_of(folder)?;
@@ -546,7 +634,8 @@ impl Studio {
         })
     }
 
-    /// Read an image out of a project. Only `assets/` is reachable.
+    /// Read an image out of a project. Only `assets/` is reachable, and only
+    /// real files inside it — a symlink pointing elsewhere is refused.
     pub fn read_asset(&self, folder: &str, path: &str) -> Result<(Vec<u8>, String)> {
         let dir = self.dir_of(folder)?;
         let relative = path.trim_start_matches("../").trim_start_matches("./");
@@ -555,10 +644,7 @@ impl Studio {
                 "assets/ 밖의 파일은 제공하지 않습니다".into(),
             ));
         }
-        let abs = fsproj::resolve_inside(&dir, relative)?;
-        if !abs.is_file() {
-            return Err(Error::NotFound(path.to_string()));
-        }
+        let abs = fsproj::resolve_existing_inside(&dir, relative)?;
         let ext = abs
             .extension()
             .map(|e| e.to_string_lossy().into_owned())
@@ -579,11 +665,12 @@ impl Studio {
                 .map(|s| (s.name.as_str(), &s.cells))
                 .collect::<Vec<_>>(),
         );
-        let out = ai_formula::evaluate::recalc_sheet_in(
+        let out = ai_formula::evaluate::recalc_sheet_blocked(
             &request.cells,
             &request.names,
             &request.name,
             &book,
+            &ai_format::grid::merge_covered(&request.merges),
         );
         RecalcResponse {
             cells: out.cells,
@@ -600,8 +687,8 @@ impl Studio {
         let Some(project_type) = fsproj::type_from_path(&dir) else {
             return Err(Error::BadRequest("AI Studio 프로젝트가 아닙니다".into()));
         };
-        let base = fsproj::load_project(&dir)?.manifest;
-        let project = payload.into_project(dir, project_type, base)?;
+        let base = fsproj::load_project(&dir)?;
+        let project = payload.into_project(dir, project_type, base);
         Ok(preview::of(&project))
     }
 }
@@ -709,9 +796,65 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_base_modified_refuses_to_overwrite() {
+        let workspace =
+            std::env::temp_dir().join(format!("ai-core-conflict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let studio = Studio::open(&workspace).unwrap();
+        let created = studio
+            .create_project(CreateRequest {
+                project_type: "doc".into(),
+                title: "충돌 검사".into(),
+                sample: false,
+            })
+            .unwrap();
+        let folder = created.folder.clone();
+        let on_disk = created.manifest.modified.clone().unwrap();
+
+        // A client that loaded an older copy is refused with 409…
+        let stale = ProjectPayload {
+            base_modified: Some("2000-01-01T00:00:00.000Z".into()),
+            ..blank_payload()
+        };
+        let err = studio.save_project(&folder, stale).unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err}");
+        assert_eq!(err.status(), 409);
+
+        // …the current timestamp saves, and no timestamp overwrites (the
+        // write-without-reading path an agent uses).
+        let current = ProjectPayload {
+            base_modified: Some(on_disk),
+            ..blank_payload()
+        };
+        studio
+            .save_project(&folder, current)
+            .expect("current base saves");
+        studio
+            .save_project(&folder, blank_payload())
+            .expect("no base overwrites");
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    fn blank_payload() -> ProjectPayload {
+        ProjectPayload {
+            project_type: String::new(),
+            base_modified: None,
+            warnings: Vec::new(),
+            dir: String::new(),
+            folder: String::new(),
+            manifest: ManifestPayload::default(),
+            slides: None,
+            sections: Some(Vec::new()),
+            sheets: None,
+        }
+    }
+
+    #[test]
     fn errors_map_to_the_right_status() {
         assert_eq!(Error::BadRequest("x".into()).status(), 400);
         assert_eq!(Error::NotFound("x".into()).status(), 404);
+        assert_eq!(Error::Conflict("x".into()).status(), 409);
         assert_eq!(
             Error::Project(fsproj::Error::Escape("x".into())).status(),
             400

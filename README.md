@@ -97,7 +97,7 @@ pptx에서 넘어오는 것: 자리틀에서 상속한 좌표(대부분의 실�
 
 ```
 가져왔습니다 — 바뀐 것
-  · 글꼴은 모두 Pretendard로 바꿔 열었습니다 (Calibri, 맑은 고딕)
+  · 화면에서는 글꼴을 Pretendard로 표시합니다 (Calibri, 맑은 고딕) — 내보낼 때는 원래 글꼴 이름을 유지합니다
   · SmartArt는 같은 모양의 도형들로 바꿨습니다
   · 조건부 서식은 저장된 값 기준의 고정 서식으로 바꿨습니다
   · 데이터 막대·아이콘 집합은 표현할 방법이 없어 넘어갔습니다
@@ -159,7 +159,7 @@ Office처럼 잠깁니다 — 눌러도 아무 일이 없는 단추보다 잠긴
 (SIL OFL 1.1)를 앱에 담아 배포하므로, Windows·macOS·Linux에서 그리고 네트워크가 없어도
 같은 모양으로 열립니다. 내보내는 `.docx`·`.pptx`·`.xlsx`도 같은 글꼴을 적어 나갑니다.
 
-바꾼 글꼴은 조용히 넘기지 않고 알려 줍니다 — "글꼴은 모두 Pretendard로 바꿔 열었습니다
+바꾼 글꼴은 조용히 넘기지 않고 알려 줍니다 — "화면에서는 글꼴을 Pretendard로 표시합니다
 (Calibri, 맑은 고딕)".
 
 옮겨지지 않는 것도 침묵하지 않고 알립니다 — "그라데이션 채우기는 첫 색으로 단순화했습니다",
@@ -196,11 +196,24 @@ Office처럼 잠깁니다 — 눌러도 아무 일이 없는 단추보다 잠긴
 --port <번호>        수신 포트 (기본 5177, 환경변수 PORT)
 --host <주소>        수신 주소 (기본 127.0.0.1). 0.0.0.0은 네트워크에 노출됩니다
 --web <경로>         빌드된 웹 UI 폴더 (내장본보다 우선)
+--token <문자열>     API 접속 토큰 (환경변수 AI_STUDIO_TOKEN)
+--tokens <파일>      이름 있는 토큰 목록 (한 줄에 `이름:역할:토큰`, 역할은 read/write)
 --open               시작 후 브라우저를 엽니다
 ```
 
-인증이 없습니다. `--host 0.0.0.0` 은 같은 네트워크의 누구나 문서를 읽고 쓸 수 있다는 뜻이므로,
-신뢰하는 망에서만 쓰거나 앞에 리버스 프록시를 두세요.
+`--token` 을 지정하면 모든 `/api` 요청에 `Authorization: Bearer <토큰>` 이 필요합니다
+(헤더를 실을 수 없는 내보내기 다운로드와 이미지는 `?token=`). 웹 UI는 처음 401을 만나면
+토큰을 물어 저장합니다. 팀으로 쓰려면 `--tokens 파일`로 **이름 있는 토큰**을 나눠 줍니다 —
+`읽기` 토큰은 문서를 읽고 내보내고 계산(`/recalc`·`preview`)할 수 있지만 고치지 못합니다
+(403에 토큰 이름이 함께 나옵니다). RAG 인덱서에는 읽기 토큰이면 충분합니다.
+
+```
+# tokens.txt — 이름:역할:토큰
+지민:write:8f3k...
+인덱서:read:2mv9...
+``` 토큰 없이 `--host 0.0.0.0` 으로 띄우면 같은 네트워크의 누구나 문서를
+읽고 쓸 수 있다는 경고가 출력됩니다 — 신뢰하는 망이 아니라면 토큰을 쓰거나 앞에 리버스
+프록시를 두세요. HTTPS가 필요하면 리버스 프록시에서 종단하세요.
 
 ---
 
@@ -319,6 +332,15 @@ LLM은 `x=96 y=64 w=1088` 보다 `상단 중앙, 전체 폭` 을 훨씬 잘 이�
 
 배열을 다루는 옛 관용구도 그대로 동작합니다 — `=SUMPRODUCT((A2:A7="서울")*C2:C7)`.
 
+**동적 배열은 흘러넘칩니다.** `=UNIQUE(A2:A7)`을 넣으면 결과가 아래 빈 셀로 펼쳐지고, 펼쳐질
+자리에 무엇이 있으면 Excel처럼 `#SPILL!`이 됩니다. 펼쳐진 셀을 고르면 앵커의 수식이 수식
+입력줄에 회색으로 보이고 스필 범위에 테두리가 그려지며, 그 위에 직접 입력하면 스필이 깨집니다 —
+전부 Excel의 동작 그대로입니다. 파일에는 앵커에 `spill` 범위가, 펼쳐진 셀에 계산된 값이
+적히므로(`spillFrom`) 계산 엔진 없이 읽는 AI도 정확한 값을 봅니다. 내보낸 `.xlsx`에서는 배열
+수식(`t="array"`)으로, 가져올 때도 그대로 복원됩니다. 스필 범위 전체는 `=SUM(E2#)`처럼
+**`#` 연산자**로 참조합니다 — 스필이 자라면 참조도 따라 자라고, 행을 삽입하면 `E2#`도 함께
+이동하며, 내보낸 파일에는 Excel의 저장 형태(`_xlfn.ANCHORARRAY`)로 나갑니다.
+
 ### 계산하지 못하는 수식은 파일의 값을 남깁니다
 
 없는 함수나 넘겨받지 못한 시트를 만나면, **셀에 이미 있던 값을 그대로 둡니다.** 남의 워크북을
@@ -367,9 +389,13 @@ LLM은 `x=96 y=64 w=1088` 보다 `상단 중앙, 전체 폭` 을 훨씬 잘 이�
 ## 조작법
 
 세 앱 모두 Office와 같은 리본을 씁니다. **파일** 탭에 새로 만들기 · 열기 · 저장 · 사본 만들기 ·
-내보내기가 있고, 어디서나 `Ctrl+S`·`Ctrl+Z`·`Ctrl+Shift+Z`, 우클릭 컨텍스트 메뉴, 상태 표시줄의
-확대/축소 슬라이더가 동작합니다. 편집을 멈추면 2.5초 후 자동 저장되고, 그때마다 md/json과 `AI.md`가
-다시 쓰입니다. 제목을 바꾸면 폴더 이름도 따라갑니다.
+**버전 기록** · 내보내기가 있고, 어디서나 `Ctrl+S`·`Ctrl+Z`·`Ctrl+Shift+Z`, 우클릭 컨텍스트 메뉴,
+상태 표시줄의 확대/축소 슬라이더가 동작합니다. 편집을 멈추면 2.5초 후 자동 저장되고, 그때마다
+md/json과 `AI.md`가 다시 쓰입니다. 제목을 바꾸면 폴더 이름도 따라갑니다.
+
+**저장할 때마다 직전 상태가 `.history/`에 보관됩니다** (최근 30개). 파일 탭의 **버전 기록**에서
+아무 버전으로나 되돌릴 수 있고, 복원할 때도 지금 상태를 먼저 보관하므로 복원 자체를 되돌릴 수
+있습니다. 보관본도 같은 md/json이라 `diff`로 두 버전을 비교할 수 있습니다.
 
 **`F1`을 누르면 그 앱의 단축키 전체가 나옵니다.** Office에서 손에 익은 것이 여기서도 되는지
 확인하는 가장 빠른 길이고, 그 목록에 없는 것은 없는 것입니다. 세 앱 모두 **서식 복사**(🖌)가
@@ -419,6 +445,10 @@ Word의 서식 단축키가 그대로 동작합니다: `Ctrl+B`/`I`/`U`, `Ctrl+L
 
 블록 높이를 실제로 측정해 **A4/Letter/A5 페이지로 나누고**, `Ctrl+Enter`로 페이지 나누기를 넣고,
 `Ctrl+P`로 인쇄/PDF를 냅니다. `Ctrl+F`/`Ctrl+H`로 찾기·바꾸기.
+
+**`Ctrl+P`는 세 앱 모두에서 동작합니다.** Deck은 슬라이드마다 한 장씩 덱 비율에 맞는 방향으로,
+Grid는 사용 중인 범위를 Excel의 기본 인쇄처럼(눈금선·머리글 없이, 지정한 서식만) 종이에 올립니다.
+브라우저의 인쇄 대화상자에서 PDF로 저장하면 그것이 이 앱의 PDF 내보내기입니다.
 
 **Grid** — 화살표/`Tab`/`Enter`로 이동, 아무 글자나 입력하면 편집 시작, `F2`로 수정, `Delete`로 지우기.
 
@@ -524,6 +554,8 @@ docs/ARCHITECTURE.md   왜 이렇게 나누었는가
 | `PATCH` | `/api/projects/:folder` | 제목·폴더명 변경 `{ title }` |
 | `DELETE` | `/api/projects/:folder` | 삭제 |
 | `GET` | `/api/projects/:folder/files` | 파일 목록 |
+| `GET` | `/api/projects/:folder/history` | 보관된 버전 목록 (최신순) |
+| `POST` | `/api/projects/:folder/restore` | 버전 복원 `{ snapshot }` — 지금 상태를 먼저 보관합니다 |
 | `GET` | `/api/projects/:folder/file?path=` | 파일 내용 |
 | `GET` | `/api/projects/:folder/digest` | `AI.md` |
 | `POST` | `/api/projects/:folder/preview` | 저장하지 않고 쓰일 md/json 확인 |
@@ -534,6 +566,10 @@ docs/ARCHITECTURE.md   왜 이렇게 나누었는가
 | `POST` | `/api/recalc` | 시트 재계산 `{ cells, names }` |
 
 `PUT` 은 보낸 부분만 반영합니다 — 슬라이드만 고쳐 보내면 매니페스트의 나머지는 디스크의 값을 씁니다.
+`PUT` 에 `baseModified`(읽어 온 `manifest.modified`)를 실으면 **낙관적 동시성 검사**가 됩니다:
+그 사이 디스크가 바뀌었으면 409를 돌려주고 아무것도 덮어쓰지 않습니다. 에디터는 항상 이것을
+싣고, 충돌 시 사용자에게 덮어쓸지 묻습니다. `baseModified` 없이 보내면 예전처럼 그냥 씁니다 —
+읽지 않고 쓰기만 하는 에이전트의 경로입니다.
 폴더 파라미터는 작업 폴더 밖을 벗어나지 못하도록 검증되고, 자산은 `assets/` 안만 읽힙니다.
 
 데스크톱 앱에서는 같은 함수들이 Tauri 커맨드(`get_project`, `save_project`, …)로 노출되며,
@@ -541,42 +577,154 @@ HTTP 서버가 전혀 뜨지 않습니다.
 
 ---
 
-## 직접 빌드하기
+## 직접 빌드하기 — 처음부터 따라 하기
 
-Rust와 Node 20이 필요합니다.
+> **가장 쉬운 길은 빌드가 아니라 내려받기입니다.** 그냥 써 보고 싶다면 위의
+> [받아서 실행하기](#받아서-실행하기)에서 완성된 설치 파일을 내려받으세요. 아래는 소스에서
+> **직접 `.exe`(또는 `.dmg`·`.AppImage`)를 만들고 싶을 때**의 안내입니다.
 
-```bash
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli tauri-cli
-npm install
+아래 순서를 그대로 따라 하면 됩니다. **① 도구 설치 → ② 소스 내려받기 → ③ 빌드 → ④ 결과 실행**
+네 단계이고, 개발 지식이 없어도 복사·붙여넣기로 됩니다. 처음 한 번은 도구를 받느라 10~30분
+걸릴 수 있습니다(그 다음부터는 몇 분).
 
-npm run seed             # 샘플 문서 3개 (선택)
-npm run desktop          # 데스크톱 앱을 개발 모드로
-npm run desktop:build    # 설치 파일 생성
-```
+### ① 공통 도구 두 가지
 
-브라우저 모드로 개발하려면:
+운영체제와 상관없이 이 둘이 필요합니다. 한 번만 설치하면 됩니다.
 
-```bash
-npm run build:wasm       # Rust 코어를 WebAssembly로
-npm run dev              # 서버(5177) + 웹(5178) 동시 실행
-```
+1. **Rust** — <https://rustup.rs> 에서 안내대로 설치합니다 (기본값 그대로 Enter).
+2. **Node.js 20 이상** — <https://nodejs.org> 에서 **LTS** 버전을 받아 설치합니다.
 
-http://localhost:5178 을 엽니다. 프로덕션처럼 한 포트에서 띄우려면:
+설치가 끝나면 **터미널(Windows는 "PowerShell", macOS는 "터미널", Linux는 셸)** 을 새로 열고
+아래를 실행해 둘 다 보이는지 확인합니다. 버전 숫자가 나오면 성공입니다.
 
 ```bash
-npm run build            # wasm + 웹 UI 빌드
-npm run serve            # 5177에서 API와 정적 파일을 함께 제공
+rustc --version      # 예: rustc 1.8x.x
+node --version       # 예: v20.x.x
 ```
+
+### ② 운영체제별 준비물 (한 번만)
+
+데스크톱 앱은 각 OS의 화면 표시 도구가 하나 더 필요합니다. 자기 OS의 것만 하면 됩니다.
+
+<details>
+<summary><b>🪟 Windows 10 / 11</b></summary>
+
+1. **Visual Studio Build Tools** (C++ 컴파일러) — Rust가 프로그램을 조립할 때 필요합니다.
+   <https://visualstudio.microsoft.com/visual-cpp-build-tools/> 에서 받아 실행하고,
+   설치 화면에서 **"C++를 사용한 데스크톱 개발"** 항목에 체크한 뒤 설치합니다.
+2. **WebView2** — 화면을 그리는 엔진입니다. Windows 11과 최신 Windows 10에는 이미 들어
+   있어 대개 아무것도 안 해도 됩니다. 없다는 오류가 나면
+   <https://developer.microsoft.com/microsoft-edge/webview2/> 에서 "Evergreen" 런타임을
+   받아 설치합니다.
+
+</details>
+
+<details>
+<summary><b>🍎 macOS 12 이상</b></summary>
+
+터미널에서 Xcode 명령줄 도구를 설치합니다 (창이 뜨면 "설치"를 누릅니다). 이미 있으면 그냥
+넘어갑니다.
+
+```bash
+xcode-select --install
+```
+
+</details>
+
+<details>
+<summary><b>🐧 Linux (Ubuntu / Debian 계열)</b></summary>
+
+화면 표시용 라이브러리를 설치합니다.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+  patchelf libssl-dev build-essential file
+```
+
+Fedora·Arch 등은 같은 이름의 패키지(`webkit2gtk4.1`, `openssl`, `librsvg2` …)를 설치하면 됩니다.
+
+</details>
+
+### ③ 소스 내려받아 빌드하기
+
+터미널에서 아래를 위에서부터 차례로 실행합니다. `#` 뒤는 설명이니 빼고 붙여 넣어도 됩니다.
+
+```bash
+# 1) 소스 내려받고 그 폴더로 이동
+git clone <이-저장소-주소> ai-studio
+cd ai-studio
+
+# 2) 빌드에 필요한 부품 준비 (처음 한 번, 몇 분 걸림)
+rustup target add wasm32-unknown-unknown     # 브라우저용 코어 빌드 대상
+cargo install wasm-bindgen-cli tauri-cli     # 빌드 도구 두 개
+npm install                                  # 웹 UI 의존성
+
+# 3) 설치 파일 만들기 (여기서 실제 .exe / .dmg / .AppImage 가 나옵니다)
+npm run desktop:build
+```
+
+`git clone`의 `<이-저장소-주소>`는 이 프로젝트의 실제 주소로 바꿔 넣습니다. zip으로 받았다면
+압축을 풀고 그 폴더에서 `cd` 만 하면 됩니다.
+
+### ④ 만들어진 설치 파일 위치
+
+빌드가 끝나면 마지막 줄에 파일 경로가 출력됩니다. 위치는 OS별로 아래와 같습니다
+(`AI Studio_0.1.0_...` 부분의 숫자는 버전에 따라 다를 수 있습니다).
+
+| OS | 만들어지는 파일 | 위치 |
+|---|---|---|
+| Windows | `AI Studio_0.1.0_x64-setup.exe`, `.msi` | `target/release/bundle/nsis/` · `target/release/bundle/msi/` |
+| macOS | `AI Studio_0.1.0_aarch64.dmg` | `target/release/bundle/dmg/` |
+| Linux | `.AppImage` · `.deb` · `.rpm` | `target/release/bundle/appimage/` 등 |
+
+이 파일을 두 번 눌러 설치하면 일반 프로그램처럼 시작 메뉴·런치패드·앱 목록에 들어갑니다.
+**사내에 나눠 줄 때는 이 파일 하나만 전달하면 됩니다** — 받는 사람은 Rust도 Node도 설치할
+필요가 없습니다.
+
+### 먼저 켜서 확인만 하고 싶다면 (설치 파일 없이)
+
+설치 파일을 만들기 전에 앱이 뜨는지 바로 보고 싶으면, 개발 모드로 실행합니다. 창이 그대로 뜹니다.
+
+```bash
+npm run seed        # 샘플 문서 3개 넣기 (선택)
+npm run desktop     # 데스크톱 앱을 개발 모드로 실행
+```
+
+### 브라우저·서버로 쓰고 싶다면
+
+데스크톱 앱 대신 브라우저에서 열거나 공유 서버로 두는 방법입니다.
+
+```bash
+# 개발 모드 (코드 고치면 바로 반영)
+npm run dev         # 서버(5177) + 웹(5178) 동시 실행 → http://localhost:5178
+
+# 프로덕션처럼 한 포트에서
+npm run build       # wasm + 웹 UI 빌드
+npm run serve       # http://localhost:5177 에서 API와 화면을 함께 제공
+```
+
+### 잘 안 될 때 (자주 겪는 오류)
+
+| 증상 | 원인과 해결 |
+|---|---|
+| `link.exe not found` / `linker not found` (Windows) | ② 단계의 **Visual Studio Build Tools**가 없거나 설치 중 "C++ 데스크톱 개발"을 체크 안 함. 다시 설치하세요. |
+| `WebView2 ... not found` / 창이 안 뜸 (Windows) | **WebView2 런타임** 설치 (②의 링크). |
+| `cargo: command not found` / `rustc ...` | Rust 설치 후 **터미널을 새로 열지 않음**. 창을 닫고 다시 여세요. |
+| `wasm-bindgen` / `cargo tauri` 를 못 찾음 | ③의 `cargo install wasm-bindgen-cli tauri-cli` 를 건너뜀. 다시 실행하세요. |
+| `npm: command not found` | Node.js가 설치 안 됨(①). LTS를 다시 설치하고 터미널을 새로 여세요. |
+| Linux에서 `webkit2gtk` 관련 오류 | ②의 `apt-get install ...` 줄을 실행하지 않음. |
+| 그 외 | `npm test` 로 코어가 정상인지 먼저 확인하면 문제 범위를 좁힐 수 있습니다(아래 [검증](#검증)). |
 
 ---
 
 ## 검증
 
 ```bash
-npm test                 # Rust 395개 + 웹 79개
-npm run e2e              # API·디스크 검증 80개 (서버 실행 중일 때)
-npm run smoke            # 실제 React 앱을 jsdom에 마운트, 277개
+npm test                 # Rust 449개 + 웹 85개
+npm run e2e              # API·디스크 검증 100개 (서버 실행 중일 때)
+npm run smoke            # 실제 React 앱을 jsdom에 마운트, 291개
 ```
 
 - **`cargo test`** — 수식 엔진(원래 JS 스위트를 그대로 이식한 34개 포함), 포맷 왕복, 경로 탈출 차단,
@@ -634,9 +782,14 @@ AI_STUDIO_TOOLS=$(pwd) node scripts/snapshot.mjs out/ screens.html
   데이터 표 + 캡션으로, Excel은 데이터 블록으로 씁니다. Word/Excel의 차트는 별도의 임베디드 워크북
   파트를 함께 써야 하는데, 차트가 이미 시트 범위를 가리키는 이 포맷에서는 숫자를 그대로 넘기는 편이
   받는 사람에게 더 쓸모 있습니다.
-- **PDF는 브라우저 인쇄로만 만듭니다.** Doc은 `Ctrl+P` → PDF로 저장이 되지만, Deck·Grid는
-  PDF를 생성하지 않습니다.
-- **동시 편집을 가정하지 않았습니다.** 저장은 마지막 쓰기가 이깁니다.
+- **PDF는 브라우저 인쇄로 만듭니다.** 세 앱 모두 `Ctrl+P`가 동작합니다 — Doc은 페이지
+  그대로, Deck은 슬라이드마다 한 장(덱 비율에 맞는 용지 방향), Grid는 사용 중인 범위를
+  Excel처럼(눈금선 없이, 지정한 테두리·서식만) 인쇄합니다. 별도의 PDF 엔진은 없습니다.
+- **실시간 동시 편집은 없습니다.** 대신 두 가지가 그 자리를 지킵니다: 저장은 낙관적 동시성
+  검사를 거치고(다른 곳에서 먼저 저장했으면 409 → 에디터가 덮어쓸지 물음), **편집하지 않고
+  보고 있는 문서는 다른 곳의 저장을 몇 초 안에 스스로 따라옵니다** — 에이전트가 API로 문서를
+  고치는 동안 화면이 낡은 채 남지 않습니다. 두 사람이 같은 문단을 실시간으로 함께 고치는
+  것은 지원하지 않습니다.
 - **Doc의 페이지 나눔은 블록 단위입니다.** 한 문단이 페이지 경계를 넘으면 문단 전체가 다음 장으로
   넘어갑니다(Word와 같은 동작). 다만 페이지보다 큰 문단은 잘리지 않고 그 페이지를 넘칩니다.
 - **머리글·바닥글은 한 줄 세 칸입니다.** 페이지마다 다른 머리글(첫 페이지만 다르게, 짝/홀수)과
@@ -644,9 +797,6 @@ AI_STUDIO_TOOLS=$(pwd) node scripts/snapshot.mjs out/ screens.html
 - **셀 서식 대화상자, 조건부 서식, 필터가 없습니다.** 정렬은 선택 범위의 첫 열 기준만 지원합니다.
   `.xlsx`를 가져올 때 조건부 서식·데이터 유효성 검사·자동 필터는 넘어오지 않습니다(셀 값과 서식은
   그대로 옵니다).
-- **동적 배열이 흘러넘치지 않습니다.** `UNIQUE`·`SORT`·`FILTER`·`SEQUENCE`는 계산되지만 결과가
-  옆 셀로 퍼지지 않고, 한 셀에서는 첫 값만 보입니다. `=SUM(FILTER(...))`처럼 집계 안에서 쓰면
-  Excel과 같은 값이 나옵니다.
 - **`.xlsx`의 그림은 넘어오지 않습니다.** 차트는 넘어옵니다(범위를 가리키는 살아 있는 차트로).
 - **각주·미주는 문장의 ¹ 표시 + 섹션 끝 모음으로 바뀝니다.** 페이지마다 그 페이지의 각주를
   아래에 두는 Word의 배치는 아닙니다. 검토 주석(메모)은 넘어오지 않습니다.
@@ -670,4 +820,5 @@ AI_STUDIO_TOOLS=$(pwd) node scripts/snapshot.mjs out/ screens.html
 - **문단 안에서 크기가 섞인 경우는 첫 서식을 따릅니다.** 한 도형·문단의 글자 크기·색·굵기는 하나이고,
   첫 런의 것을 씁니다(굵게·기울임·취소선·링크는 런 단위로 마크다운에 남습니다).
 - **다단 조판은 단 수와 간격만 따릅니다.** 단마다 다른 너비, 단 구분선, 단 나누기는 없습니다.
-- **서버에 인증이 없습니다.** 위의 `--host` 주의를 참고하세요.
+- **서버 인증은 공유 토큰입니다.** `--tokens`로 사람마다 이름과 읽기/쓰기 역할을 줄 수
+  있지만, 문서 단위 권한·OAuth·감사 로그는 없습니다. 위의 `--host` 주의를 참고하세요.

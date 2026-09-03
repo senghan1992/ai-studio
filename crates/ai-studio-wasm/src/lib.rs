@@ -122,6 +122,8 @@ pub fn recalc_sheet(sheet: JsValue, others: JsValue) -> Result<JsValue, JsValue>
         cells: IndexMap<String, Cell>,
         names: Names,
         name: String,
+        /// Merge ranges ("B1:C2"): a spill refuses to touch a merged cell.
+        merges: Vec<serde_json::Value>,
     }
     #[derive(Serialize)]
     struct Output {
@@ -143,7 +145,13 @@ pub fn recalc_sheet(sheet: JsValue, others: JsValue) -> Result<JsValue, JsValue>
             .map(|s| (s.name.as_str(), &s.cells))
             .collect::<Vec<_>>(),
     );
-    let out = ai_formula::evaluate::recalc_sheet_in(&input.cells, &input.names, &input.name, &book);
+    let out = ai_formula::evaluate::recalc_sheet_blocked(
+        &input.cells,
+        &input.names,
+        &input.name,
+        &book,
+        &ai_format::grid::merge_covered(&input.merges),
+    );
     to_js(&Output {
         cells: out.cells,
         changed: out.changed,

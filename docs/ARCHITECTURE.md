@@ -319,15 +319,18 @@ PowerPoint는 크기를 바꿀 때 "최대화 / 맞춤 확인"을 묻는다. 이
 | 셀 안의 이스케이프된 `\|` | 저장할 때마다 백슬래시가 하나씩 늘어났습니다 | 읽을 때 풀고 쓸 때 씌웁니다 | `table.rs::a_pipe_inside_a_cell_survives_any_number_of_saves` |
 | pptx 표의 병합 연속 셀 | 한 행짜리 병합에도 `hMerge`와 `vMerge`를 모두 켰습니다 | 실제로 이어지는 축만 켭니다 | `table.rs::a_single_row_merge_continues_only_horizontally` |
 
-반대로 **의도적으로 그대로 둔 동작**이 둘 있습니다. 둘 다 포맷의 설계 결과이고, 손대면 기존 파일
-전체가 한꺼번에 바뀌기 때문에 이식과 함께 결정할 일이 아니라고 판단했습니다.
+이식 시점에 **의도적으로 미뤄 두었던 동작** 둘은 이후에 고쳤습니다. 둘 다 "저장을 반복하면
+바뀌지 않은 문서의 diff가 조용해야 한다"는 이 포맷의 약속에 관한 것입니다.
 
-1. **Doc의 `outline[].anchor` 가 저장할 때마다 바뀝니다.** 서식이 없는 문단은 `<!-- block:id -->`
-   앵커를 갖지 않으므로 안정적인 id가 없고, 열 때마다 새 id를 받습니다. 이 포맷의 장점이 깔끔한
-   `git diff` 인 만큼, 제목 내용에서 앵커를 유도하는 편이 나을 것입니다.
-2. **Deck의 `layout.json` 이 기본값과 같은 스타일까지 씁니다.** Doc은 "기본값과 같은 오버라이드는
-   정보가 없으므로 버린다"는 규칙을 지키는데, Deck은 그렇지 않아 `valign: "top"` 같은 항목이
-   모든 블록에 들어갑니다. 같은 규칙을 Deck에도 적용하면 파일이 짧아지고 diff가 조용해집니다.
+1. **Doc의 `outline[].anchor` 가 저장할 때마다 바뀌었습니다.** 서식이 없는 문단은
+   `<!-- block:id -->` 앵커를 갖지 않으므로 안정적인 id가 없고, 열 때마다 새 id를 받습니다.
+   지금은 앵커를 블록 id가 아니라 **제목 텍스트에서 유도**합니다 (`핵심 성과` → `핵심-성과`,
+   중복은 `-2` · `-3`) — `FORMAT.md` 가 처음부터 말하던 형태이고, 제목을 고치지 않는 한 저장을
+   반복해도 바뀌지 않습니다 (`doc.rs::outline_anchors_are_stable_across_saves`).
+2. **Deck의 `layout.json` 이 기본값과 같은 스타일까지 썼습니다.** Doc의 "기본값과 같은
+   오버라이드는 정보가 없으므로 버린다"는 규칙을 Deck의 텍스트 블록에도 적용해, `valign: "top"`
+   같은 항목이 더 이상 모든 블록에 들어가지 않습니다. 읽을 때 기본값이 다시 병합되므로 잃는
+   것은 없습니다 (`deck.rs::default_equal_style_entries_stay_out_of_the_layout`).
 
 ---
 
@@ -335,17 +338,13 @@ PowerPoint는 크기를 바꿀 때 "최대화 / 맞춤 확인"을 묻는다. 이
 
 **검증했습니다**
 
-- Rust 295개 · 웹 60개 · e2e 72개 · UI 스모크 110개
-- 원래 JavaScript가 만든 `workspace/` 를 Rust로 읽어 다시 쓴 결과, **모든 `.md` 와 세 개의 `AI.md` 가
-  바이트 단위로 동일** (`cargo run -p ai-format --example roundtrip -- workspace /tmp/out`).
-  달라지는 것은 JSON 쪽 13개 파일이고, 전부 설명됩니다:
-
-  | 파일 | 차이 | 왜 |
-  |---|---|---|
-  | `manifest.json` ×3 | `modified` 타임스탬프 | 저장 시각입니다 |
-  | `*.meta.json` ×3 | `outline[].anchor` | 서식 없는 문단은 안정적인 id가 없습니다 (위 참고) |
-  | `01-예산.cells.json` | 키 순서 `f, v, t, fmt` | `FORMAT.md` 의 스펙에 맞춘 것입니다. JS 출력이 스펙과 어긋나 있었습니다 |
-  | `*.layout.json` ×6 | `"valign": "top"` 추가 | 텍스트 블록의 기본 스타일이 채워진 결과입니다. **JS도 같은 값을 씁니다** — 커밋된 샘플은 생성 직후 한 번만 쓰인 파일이라 아직 이 값이 없었을 뿐입니다 |
+- Rust 449개 · 웹 85개 · e2e 100개 · UI 스모크 291개
+- 커밋된 샘플(`templates/`)을 읽어 다시 쓴 결과, **바뀌는 것은 `manifest.json` 의 `modified`
+  타임스탬프뿐입니다** (`cargo run -p ai-format --example roundtrip -- templates /tmp/out`).
+  이식 직후에는 JSON 쪽에 세 종류의 차이가 더 있었지만 — 저장마다 바뀌는 `outline[].anchor`,
+  스펙(`f, v, t, fmt`)과 어긋난 JS의 키 순서, 기본값과 같은 `valign: "top"` — 앞의 것 둘은 포맷을
+  고치고(위 참고) 스펙 위반은 스펙대로 맞춘 뒤 샘플을 재저장해, 이제 저장이 남기는 diff는 저장
+  시각 하나입니다.
 - 만들어진 `.xlsx` · `.pptx` · `.docx` 를 `openpyxl` · `python-pptx` · `python-docx` 로 열어 확인:
   살아있는 수식, 표시 형식, 틀 고정, 이름 범위, 네이티브 차트의 계열·항목, A4 용지와 여백, 제목 스타일
 - **반대 방향도**: 같은 라이브러리들로 다른 구현이 만든 pptx · docx · xlsx 를 생성해 가져오기에 넣고,

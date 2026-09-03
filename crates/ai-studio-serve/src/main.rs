@@ -12,6 +12,7 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 mod api;
+mod auth;
 #[cfg(feature = "embed-ui")]
 mod embedded;
 
@@ -24,6 +25,8 @@ struct Options {
     /// A directory of built web assets to serve, when not embedding them.
     web_dist: Option<PathBuf>,
     open: bool,
+    /// When non-empty, every `/api` request must carry one of these tokens.
+    auth: auth::AuthConfig,
 }
 
 fn usage() -> String {
@@ -35,6 +38,10 @@ fn usage() -> String {
          \x20 --port <번호>        수신 포트 (기본: {DEFAULT_PORT}, 환경변수 PORT)\n\
          \x20 --host <주소>        수신 주소 (기본: 127.0.0.1). 0.0.0.0은 네트워크에 노출됩니다\n\
          \x20 --web <경로>         빌드된 웹 UI 폴더 (기본: apps/web/dist가 있으면 사용)\n\
+         \x20 --token <문자열>     API 접속 토큰 (환경변수 AI_STUDIO_TOKEN). 지정하면 모든\n\
+         \x20                      /api 요청에 Authorization: Bearer 또는 ?token= 이 필요합니다\n\
+         \x20 --tokens <파일>      이름 있는 토큰 목록 — 한 줄에 `이름:역할:토큰`,\n\
+         \x20                      역할은 read/write(읽기/쓰기), `#`은 주석\n\
          \x20 --open               시작 후 브라우저를 엽니다\n\
          \x20 --help               이 도움말\n"
     )
@@ -52,6 +59,11 @@ fn parse_args() -> Result<Options, String> {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         web_dist: None,
         open: false,
+        auth: std::env::var("AI_STUDIO_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .map(auth::AuthConfig::single)
+            .unwrap_or_default(),
     };
 
     let mut args = std::env::args().skip(1);
@@ -73,6 +85,19 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|_| "주소를 해석할 수 없습니다".to_string())?
             }
             "--web" => options.web_dist = Some(PathBuf::from(next("--web")?)),
+            "--token" => {
+                let token = next("--token")?;
+                if !token.is_empty() {
+                    options.auth.add_single(token);
+                }
+            }
+            "--tokens" => {
+                let path = next("--tokens")?;
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("토큰 파일을 읽을 수 없습니다 ({path}): {e}"))?;
+                options.auth = auth::AuthConfig::parse_file(&text)
+                    .map_err(|e| format!("토큰 파일 ({path}): {e}"))?;
+            }
             "--open" => options.open = true,
             "--help" | "-h" => {
                 print!("{}", usage());
@@ -96,7 +121,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ai_studio_serve=info,tower_http=warn".into()),
+                .unwrap_or_else(|_| "ai_studio_serve=info,tower_http=info".into()),
         )
         .init();
 
@@ -118,10 +143,17 @@ async fn main() {
 
     // Axum's default 2MB body limit would refuse any real Office file, and an
     // imported deck's base64 is a third larger again than the file itself.
-    let mut app = Router::new().nest(
-        "/api",
-        api::routes().layer(axum::extract::DefaultBodyLimit::max(192 * 1024 * 1024)),
-    );
+    let mut api_routes =
+        api::routes().layer(axum::extract::DefaultBodyLimit::max(192 * 1024 * 1024));
+    // The tokens guard the data, not the app shell: static files stay open,
+    // every /api route (health included) answers 401 without a token.
+    if !options.auth.is_empty() {
+        let config = Arc::new(options.auth.clone());
+        api_routes = api_routes.layer(axum::middleware::from_fn(move |request, next| {
+            auth::require_token(config.clone(), request, next)
+        }));
+    }
+    let mut app = Router::new().nest("/api", api_routes);
 
     // The UI, from a directory if one was given or found, else from the binary.
     let dist = options.web_dist.clone().or_else(find_web_dist);
@@ -149,8 +181,13 @@ async fn main() {
         }
     }
 
+    // One line per request — method, path, status, latency — so a pilot can be
+    // audited and a failing import found in the log rather than reproduced.
+    let trace = TraceLayer::new_for_http()
+        .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO))
+        .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO));
     let app = app
-        .layer(TraceLayer::new_for_http())
+        .layer(trace)
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(studio.clone());
 
@@ -166,8 +203,19 @@ async fn main() {
     let url = format!("http://{}:{}", display_host(options.host), options.port);
     println!("AI Studio  {url}");
     println!("작업 폴더   {}", studio.workspace().display());
-    if options.host == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
-        println!("경고: 0.0.0.0에 바인딩했습니다 — 네트워크의 누구나 문서를 읽고 쓸 수 있습니다.");
+    println!(
+        "인증        {}",
+        if options.auth.is_empty() {
+            "없음".to_string()
+        } else {
+            options.auth.summary()
+        }
+    );
+    if options.host == IpAddr::V4(Ipv4Addr::UNSPECIFIED) && options.auth.is_empty() {
+        println!(
+            "경고: 0.0.0.0에 토큰 없이 바인딩했습니다 — 네트워크의 누구나 문서를 읽고 쓸 수 \
+             있습니다. --token 또는 AI_STUDIO_TOKEN을 지정하세요."
+        );
     }
     if options.open {
         open_browser(&url);
