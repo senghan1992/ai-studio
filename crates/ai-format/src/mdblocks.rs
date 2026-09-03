@@ -277,7 +277,7 @@ static RE_STRONG: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]*)\*\*").unwr
 static RE_EM: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*([^*]*)\*").unwrap());
 static RE_STRIKE: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~([^~]*)~~").unwrap());
 /// The one inline HTML the importers write: a coloured run.
-static RE_SPAN_TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r"</?span\b[^>]*>").unwrap());
+static RE_SPAN_TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r"</?(?:span|u)\b[^>]*>").unwrap());
 static RE_TABLE_EDGE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ \t]*\|").unwrap());
 static RE_SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ \t]+").unwrap());
 

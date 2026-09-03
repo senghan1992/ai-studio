@@ -879,3 +879,23 @@ fn a_paragraph_that_looks_like_a_list_marker_stays_a_paragraph() {
     assert_eq!(sections[0].blocks[0].md, "1\\. 배경 및 목표");
     assert_eq!(sections[0].blocks[0].block_type, BlockType::Paragraph);
 }
+
+#[test]
+fn an_underlined_word_survives_the_round_trip() {
+    let sections = read_doc(&doc_of(
+        r#"<w:p><w:r><w:t xml:space="preserve">관련 </w:t></w:r>
+             <w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>티켓 번호</w:t></w:r>
+             <w:r><w:rPr><w:u w:val="none"/></w:rPr><w:t xml:space="preserve"> 제공</w:t></w:r></w:p>"#,
+    ));
+    assert_eq!(sections[0].blocks[0].md, "관련 <u>티켓 번호</u> 제공");
+
+    let ws = Workspace::new("docxunderline");
+    let mut project = create_project(ws.path(), ProjectType::Doc, "밑줄", false).unwrap();
+    let Items::Sections(project_sections) = &mut project.items else {
+        panic!()
+    };
+    project_sections[0].blocks = sections[0].blocks.clone();
+    let project = save_project(&project).unwrap();
+    let again = read_doc(&export(&project, Format::Docx).unwrap());
+    assert_eq!(again[0].blocks[0].md, "관련 <u>티켓 번호</u> 제공");
+}

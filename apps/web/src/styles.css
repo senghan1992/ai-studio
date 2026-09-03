@@ -608,7 +608,13 @@ td.is-spill { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, 
    box would have no effect on a heading. */
 .md--sized h1, .md--sized h2, .md--sized h3, .md--sized h4,
 .md--sized h5, .md--sized h6 { font-size: 1em; }
-.md ul, .md ol { margin: .35em 0; padding-left: 1.35em; }
+.md ul, .md ol { margin: .35em 0; padding-left: var(--list-indent-0, 1.35em); }
+.md ul ul, .md ol ol, .md ul ol, .md ol ul { padding-left: var(--list-indent-1, 1.35em); }
+.md ul ul ul, .md ol ol ol { padding-left: var(--list-indent-2, 1.35em); }
+/* An imported deck's own bullet glyphs per level; `normal` keeps the browser's. */
+.md ul > li::marker { content: var(--bullet-0, normal); }
+.md ul ul > li::marker { content: var(--bullet-1, normal); }
+.md ul ul ul > li::marker { content: var(--bullet-2, normal); }
 /* PowerPoint steps a body placeholder 32 - 28 - 24pt, so a sub-bullet on a slide
    is smaller than its parent. Word does not, which is why this is slide-only. */
 .md--slide ul ul, .md--slide ol ol, .md--slide ul ol, .md--slide ol ul { font-size: .875em; }

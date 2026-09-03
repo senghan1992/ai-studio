@@ -35,6 +35,8 @@ struct Inherited {
     bullets: Vec<Option<Option<BulletStyle>>>,
     /// Size, weight, colour and alignment per level, from the same `lstStyle`.
     text: Vec<TextDefaults>,
+    /// The `lstStyle` itself, for the bullet glyph and indentation per level.
+    list_style: Option<Node>,
 }
 
 /// The text formatting a level declares, wherever it was declared.
@@ -220,6 +222,10 @@ struct Theme {
     /// `otherStyle`, which a text box and an autoshape follow. PowerPoint's own
     /// default is 18pt, and it is stated here rather than assumed.
     other_text: Vec<TextDefaults>,
+    /// The master's three text styles as read, for glyphs and indents.
+    body_style: Option<Node>,
+    title_style: Option<Node>,
+    other_style: Option<Node>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -469,13 +475,16 @@ fn read_theme(package: &Package, slide_rels: &HashMap<String, Relationship>) -> 
     if let Some(body) = master.path(&["txStyles", "bodyStyle"]) {
         theme.body_bullets = levels_of(body);
         theme.body_text = text_levels_of(body, &theme);
+        theme.body_style = Some(body.clone());
     }
     if let Some(title) = master.path(&["txStyles", "titleStyle"]) {
         theme.title_bullets = levels_of(title);
         theme.title_text = text_levels_of(title, &theme);
+        theme.title_style = Some(title.clone());
     }
     if let Some(other) = master.path(&["txStyles", "otherStyle"]) {
         theme.other_text = text_levels_of(other, &theme);
+        theme.other_style = Some(other.clone());
     }
 
     // A master with no `otherStyle` still draws a text box at PowerPoint's own
@@ -968,6 +977,9 @@ fn collect_placeholders(tree: &Node, theme: &Theme, out: &mut Placeholders) {
             if levels.iter().any(Option::is_some) {
                 entry.bullets = levels;
             }
+            if !style.children.is_empty() {
+                entry.list_style = Some(style.clone());
+            }
             // The layout is where a template says "this deck's titles are
             // 32pt", overriding the master for that one layout.
             let text = text_levels_of(style, theme);
@@ -1294,7 +1306,25 @@ impl SlideCtx<'_> {
                     .flatten()
             })
             .collect();
-        ListStyle { levels }
+        let mut sources: Vec<Node> = Vec::new();
+        if let Some(style) = sp.path(&["txBody", "lstStyle"]) {
+            sources.push(style.clone());
+        }
+        if let Some(style) = placeholder
+            .and_then(|ph| inherited_for(&self.placeholders, ph))
+            .and_then(|entry| entry.list_style.clone())
+        {
+            sources.push(style);
+        }
+        let master = match family {
+            Family::Title => &self.theme.title_style,
+            Family::Body => &self.theme.body_style,
+            Family::Other => &self.theme.other_style,
+        };
+        if let Some(style) = master {
+            sources.push(style.clone());
+        }
+        ListStyle { levels, sources }
     }
 
     /// Whether the design says to show a footer, date or slide-number field.
@@ -1400,6 +1430,12 @@ impl SlideCtx<'_> {
         // A shape with no words has no text formatting worth keeping.
         if markdown.trim().is_empty() {
             text_style = IndexMap::new();
+        }
+        // The bullets' own look — glyph and where the text starts — per level
+        // used, so a re-export draws `■` where the author had `■`, hanging the
+        // way it hung, instead of this format's `•` at its own indent.
+        if let Some(list) = body.and_then(|b| list_look(b, &list_style)) {
+            text_style.insert("list".to_string(), list);
         }
         let is_title = placeholder
             .and_then(|ph| ph.attr("type"))
@@ -1864,7 +1900,10 @@ impl SlideCtx<'_> {
             let text = ai_format::mdblocks::plain_text(&paragraphs_to_markdown(
                 body,
                 self.rels,
-                &ListStyle { levels: Vec::new() },
+                &ListStyle {
+                    levels: Vec::new(),
+                    sources: Vec::new(),
+                },
             ));
             if !text.trim().is_empty() && !lines.contains(&text) {
                 lines.push(text);
@@ -2042,11 +2081,60 @@ fn cell_format(tc: &Node) -> CellFormat {
 #[derive(Default)]
 struct ListStyle {
     levels: Vec<Option<BulletStyle>>,
+    /// The `lstStyle`/`*Style` nodes that apply, nearest first, for the bullet
+    /// glyph and indentation a level inherits.
+    sources: Vec<Node>,
+}
+
+/// One list level's look: the glyph and where the text starts.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LevelLook {
+    glyph: Option<String>,
+    /// Left margin of the text in px (`marL`).
+    mar_l: Option<f64>,
+    /// First-line offset in px (`indent`, negative for a hanging bullet).
+    indent: Option<f64>,
+}
+
+impl LevelLook {
+    fn from_props(props: &Node) -> LevelLook {
+        LevelLook {
+            glyph: props
+                .child("buChar")
+                .and_then(|b| b.attr("char"))
+                .filter(|c| !c.is_empty())
+                .map(str::to_string),
+            mar_l: props.attr_i64("marL").map(|v| px(v).round()),
+            indent: props.attr_i64("indent").map(|v| px(v).round()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.glyph.is_none() && self.mar_l.is_none() && self.indent.is_none()
+    }
+
+    /// Fill what is missing from a further source.
+    fn under(mut self, weaker: LevelLook) -> LevelLook {
+        self.glyph = self.glyph.or(weaker.glyph);
+        self.mar_l = self.mar_l.or(weaker.mar_l);
+        self.indent = self.indent.or(weaker.indent);
+        self
+    }
 }
 
 impl ListStyle {
     fn at(&self, level: usize) -> Option<BulletStyle> {
         self.levels.get(level).copied().flatten()
+    }
+
+    /// The glyph and indentation for a level, nearest declaration first.
+    fn look_at(&self, level: usize) -> LevelLook {
+        let name = format!("lvl{}pPr", level + 1);
+        self.sources
+            .iter()
+            .filter_map(|s| s.child(&name))
+            .map(LevelLook::from_props)
+            .fold(LevelLook::default(), LevelLook::under)
     }
 }
 
@@ -2170,6 +2258,55 @@ fn bullet_of(p: &Node, list_style: &ListStyle) -> Option<Bullet> {
     }
 }
 
+/// `{"levels": [{"glyph": "■", "marL": 27, "indent": -27}, …]}` for the list
+/// levels a body actually uses, or `None` when nothing in it is bulleted. A
+/// paragraph's own `pPr` outranks the inherited look, as PowerPoint resolves it.
+fn list_look(body: &Node, list_style: &ListStyle) -> Option<Json> {
+    let mut per_level: Vec<Option<LevelLook>> = Vec::new();
+    for p in body.children_named("p") {
+        let Some(bullet) = bullet_of(p, list_style) else {
+            continue;
+        };
+        let level = match bullet {
+            Bullet::Unordered(level) | Bullet::Ordered(level) => level,
+        };
+        let own = p
+            .child("pPr")
+            .map(LevelLook::from_props)
+            .unwrap_or_default();
+        let look = own.under(list_style.look_at(level));
+        if per_level.len() <= level {
+            per_level.resize(level + 1, None);
+        }
+        if per_level[level].is_none() && !look.is_empty() {
+            per_level[level] = Some(look);
+        }
+    }
+    if per_level.iter().all(Option::is_none) {
+        return None;
+    }
+    let levels: Vec<Json> = per_level
+        .into_iter()
+        .map(|look| match look {
+            None => Json::Null,
+            Some(look) => {
+                let mut o = serde_json::Map::new();
+                if let Some(g) = look.glyph {
+                    o.insert("glyph".into(), json!(g));
+                }
+                if let Some(m) = look.mar_l {
+                    o.insert("marL".into(), json!(m));
+                }
+                if let Some(i) = look.indent {
+                    o.insert("indent".into(), json!(i));
+                }
+                Json::Object(o)
+            }
+        })
+        .collect();
+    Some(json!({ "levels": levels }))
+}
+
 fn runs_to_markdown_inline(
     p: &Node,
     rels: &HashMap<String, Relationship>,
@@ -2214,6 +2351,7 @@ fn run_to_markdown(
     }
     let props = r.child("rPr");
     let bold = !ignore_bold && props.map(|p| p.attr_bool("b")).unwrap_or(false);
+    let underline = props.and_then(|p| p.attr("u")).is_some_and(|u| u != "none");
     let italic = props.map(|p| p.attr_bool("i")).unwrap_or(false);
     let strike = props
         .and_then(|p| p.attr("strike"))
@@ -2241,6 +2379,10 @@ fn run_to_markdown(
         (true, false) => wrapped = format!("**{wrapped}**"),
         (false, true) => wrapped = format!("*{wrapped}*"),
         (false, false) => {}
+    }
+    // Markdown has no underline; the one HTML tag every renderer draws does.
+    if underline {
+        wrapped = format!("<u>{wrapped}</u>");
     }
 
     // A colour or family this run has and its block does not. Colour is

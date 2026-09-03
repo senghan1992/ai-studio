@@ -1545,3 +1545,86 @@ fn paragraph_spacing_from_the_master_is_kept_and_written_back() {
         serde_json::json!(7.7)
     );
 }
+
+#[test]
+fn a_bullets_glyph_and_hanging_indent_come_back_as_the_author_set_them() {
+    // A `■` bullet with a 36px hanging indent from the master's body style.
+    // Exported as this format's `•` at a compact indent, every list in a real
+    // deck changed shape.
+    let deck = Builder::new()
+        .master_styles(
+            "<p:txStyles><p:titleStyle><a:lvl1pPr><a:buNone/></a:lvl1pPr></p:titleStyle>\
+             <p:bodyStyle><a:lvl1pPr marL=\"342900\" indent=\"-342900\"><a:buChar char=\"■\"/><a:defRPr sz=\"2000\"/></a:lvl1pPr>\
+             <a:lvl2pPr marL=\"742950\" indent=\"-285750\"><a:buChar char=\"–\"/><a:defRPr sz=\"1800\"/></a:lvl2pPr></p:bodyStyle>\
+             <p:otherStyle><a:lvl1pPr/></p:otherStyle></p:txStyles>",
+        )
+        .slide(&placeholder(
+            "body",
+            "<a:bodyPr/><a:p><a:r><a:t>첫 항목</a:t></a:r></a:p><a:p><a:pPr lvl=\"1\"/><a:r><a:t>하위 항목</a:t></a:r></a:p>",
+        ))
+        .build();
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.md, "- 첫 항목\n  - 하위 항목");
+    let levels = &block.style["list"]["levels"];
+    assert_eq!(levels[0]["glyph"], serde_json::json!("■"), "{levels}");
+    assert_eq!(levels[0]["marL"], serde_json::json!(36.0));
+    assert_eq!(levels[0]["indent"], serde_json::json!(-36.0));
+    assert_eq!(levels[1]["glyph"], serde_json::json!("–"));
+
+    let ws = Workspace::new("pptxbullets");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "불릿", false).unwrap();
+    project.items = Items::Slides(slides.clone());
+    let project = save_project(&project).unwrap();
+    let exported = export(&project, Format::Pptx).unwrap();
+    let xml = String::from_utf8_lossy(
+        Package::open(&exported)
+            .unwrap()
+            .bytes("ppt/slides/slide1.xml")
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(xml.contains("<a:buChar char=\"■\"/>"), "{xml}");
+    assert!(xml.contains("indent=\"-342900\" marL=\"342900\""), "{xml}");
+    assert!(xml.contains("<a:buChar char=\"–\"/>"), "{xml}");
+    let again = read_deck(&exported);
+    assert_eq!(again[0].blocks[0].style["list"], block.style["list"]);
+}
+
+#[test]
+fn an_underlined_run_survives_as_a_u_tag() {
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="457200"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/><a:p>
+                   <a:r><a:rPr sz="1400"/><a:t>관련 </a:t></a:r>
+                   <a:r><a:rPr sz="1400" u="sng" b="1"/><a:t>티켓 번호</a:t></a:r>
+                   <a:r><a:rPr sz="1400" u="none"/><a:t> 제공</a:t></a:r>
+                 </a:p></p:txBody></p:sp>"#,
+        )
+        .build();
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.md, "관련 <u>**티켓 번호**</u> 제공", "{}", block.md);
+    assert_eq!(
+        ai_format::mdblocks::plain_text(&block.md),
+        "관련 티켓 번호 제공"
+    );
+
+    let ws = Workspace::new("pptxunderline");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "밑줄", false).unwrap();
+    project.items = Items::Slides(slides.clone());
+    let project = save_project(&project).unwrap();
+    let exported = export(&project, Format::Pptx).unwrap();
+    let xml = String::from_utf8_lossy(
+        Package::open(&exported)
+            .unwrap()
+            .bytes("ppt/slides/slide1.xml")
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(xml.contains("u=\"sng\""), "{xml}");
+    assert!(!xml.contains("<u>"), "{xml}");
+    assert_eq!(read_deck(&exported)[0].blocks[0].md, block.md);
+}

@@ -22,6 +22,27 @@ const MIN_H = 28;
  * by `scale` at the point where mouse deltas come in, so what gets written to
  * layout.json is resolution-independent.
  */
+/**
+ * CSS variables for an imported deck's bullet look, per level: the glyph the
+ * author used and how far the text is set in. Unset, the editor's own bullets
+ * apply. Level indents are the author's `marL` deltas between levels.
+ */
+export function listVars(list) {
+  const out = {};
+  const levels = list?.levels;
+  if (!Array.isArray(levels)) return out;
+  let previous = 0;
+  levels.slice(0, 4).forEach((level, i) => {
+    if (!level) return;
+    if (typeof level.glyph === 'string' && level.glyph) out[`--bullet-${i}`] = JSON.stringify(level.glyph);
+    if (typeof level.marL === 'number') {
+      out[`--list-indent-${i}`] = `${Math.max(level.marL - previous, 8)}px`;
+      previous = level.marL;
+    }
+  });
+  return out;
+}
+
 export default function SlideCanvas({
   slide, scale, selectedId, editingId, folder,
   onSelect, onEdit, onChangeBlock, onChangeBlockMd, onAddBlock, onDeleteBlock,
@@ -472,6 +493,7 @@ function Block({
     // Paragraph spacing an imported slide states (px); unset keeps the editor's.
     '--space-before': style.spaceBefore != null ? `${style.spaceBefore}px` : undefined,
     '--space-after': style.spaceAfter != null ? `${style.spaceAfter}px` : undefined,
+    ...listVars(style.list),
     display: 'flex',
     flexDirection: 'column',
     justifyContent: style.valign === 'middle' ? 'center' : style.valign === 'bottom' ? 'flex-end' : 'flex-start',

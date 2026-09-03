@@ -83,6 +83,9 @@ fn run_props(
     if run.italic {
         out.push_str(" i=\"1\"");
     }
+    if run.underline {
+        out.push_str(" u=\"sng\"");
+    }
     if run.strike {
         out.push_str(" strike=\"sngStrike\"");
     }
@@ -113,6 +116,8 @@ fn run_props(
 struct Paragraph {
     /// Bullet level, or `None` for a plain paragraph.
     bullet: Option<(usize, bool)>,
+    /// The level's own look from an imported deck: glyph, `marL`, `indent` (px).
+    look: Option<(Option<String>, Option<f64>, Option<f64>)>,
     align: &'static str,
     size_px: f64,
     bold: bool,
@@ -131,15 +136,29 @@ fn paragraph_xml(
     links: &mut Vec<String>,
 ) -> String {
     let mut props = format!("<a:pPr algn=\"{}\" lnSpcReduction=\"0\"", p.align);
+    let (glyph, mar_l, indent) = p.look.clone().unwrap_or((None, None, None));
     if let Some((level, _)) = p.bullet {
         if level > 0 {
             props.push_str(&format!(" lvl=\"{}\"", level.min(8)));
         }
-        props.push_str(&format!(
-            " indent=\"{}\" marL=\"{}\"",
-            emu(-14.0),
-            emu(20.0 * (level as f64 + 1.0))
-        ));
+        // The author's own margin and hanging indent when the deck came with
+        // them — only the ones it stated, so a re-import reads back the same
+        // — and this format's compact defaults for a list written here.
+        match &p.look {
+            Some(_) => {
+                if let Some(indent) = indent {
+                    props.push_str(&format!(" indent=\"{}\"", emu(indent)));
+                }
+                if let Some(mar_l) = mar_l {
+                    props.push_str(&format!(" marL=\"{}\"", emu(mar_l)));
+                }
+            }
+            None => props.push_str(&format!(
+                " indent=\"{}\" marL=\"{}\"",
+                emu(-14.0),
+                emu(20.0 * (level as f64 + 1.0))
+            )),
+        }
     }
     props.push('>');
     // Only a spacing the block states. An imported deck's text says nothing
@@ -168,7 +187,11 @@ fn paragraph_xml(
             props.push_str("<a:buFont typeface=\"+mj-lt\"/><a:buAutoNum type=\"arabicPeriod\"/>")
         }
         Some((_, false)) => {
-            props.push_str("<a:buFont typeface=\"Arial\"/><a:buChar char=\"\u{2022}\"/>")
+            let glyph = glyph.unwrap_or_else(|| "\u{2022}".to_string());
+            props.push_str(&format!(
+                "<a:buFont typeface=\"Arial\"/><a:buChar char=\"{}\"/>",
+                esc(&glyph)
+            ));
         }
     }
     props.push_str("</a:pPr>");
@@ -203,6 +226,19 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
     let font = style_str(style, "font")
         .filter(|f| ai_format::font::is_substitution(f))
         .map(str::to_string);
+    // Per-level bullet look an import recorded: `list.levels[level]`.
+    let look_at = |level: usize| -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+        let entry = style.get("list")?.get("levels")?.get(level)?;
+        let entry = entry.as_object()?;
+        Some((
+            entry
+                .get("glyph")
+                .and_then(|g| g.as_str())
+                .map(str::to_string),
+            entry.get("marL").and_then(|v| v.as_f64()),
+            entry.get("indent").and_then(|v| v.as_f64()),
+        ))
+    };
 
     let mut out = Vec::new();
     for block in parse_markdown(md) {
@@ -210,6 +246,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             // A slide has no pages to break.
             Block::PageBreak => {}
             Block::Heading { level, runs } => out.push(Paragraph {
+                look: None,
                 font: font.clone(),
                 bullet: None,
                 align,
@@ -220,6 +257,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                 runs,
             }),
             Block::Paragraph { runs } | Block::Quote { runs } => out.push(Paragraph {
+                look: None,
                 font: font.clone(),
                 bullet: None,
                 align,
@@ -230,6 +268,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::List { items, .. } => {
                 for item in items {
                     out.push(Paragraph {
+                        look: look_at(item.level),
                         font: font.clone(),
                         bullet: Some((item.level, item.ordered)),
                         align,
@@ -243,6 +282,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::Code { text, .. } => {
                 for line in text.split('\n') {
                     out.push(Paragraph {
+                        look: None,
                         font: font.clone(),
                         bullet: None,
                         align: "l",
@@ -264,6 +304,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                         .collect::<Vec<_>>()
                         .join("  |  ");
                     out.push(Paragraph {
+                        look: None,
                         font: font.clone(),
                         bullet: None,
                         align,
@@ -276,6 +317,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
             Block::Image { alt, .. } => {
                 if !alt.is_empty() {
                     out.push(Paragraph {
+                        look: None,
                         font: font.clone(),
                         bullet: None,
                         align,
@@ -290,6 +332,7 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                 }
             }
             Block::Hr => out.push(Paragraph {
+                look: None,
                 font: font.clone(),
                 bullet: None,
                 align,

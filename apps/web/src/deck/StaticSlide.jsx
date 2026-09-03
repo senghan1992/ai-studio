@@ -1,4 +1,14 @@
 import React from 'react';
+import { listVars } from './SlideCanvas.jsx';
+
+/** `listVars`, with the indents scaled to the stage. */
+function scaledListVars(list, scale) {
+  const vars = listVars(list);
+  for (const key of Object.keys(vars)) {
+    if (key.startsWith('--list-indent-')) vars[key] = `${parseFloat(vars[key]) * scale}px`;
+  }
+  return vars;
+}
 import { renderMarkdown } from '../lib/markdown.js';
 import { assetUrl, isProjectAsset } from '../api.js';
 import ChartView from '../components/ChartView.jsx';
@@ -109,6 +119,7 @@ function BlockContent({ block, scale, folder, canvasBg }) {
         lineHeight: style.lineHeight ?? 1.45,
         '--space-before': style.spaceBefore != null ? `${style.spaceBefore * scale}px` : undefined,
         '--space-after': style.spaceAfter != null ? `${style.spaceAfter * scale}px` : undefined,
+        ...scaledListVars(style.list, scale),
         height: '100%',
         display: 'flex',
         flexDirection: 'column',

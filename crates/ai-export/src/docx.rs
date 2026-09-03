@@ -89,7 +89,7 @@ fn run_xml(run: &Run, style: Option<&Override>) -> String {
     if run.italic || flag("italic") {
         props.push_str("<w:i/>");
     }
-    if flag("underline") {
+    if run.underline || flag("underline") {
         props.push_str("<w:u w:val=\"single\"/>");
     }
     if run.strike {

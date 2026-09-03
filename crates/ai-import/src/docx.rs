@@ -807,10 +807,11 @@ impl DocCtx<'_> {
         let properties = r.child("rPr");
         let flag = |name: &str| {
             properties.and_then(|p| p.child(name)).is_some_and(|n| {
-                // `<w:b/>` means on; `<w:b w:val="0"/>` means off.
-                !matches!(n.attr("val"), Some("0" | "false"))
+                // `<w:b/>` means on; `<w:b w:val="0"/>` and `<w:u w:val="none"/>` off.
+                !matches!(n.attr("val"), Some("0" | "false" | "none"))
             })
         };
+        let underline = flag("u");
         let bold = !ignore_bold && flag("b");
         let italic = flag("i");
         let strike = flag("strike");
@@ -838,6 +839,9 @@ impl DocCtx<'_> {
             (true, false) => core = format!("**{core}**"),
             (false, true) => core = format!("*{core}*"),
             (false, false) => {}
+        }
+        if underline {
+            core = format!("<u>{core}</u>");
         }
 
         // A colour or family this run has and its paragraph does not — the one

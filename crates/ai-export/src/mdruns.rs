@@ -22,6 +22,8 @@ pub struct Run {
     pub color: Option<String>,
     /// From `font-family:` in the same span.
     pub font: Option<String>,
+    /// From an inline `<u>…</u>` — markdown's one way to say underline.
+    pub underline: bool,
 }
 
 impl Run {
@@ -302,6 +304,7 @@ static RULES: Lazy<Vec<InlineRule>> = Lazy::new(|| {
 
 static INLINE_SPAN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?s)<span style="([^"]*)">(.*?)</span>"#).unwrap());
+static INLINE_U: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<u>(.*?)</u>").unwrap());
 
 /// Split inline markdown into styled runs.
 ///
@@ -329,9 +332,32 @@ pub fn inline_runs(text: &str) -> Vec<Run> {
                 _ => {}
             }
         }
-        for mut run in inline_runs_plain(&span[2]) {
+        for mut run in inline_runs_underlined(&span[2]) {
             run.color = run.color.or_else(|| color.clone());
             run.font = run.font.or_else(|| font.clone());
+            runs.push(run);
+        }
+        last = whole.end();
+    }
+    let after = &text[last..];
+    if last == 0 || !after.is_empty() {
+        runs.extend(inline_runs_underlined(after));
+    }
+    runs
+}
+
+/// `<u>…</u>` marks its runs underlined; the rest is plain markdown.
+fn inline_runs_underlined(text: &str) -> Vec<Run> {
+    let mut runs = Vec::new();
+    let mut last = 0;
+    for m in INLINE_U.captures_iter(text) {
+        let whole = m.get(0).unwrap();
+        let before = &text[last..whole.start()];
+        if !before.is_empty() {
+            runs.extend(inline_runs_plain(before));
+        }
+        for mut run in inline_runs_plain(&m[1]) {
+            run.underline = true;
             runs.push(run);
         }
         last = whole.end();
@@ -455,6 +481,7 @@ fn inline_runs_plain(text: &str) -> Vec<Run> {
                 link: None,
                 color: None,
                 font: None,
+                underline: false,
             });
             i += c.get(0).unwrap().len();
             matched = true;
@@ -763,6 +790,20 @@ mod tests {
             items.iter().map(|i| i.ordered).collect::<Vec<_>>(),
             vec![true, false, false]
         );
+    }
+
+    #[test]
+    fn an_underline_tag_marks_its_runs() {
+        let runs = inline_runs("관련 <u>**티켓** 번호</u> 제공");
+        assert_eq!(runs_to_text(&runs), "관련 티켓 번호 제공");
+        assert!(!runs[0].underline);
+        assert!(runs[1].underline && runs[1].bold);
+        assert!(runs[2].underline);
+        assert!(!runs[3].underline);
+        // Inside a coloured span too.
+        let runs = inline_runs("<span style=\"color:#a50034\"><u>핵심</u></span>");
+        assert!(runs[0].underline);
+        assert_eq!(runs[0].color.as_deref(), Some("#a50034"));
     }
 
     #[test]
