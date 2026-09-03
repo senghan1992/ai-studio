@@ -114,7 +114,8 @@ fn align_name(algn: &str) -> Option<&'static str> {
     }
 }
 
-/// Line spacing as a multiplier: `spcPct val="150000"` is 1.5.
+/// Line spacing as the editor's multiplier: `spcPct val="150000"` is 1.5 lines,
+/// which in CSS terms is 1.5 × [`ai_format::deck::SINGLE_SPACING`].
 ///
 /// `spcPts` is an absolute height in points, which cannot become a multiplier
 /// without knowing the font size, so it is left to the renderer's default.
@@ -122,7 +123,8 @@ fn line_spacing(properties: &Node) -> Option<f64> {
     let pct = properties
         .path(&["lnSpc", "spcPct"])
         .and_then(|n| n.attr_i64("val"))?;
-    Some(((pct as f64 / 100_000.0) * 100.0).round() / 100.0)
+    let lines = pct as f64 / 100_000.0;
+    Some((lines * ai_format::deck::SINGLE_SPACING * 100.0).round() / 100.0)
 }
 
 /// The formatting one `lvlNpPr`-shaped node declares.
@@ -1332,6 +1334,22 @@ impl SlideCtx<'_> {
         let defaults = self.text_defaults(sp, placeholder);
 
         let body = sp.child("txBody");
+        // A block that is nothing but sub-bullets is drawn smaller by the
+        // editor (and exported smaller to match), so its stated size is lifted
+        // by the same factor here and lands back on the author's size.
+        let list_level = body
+            .and_then(|b| b.children_named("p").next())
+            .and_then(|p| bullet_of(p, &list_style))
+            .map(|bullet| match bullet {
+                Bullet::Unordered(level) | Bullet::Ordered(level) => level,
+            })
+            .unwrap_or(0);
+        let mut text_style = body
+            .map(|b| text_style(b, &defaults, &self.theme, list_level))
+            .unwrap_or_default();
+        // Weight that is block-wide lives in the style; writing `**` on every
+        // run as well would double it up on the next open.
+        let block_bold = text_style.get("weight") == Some(&json!(700));
         let markdown = body
             .map(|b| {
                 let inline = Inline {
@@ -1339,12 +1357,13 @@ impl SlideCtx<'_> {
                     color: dominant_run_color(b, &self.theme),
                     font: dominant_run_font(b),
                 };
-                paragraphs_to_markdown_in(b, self.rels, &list_style, &inline)
+                paragraphs_to_markdown_inline(b, self.rels, &list_style, block_bold, &inline)
             })
             .unwrap_or_default();
-        let text_style = body
-            .map(|b| text_style(b, &defaults, &self.theme))
-            .unwrap_or_default();
+        // A shape with no words has no text formatting worth keeping.
+        if markdown.trim().is_empty() {
+            text_style = IndexMap::new();
+        }
         let is_title = placeholder
             .and_then(|ph| ph.attr("type"))
             .is_some_and(|t| matches!(t, "title" | "ctrTitle"));
@@ -2022,18 +2041,6 @@ impl Inline<'_> {
     }
 }
 
-/// A text body's markdown with runs that differ from the block marked inline.
-fn paragraphs_to_markdown_in(
-    body: &Node,
-    rels: &HashMap<String, Relationship>,
-    list_style: &ListStyle,
-    inline: &Inline<'_>,
-) -> String {
-    paragraphs_to_markdown_inline(body, rels, list_style, false, inline)
-}
-
-/// The same, with `ignore_bold` for text whose weight is already implied by its
-/// place — a table's header row, or its first column.
 fn paragraphs_to_markdown_with(
     body: &Node,
     rels: &HashMap<String, Relationship>,
@@ -2055,7 +2062,11 @@ fn paragraphs_to_markdown_inline(
         .map(|p| {
             let text = runs_to_markdown_inline(p, rels, ignore_bold, inline);
             match bullet_of(p, list_style) {
-                None => text,
+                // An empty paragraph is a blank line the author left; as an
+                // empty markdown line it would be a paragraph break and vanish
+                // on export. A no-break space is a line that stays.
+                None if text.trim().is_empty() => "\u{a0}".to_string(),
+                None => ai_format::mdblocks::escape_literal_marker(&text),
                 Some(Bullet::Unordered(level)) => {
                     format!("{}- {text}", "  ".repeat(level))
                 }
@@ -2251,6 +2262,7 @@ fn text_style(
     body: &Node,
     defaults: &[TextDefaults],
     theme: &Theme,
+    list_level: usize,
 ) -> IndexMap<String, serde_json::Value> {
     let mut style = IndexMap::new();
 
@@ -2300,7 +2312,16 @@ fn text_style(
         .unwrap_or(0.0);
 
     if let Some(size) = resolved.size {
-        style.insert("fontSize".to_string(), json!((size * scale).round()));
+        let size = size * scale;
+        let size = if list_level > 0 {
+            // Lifted so the editor's per-level shrink draws the real size; two
+            // decimals, because the export multiplies back and must hit it.
+            let lifted = size / ai_format::mdblocks::NESTED_LIST_EM.powi(list_level as i32);
+            (lifted * 100.0).round() / 100.0
+        } else {
+            size.round()
+        };
+        style.insert("fontSize".to_string(), json!(size));
     }
     // Weight is block-wide in this format, so it may only be promoted when
     // the boldness really is block-wide: inherited from the layout/master, or
@@ -2346,17 +2367,20 @@ fn text_style(
     if let Some(align) = resolved.align {
         style.insert("align".to_string(), json!(align));
     }
-    if let Some(line) = resolved.line.map(|l| l * (1.0 - reduction)) {
-        style.insert(
-            "lineHeight".to_string(),
-            json!((line * 100.0).round() / 100.0),
-        );
-    }
+    // Unstated spacing is PowerPoint's single spacing, and it is written down:
+    // left blank, the editor's own (looser) default would fill it in on the
+    // next open and go back out as a spacing the author never set.
+    let line = resolved.line.unwrap_or(ai_format::deck::SINGLE_SPACING) * (1.0 - reduction);
+    style.insert(
+        "lineHeight".to_string(),
+        json!((line * 100.0).round() / 100.0),
+    );
     if let Some(anchor) = body.child("bodyPr").and_then(|b| b.attr("anchor")) {
         let mapped = match anchor {
             "ctr" => Some("middle"),
             "b" => Some("bottom"),
-            "t" => Some("top"),
+            // Top is the default on both sides and is not written.
+            "t" => None,
             _ => None,
         };
         if let Some(mapped) = mapped {

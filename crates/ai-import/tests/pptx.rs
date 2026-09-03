@@ -599,8 +599,8 @@ fn autofit_shrinks_the_size_the_way_powerpoint_did() {
     );
     assert_eq!(
         block.style["lineHeight"],
-        serde_json::json!(1.2),
-        "1.5 spacing reduced by 20%"
+        serde_json::json!(1.44),
+        "1.5 lines is 1.8 in CSS terms, reduced by 20%"
     );
 }
 
@@ -1412,4 +1412,51 @@ fn an_imported_deck_goes_back_out_on_its_own_design() {
     let again = read_deck(&exported);
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].blocks.len(), 2, "{:?}", again[0].blocks);
+}
+
+#[test]
+fn a_numbered_title_typed_as_text_stays_text_through_the_export() {
+    // "2. 클라우드 전환" is a section title an author typed, not a list. As
+    // markdown it would be an ordered list, and the export renumbered it "1.".
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="457200"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/>
+                   <a:p><a:r><a:rPr sz="2000" b="1"/><a:t>2. 클라우드 전환</a:t></a:r></a:p>
+                   <a:p><a:r><a:rPr sz="2000" b="1"/><a:t>0. 배경</a:t></a:r></a:p>
+                 </p:txBody></p:sp>"#,
+        )
+        .build();
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.md, "2\\. 클라우드 전환\n0\\. 배경", "{}", block.md);
+    // Block-wide bold lives in the style, not as `**` on every run.
+    assert_eq!(block.style["weight"], serde_json::json!(700));
+    assert_eq!(
+        ai_format::mdblocks::plain_text(&block.md),
+        "2. 클라우드 전환\n0. 배경"
+    );
+
+    let ws = Workspace::new("pptxliteral");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "번호", false).unwrap();
+    project.items = Items::Slides(slides.clone());
+    let project = save_project(&project).unwrap();
+    let exported = export(&project, Format::Pptx).unwrap();
+    let xml = String::from_utf8_lossy(
+        Package::open(&exported)
+            .unwrap()
+            .bytes("ppt/slides/slide1.xml")
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(!xml.contains("buAutoNum"), "not a list: {xml}");
+    assert!(xml.contains("2. 클라우드 전환"), "{xml}");
+    // And the same markdown comes back: the round trip is a fixed point.
+    let again = read_deck(&exported);
+    assert_eq!(again[0].blocks[0].md, block.md);
+    assert_eq!(
+        again[0].blocks[0].style.get("weight"),
+        block.style.get("weight")
+    );
 }

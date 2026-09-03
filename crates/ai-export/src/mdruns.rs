@@ -37,6 +37,9 @@ impl Run {
 pub struct ListItem {
     /// Nesting depth, from the source indentation.
     pub level: usize,
+    /// This item's own marker: `1.` numbered, `-` a bullet. A slide mixes
+    /// the two in one block routinely, so the kind is not the list's.
+    pub ordered: bool,
     pub runs: Vec<Run>,
 }
 
@@ -81,14 +84,38 @@ static BLOCK_IMAGE: Lazy<Regex> =
 static TABLE_RULE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\|[\s:|-]*-[\s:|-]*\|?$").unwrap());
 static QUOTE_PREFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[ \t]*>[ \t]?").unwrap());
 static LIST_START: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([-+*]|\d+[.)])[ \t]+").unwrap());
+/// One space after the marker belongs to the syntax; any more are the item's
+/// own text — an author's manual indentation, kept as typed.
 static LIST_ITEM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^([ \t]*)(?:[-+*]|\d+[.)])[ \t]+(.*)$").unwrap());
+    Lazy::new(|| Regex::new(r"^([ \t]*)([-+*]|\d+[.)])[ \t](.*)$").unwrap());
 
 pub fn parse_markdown(md: &str) -> Vec<Block> {
     split_markdown_blocks(md)
         .into_iter()
-        .filter_map(|part| to_block(&part.md))
+        .flat_map(|part| split_leading_paragraph(&part.md))
+        .filter_map(|piece| to_block(&piece))
         .collect()
+}
+
+/// A block whose first lines are prose and whose later lines are list items —
+/// a heading-like line with its bullets right under it, as a slide writes it —
+/// is a paragraph followed by a list, the way every renderer already draws it.
+/// Reading the whole block as a paragraph turned the bullets into literal text.
+fn split_leading_paragraph(md: &str) -> Vec<String> {
+    let trimmed = md.trim_start();
+    if trimmed.starts_with("```")
+        || trimmed.starts_with("~~~")
+        || trimmed.starts_with('|')
+        || trimmed.starts_with('>')
+        || LIST_START.is_match(trimmed)
+    {
+        return vec![md.to_string()];
+    }
+    let lines: Vec<&str> = md.lines().collect();
+    match lines.iter().position(|l| LIST_ITEM.is_match(l)) {
+        Some(at) if at > 0 => vec![lines[..at].join("\n"), lines[at..].join("\n")],
+        _ => vec![md.to_string()],
+    }
 }
 
 /// The row's closing `|` — but a trailing `\|` is the last cell's own text.
@@ -188,19 +215,29 @@ fn to_block(text: &str) -> Option<Block> {
             .chars()
             .any(|c| c.is_ascii_digit());
         let mut items: Vec<ListItem> = Vec::new();
-        for line in trimmed.lines() {
+        // The original lines, not the trimmed block: a block holding only
+        // sub-bullets starts indented, and trimming it dropped the first
+        // item to level 0 while its siblings stayed at level 1.
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
             match LIST_ITEM.captures(line) {
                 Some(c) => {
                     let indent = c.get(1).unwrap().as_str().replace('\t', "  ").len();
                     items.push(ListItem {
                         level: indent / 2,
-                        runs: inline_runs(c.get(2).unwrap().as_str()),
+                        ordered: c
+                            .get(2)
+                            .unwrap()
+                            .as_str()
+                            .starts_with(|ch: char| ch.is_ascii_digit()),
+                        runs: inline_runs(c.get(3).unwrap().as_str()),
                     });
                 }
                 None => {
-                    // A wrapped continuation line belongs to the previous item.
+                    // A continuation line belongs to the previous item, as its
+                    // own line: the author broke it there (Shift+Enter), and
+                    // the spaces in front of it are theirs too.
                     if let Some(last) = items.last_mut() {
-                        last.runs.push(Run::plain(format!(" {}", line.trim())));
+                        last.runs.push(Run::plain(format!("\n{}", line.trim_end())));
                     }
                 }
             }
@@ -210,7 +247,7 @@ fn to_block(text: &str) -> Option<Block> {
         }
     }
 
-    if trimmed.is_empty() {
+    if ai_format::mdblocks::is_blank(text) {
         return None;
     }
     // A newline inside a paragraph is a line break, not a space: the editor
@@ -218,7 +255,10 @@ fn to_block(text: &str) -> Option<Block> {
     // its original paragraphs on its own line this way. Both exporters turn the
     // `\n` into `<a:br>`/`<w:br/>`; folding it to a space merged a text box's
     // eight bullet lines into one run-on paragraph on export.
-    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    // Spaces stay where the author put them — before a line, after it, and
+    // an empty first line: PowerPoint shows all three, and trimming any of
+    // them made the next re-import differ from this one.
+    let lines: Vec<&str> = text.lines().collect();
     Some(Block::Paragraph {
         runs: inline_runs(&lines.join("\n")),
     })
@@ -640,7 +680,8 @@ mod tests {
             panic!("{blocks:?}")
         };
         assert_eq!(items.len(), 1);
-        assert_eq!(runs_to_text(&items[0].runs), "첫 항목 계속되는 줄");
+        // A line break inside the item, with the author's indentation kept.
+        assert_eq!(runs_to_text(&items[0].runs), "첫 항목\n  계속되는 줄");
     }
 
     #[test]
@@ -653,7 +694,7 @@ mod tests {
         let Block::Paragraph { runs } = &blocks[0] else {
             panic!("{blocks:?}")
         };
-        assert_eq!(runs_to_text(runs), "첫 줄\n둘째 줄\n셋째 줄");
+        assert_eq!(runs_to_text(runs), "첫 줄\n둘째 줄\n  셋째 줄");
     }
 
     #[test]
@@ -672,6 +713,55 @@ mod tests {
         assert_eq!(
             last.color, None,
             "outside the span the block's colour rules"
+        );
+    }
+
+    #[test]
+    fn a_nested_bullet_keeps_its_level() {
+        // An imported deck writes sub-bullets with two spaces; the export must
+        // put them back on level 1, or every hierarchy flattens on the way out.
+        let blocks =
+            parse_markdown("- 정량적 성과\n  - 분석 단계 절감\n  - 데이터 취득시간\n- 정성적 성과");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        let levels: Vec<usize> = items.iter().map(|i| i.level).collect();
+        assert_eq!(levels, vec![0, 1, 1, 0]);
+
+        // A block that is nothing but sub-bullets starts indented.
+        let blocks = parse_markdown("  - 하위 하나\n  - 하위 둘");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(
+            items.iter().map(|i| i.level).collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+    }
+
+    #[test]
+    fn a_heading_line_with_bullets_right_under_it_is_a_paragraph_then_a_list() {
+        let blocks = parse_markdown(
+            "<span style=\"color:#6b1f2a\">**Phase 1**</span>\n- 첫 항목\n- 둘째 항목",
+        );
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert!(matches!(blocks[0], Block::Paragraph { .. }));
+        let Block::List { items, .. } = &blocks[1] else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn numbered_and_bulleted_items_keep_their_own_kind_in_one_list() {
+        let blocks = parse_markdown("1. 안내\n- 세부 하나\n- 세부 둘");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(
+            items.iter().map(|i| i.ordered).collect::<Vec<_>>(),
+            vec![true, false, false]
         );
     }
 

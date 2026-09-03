@@ -868,3 +868,14 @@ fn a_run_coloured_unlike_its_paragraph_is_marked_inline_and_survives_the_round_t
     let again = read_doc(&export(&project, Format::Docx).unwrap());
     assert_eq!(again[0].blocks[0].md, first.md, "idempotent through Word");
 }
+
+#[test]
+fn a_paragraph_that_looks_like_a_list_marker_stays_a_paragraph() {
+    // "1. 배경" typed as plain text, not a numbered list — Word has no numPr
+    // on it. Left as-is the export would turn it into a list.
+    let sections = read_doc(&doc_of(
+        r#"<w:p><w:r><w:t>1. 배경 및 목표</w:t></w:r></w:p>"#,
+    ));
+    assert_eq!(sections[0].blocks[0].md, "1\\. 배경 및 목표");
+    assert_eq!(sections[0].blocks[0].block_type, BlockType::Paragraph);
+}

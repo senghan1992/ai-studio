@@ -11,6 +11,12 @@ use crate::model::{Slide, SlideBlock, SLIDE_LAYOUTS};
 use crate::shape::ShapeSpec;
 use crate::table::{apply_markdown_authority, TableSpec};
 
+/// PowerPoint's single ("100%") line spacing, as the CSS multiplier the editor
+/// draws with. A line at 100% in PowerPoint is the font's own height — about
+/// 1.2× its size — not 1.0×, so `spcPct` and `lineHeight` convert through this
+/// factor in both directions and a deck's spacing looks the same on both sides.
+pub const SINGLE_SPACING: f64 = 1.2;
+
 /// Default text styling, applied to text blocks that carry no style of their own.
 pub fn default_text_style() -> IndexMap<String, Json> {
     [

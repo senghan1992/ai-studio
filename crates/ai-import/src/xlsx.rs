@@ -680,7 +680,7 @@ fn matches(
             let count = rule.attr_i64("rank").unwrap_or(10).max(1) as usize;
             let bottom = rule.attr_bool("bottom");
             let mut sorted = ranked.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(f64::total_cmp);
             let cut = if bottom {
                 sorted.get(count.saturating_sub(1)).copied()
             } else {

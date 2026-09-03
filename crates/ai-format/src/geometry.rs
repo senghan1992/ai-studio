@@ -109,24 +109,43 @@ pub fn js_round(x: f64) -> f64 {
 }
 
 /// Reading order: top-to-bottom, then left-to-right, with a row tolerance.
+///
+/// Rows are formed first — a box joins the current row while it starts within
+/// the tolerance of the row's first box — and only then is everything sorted
+/// by (row, x, y). Comparing pairs with a tolerance directly is not a total
+/// order (A≈B and B≈C do not make A≈C), and a slide of forty staggered
+/// diagram boxes made the sort detect that and abort the whole process.
 pub fn reading_order<T: Clone>(
     items: &[T],
     box_of: impl Fn(&T) -> Box,
     row_tolerance: f64,
 ) -> Vec<T> {
-    let mut out = items.to_vec();
-    // A stable sort keeps the declaration order for boxes that tie, matching
-    // Array.prototype.sort in every current engine.
-    out.sort_by(|a, b| {
-        let (ba, bb) = (box_of(a), box_of(b));
-        let dy = ba.y - bb.y;
-        if dy.abs() > row_tolerance {
-            dy.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            ba.x.partial_cmp(&bb.x).unwrap_or(std::cmp::Ordering::Equal)
+    let boxes: Vec<Box> = items.iter().map(&box_of).collect();
+    let mut by_y: Vec<usize> = (0..items.len()).collect();
+    by_y.sort_by(|&a, &b| boxes[a].y.total_cmp(&boxes[b].y).then_with(|| a.cmp(&b)));
+    let mut row = vec![0usize; items.len()];
+    let mut current = 0usize;
+    let mut row_top = f64::NEG_INFINITY;
+    for &i in &by_y {
+        let y = boxes[i].y;
+        let gap = y - row_top;
+        if gap.is_nan() || gap > row_tolerance {
+            current += 1;
+            row_top = y;
         }
+        row[i] = current;
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    // The original index breaks ties, so declaration order is kept for boxes
+    // that coincide — matching Array.prototype.sort in every current engine.
+    order.sort_by(|&a, &b| {
+        row[a]
+            .cmp(&row[b])
+            .then_with(|| boxes[a].x.total_cmp(&boxes[b].x))
+            .then_with(|| boxes[a].y.total_cmp(&boxes[b].y))
+            .then_with(|| a.cmp(&b))
     });
-    out
+    order.into_iter().map(|i| items[i].clone()).collect()
 }
 
 /// Vertical stack fallback for blocks with no saved geometry, so a markdown-only
@@ -233,5 +252,32 @@ mod tests {
         assert_eq!(json, r##"{"w":1280.0,"h":720.0,"bg":"#ffffff"}"##);
         let back: Canvas = serde_json::from_str(r##"{"w":1280,"h":720,"bg":"#101014"}"##).unwrap();
         assert_eq!(back.bg.as_str(), "#101014");
+    }
+
+    #[test]
+    fn staggered_boxes_sort_without_tripping_the_total_order_check() {
+        // Forty boxes each 30px lower than the last: with a 40px tolerance
+        // every neighbour "ties" while the ends do not, which is exactly the
+        // non-transitive comparison Rust's sort rejects. Rows must be formed
+        // first, and the order must be deterministic.
+        let boxes: Vec<Box> = (0..40)
+            .map(|i| Box {
+                x: ((i * 37) % 11) as f64 * 50.0,
+                y: i as f64 * 30.0,
+                w: 40.0,
+                h: 20.0,
+                z: 0.0,
+            })
+            .collect();
+        let ordered = reading_order(&boxes, |b| *b, 40.0);
+        assert_eq!(ordered.len(), 40);
+        // Rows are 40px tall anchored at the row's first box: ys 0 and 30 share
+        // a row and 60 starts the next, so the first two are those two boxes in
+        // x order, and no box ever comes more than a row after a later one.
+        let mut first_two = [ordered[0].y, ordered[1].y];
+        first_two.sort_by(f64::total_cmp);
+        assert_eq!(first_two, [0.0, 30.0]);
+        assert!(ordered[0].x <= ordered[1].x);
+        assert!(ordered.windows(2).all(|w| w[0].y <= w[1].y + 40.0));
     }
 }

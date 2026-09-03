@@ -260,18 +260,21 @@ fn block_xml(
                 runs_xml(runs, style, &mut ctx.hyperlinks)
             )
         }
-        Block::List { ordered, items } => {
-            let num_id = if *ordered {
-                ctx.ordered_lists += 1;
-                // Instance ids 100+ are the per-list decimal counters;
-                // 1 stays the shared bullet definition.
-                99 + ctx.ordered_lists
-            } else {
-                1
-            };
-            items
-            .iter()
-            .map(|item| {
+        Block::List { items, .. } => {
+            // Numbered items in this list share one counter; bullets use the
+            // shared bullet definition (instance 1). A list may hold both.
+            let mut counter: Option<usize> = None;
+            let mut out = String::new();
+            for item in items {
+                let num_id = if item.ordered {
+                    *counter.get_or_insert_with(|| {
+                        ctx.ordered_lists += 1;
+                        // Instance ids 100+ are the per-list decimal counters.
+                        99 + ctx.ordered_lists
+                    })
+                } else {
+                    1
+                };
                 let numbering = format!(
                     "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
                     item.level.min(2),
@@ -281,12 +284,12 @@ fn block_xml(
                     style,
                     &format!("<w:pStyle w:val=\"ListParagraph\"/>{numbering}"),
                 );
-                format!(
+                out.push_str(&format!(
                     "<w:p>{props}{}</w:p>",
                     runs_xml(&item.runs, style, &mut ctx.hyperlinks)
-                )
-            })
-            .collect()
+                ));
+            }
+            out
         }
         Block::Code { text, .. } => text
             .split('\n')

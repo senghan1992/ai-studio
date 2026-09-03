@@ -1257,3 +1257,73 @@ fn a_run_coloured_unlike_its_block_keeps_its_colour_on_export() {
     assert!(doc.contains("<w:color w:val=\"A50034\"/>"), "{doc}");
     assert!(!doc.contains("<span"), "{doc}");
 }
+
+#[test]
+fn an_export_states_only_what_the_block_states_and_stores_a_picture_once() {
+    let ws = Workspace::new("pptxstated");
+    let mut project = create_project(ws.path(), ProjectType::Deck, "절제", false).unwrap();
+    std::fs::create_dir_all(project.dir.join("assets")).unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&[0, 0, 0, 13]);
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&2u32.to_be_bytes());
+    png.extend_from_slice(&3u32.to_be_bytes());
+    std::fs::write(project.dir.join("assets").join("logo.png"), &png).unwrap();
+    let Items::Slides(slides) = &mut project.items else {
+        panic!()
+    };
+    let block = |id: &str, kind, md: &str, x: f64| ai_format::model::SlideBlock {
+        id: id.into(),
+        kind,
+        md: md.into(),
+        x,
+        y: 100.0,
+        w: 200.0,
+        h: 100.0,
+        z: 9.0,
+        style: Default::default(),
+        shape: None,
+        table: None,
+        locked: false,
+    };
+    slides[0].blocks.clear();
+    slides[0]
+        .blocks
+        .push(block("b_t", ai_format::blocks::Kind::Text, "본문", 0.0));
+    slides[0]
+        .blocks
+        .push(block("b_s", ai_format::blocks::Kind::Shape, "", 300.0));
+    slides[0].blocks.push(block(
+        "b_i1",
+        ai_format::blocks::Kind::Image,
+        "![로고](../assets/logo.png)",
+        600.0,
+    ));
+    slides[0].blocks.push(block(
+        "b_i2",
+        ai_format::blocks::Kind::Image,
+        "![로고](../assets/logo.png)",
+        900.0,
+    ));
+    let project = save_project(&project).unwrap();
+    let parts = Parts::of(&export(&project, Format::Pptx).unwrap());
+    let slide = parts.get("ppt/slides/slide1.xml");
+    // Nothing the block did not say: PowerPoint's own spacing and top anchor.
+    assert!(!slide.contains("<a:lnSpc>"), "{slide}");
+    assert!(!slide.contains("anchor="), "{slide}");
+    // An empty shape carries no text body at all.
+    assert_eq!(slide.matches("<p:txBody>").count(), 1, "{slide}");
+    // One picture part for two placements of the same asset.
+    assert!(parts.has("ppt/media/logo.png"), "{:?}", parts.names());
+    assert_eq!(
+        parts
+            .names()
+            .iter()
+            .filter(|n| n.starts_with("ppt/media/"))
+            .count(),
+        1,
+        "{:?}",
+        parts.names()
+    );
+    assert_eq!(slide.matches("<p:pic>").count(), 2, "{slide}");
+}

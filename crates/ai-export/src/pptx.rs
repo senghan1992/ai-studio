@@ -35,6 +35,11 @@ struct SlidePart {
 struct Assets {
     /// `(part path, bytes, content type)`
     media: Vec<(String, Vec<u8>, &'static str)>,
+    /// Asset path -> the media part it already became, so a logo placed on
+    /// five slides is stored once, as PowerPoint itself stores it.
+    placed: std::collections::HashMap<String, (String, (f64, f64))>,
+    /// Media part paths (`media/image1.png`) the preserved design already uses.
+    reserved: std::collections::HashSet<String>,
     /// Chart part XML, in order.
     charts: Vec<String>,
 }
@@ -118,7 +123,12 @@ struct Paragraph {
     runs: Vec<Run>,
 }
 
-fn paragraph_xml(p: &Paragraph, color: &str, line_height: f64, links: &mut Vec<String>) -> String {
+fn paragraph_xml(
+    p: &Paragraph,
+    color: &str,
+    line_height: Option<f64>,
+    links: &mut Vec<String>,
+) -> String {
     let mut props = format!("<a:pPr algn=\"{}\" lnSpcReduction=\"0\"", p.align);
     if let Some((level, _)) = p.bullet {
         if level > 0 {
@@ -131,10 +141,16 @@ fn paragraph_xml(p: &Paragraph, color: &str, line_height: f64, links: &mut Vec<S
         ));
     }
     props.push('>');
-    props.push_str(&format!(
-        "<a:lnSpc><a:spcPct val=\"{}\"/></a:lnSpc>",
-        (line_height * 100_000.0).round() as i64
-    ));
+    // Only a spacing the block states. An imported deck's text says nothing
+    // and means PowerPoint's own single spacing; writing the editor's 1.3 or
+    // 1.45 there opened every re-exported slide up by a third.
+    if let Some(line_height) = line_height {
+        let lines = line_height / ai_format::deck::SINGLE_SPACING;
+        props.push_str(&format!(
+            "<a:lnSpc><a:spcPct val=\"{}\"/></a:lnSpc>",
+            (lines * 100_000.0).round() as i64
+        ));
+    }
     match p.bullet {
         None => props.push_str("<a:buNone/>"),
         Some((_, true)) => {
@@ -200,11 +216,11 @@ fn block_paragraphs(md: &str, style: &indexmap::IndexMap<String, Json>) -> Vec<P
                 bold: base_bold,
                 runs,
             }),
-            Block::List { ordered, items } => {
+            Block::List { items, .. } => {
                 for item in items {
                     out.push(Paragraph {
                         font: font.clone(),
-                        bullet: Some((item.level, ordered)),
+                        bullet: Some((item.level, item.ordered)),
                         align,
                         size_px: base_size
                             * ai_format::mdblocks::NESTED_LIST_EM.powi(item.level as i32),
@@ -320,12 +336,8 @@ fn text_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String 
         return String::new();
     }
     let color = style_str(&block.style, "color").unwrap_or("#1f2937");
-    let line_height = style_num(&block.style, "lineHeight").unwrap_or(1.3);
-    let anchor = match style_str(&block.style, "valign") {
-        Some("middle") => "ctr",
-        Some("bottom") => "b",
-        _ => "t",
-    };
+    let line_height = style_num(&block.style, "lineHeight");
+    let anchor = anchor_attr(&block.style);
 
     let body: String = paragraphs
         .iter()
@@ -334,9 +346,20 @@ fn text_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String 
     format!(
         "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
-<p:txBody><a:bodyPr wrap=\"square\" anchor=\"{anchor}\" lIns=\"18000\" tIns=\"18000\" rIns=\"18000\" bIns=\"18000\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody></p:sp>",
+<p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"18000\" tIns=\"18000\" rIns=\"18000\" bIns=\"18000\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody></p:sp>",
         xfrm(block)
     )
+}
+
+/// The `anchor` attribute for a vertical alignment other than top — top is
+/// PowerPoint's default and the editor's, so writing it would only come back
+/// as a style the author never set.
+fn anchor_attr(style: &indexmap::IndexMap<String, Json>) -> &'static str {
+    match style_str(style, "valign") {
+        Some("middle") => " anchor=\"ctr\"",
+        Some("bottom") => " anchor=\"b\"",
+        _ => "",
+    }
 }
 
 /// A shape, with the preset geometry it was drawn or imported as.
@@ -405,25 +428,22 @@ fn shape_element(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> Stri
     )
 }
 
-/// The text inside a shape, or an empty body when it has none.
+/// The text inside a shape, or nothing when it has none — an empty body would
+/// come back from PowerPoint as text formatting on a shape that has no text.
 fn shape_text_body(block: &SlideBlock, links: &mut Vec<String>) -> String {
     let paragraphs = block_paragraphs(&block.md, &block.style);
     if paragraphs.is_empty() {
-        return "<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>".to_string();
+        return String::new();
     }
     let color = style_str(&block.style, "color").unwrap_or("#1f2937");
-    let line_height = style_num(&block.style, "lineHeight").unwrap_or(1.3);
-    let anchor = match style_str(&block.style, "valign") {
-        Some("middle") => "ctr",
-        Some("bottom") => "b",
-        _ => "t",
-    };
+    let line_height = style_num(&block.style, "lineHeight");
+    let anchor = anchor_attr(&block.style);
     let body: String = paragraphs
         .iter()
         .map(|p| paragraph_xml(p, color, line_height, links))
         .collect();
     format!(
-        "<p:txBody><a:bodyPr wrap=\"square\" anchor=\"{anchor}\" lIns=\"45720\" tIns=\"45720\" rIns=\"45720\" bIns=\"45720\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody>"
+        "<p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"45720\" tIns=\"45720\" rIns=\"45720\" bIns=\"45720\"><a:normAutofit/></a:bodyPr><a:lstStyle/>{body}</p:txBody>"
     )
 }
 
@@ -920,25 +940,51 @@ fn slide_part(slide: &Slide, dir: &Path, assets: &mut Assets, on_design: bool) -
         .iter()
         .filter(|b| !(on_design && b.style.get("design").and_then(Json::as_bool) == Some(true)))
         .collect();
-    ordered.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
+    ordered.sort_by(|a, b| a.z.total_cmp(&b.z));
 
     // Shape ids start at 2: the group shape holding them all is 1.
     for (id, block) in (2usize..).zip(ordered) {
         match block.kind {
             Kind::Shape => shapes.push_str(&shape_element(id, block, &mut links)),
             Kind::Image => {
-                let embedded = image_source(&block.md)
-                    .and_then(|src| read_asset(dir, &src))
-                    .and_then(|(data, ext)| {
-                        let content_type = image_content_type(&ext)?;
-                        let natural = image_size(&data).unwrap_or((block.w, block.h));
-                        let index = assets.media.len() + 1;
-                        // `aistudio` rather than `image`: a preserved design ships its own
-                        // `media/image1.png`, and two parts cannot share a name.
-                        let path = format!("media/aistudio{index}.{}", ext.to_ascii_lowercase());
-                        assets.media.push((path.clone(), data, content_type));
-                        Some((path, natural))
-                    });
+                let embedded = image_source(&block.md).and_then(|src| {
+                    if let Some(done) = assets.placed.get(&src) {
+                        return Some(done.clone());
+                    }
+                    let (data, ext) = read_asset(dir, &src)?;
+                    let content_type = image_content_type(&ext)?;
+                    let natural = image_size(&data).unwrap_or((block.w, block.h));
+                    // The asset's own file name, so a picture that came in as
+                    // `image7.png` goes out as `image7.png` and a re-import finds
+                    // it under the same name. A preserved design ships its own
+                    // `media/image1.png`, and two parts cannot share a name, so a
+                    // taken name falls back to a numbered one.
+                    let wanted = src
+                        .rsplit('/')
+                        .next()
+                        .filter(|n| {
+                            !n.is_empty()
+                                && n.chars().all(|c| {
+                                    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')
+                                })
+                        })
+                        .map(|n| format!("media/{n}"));
+                    let taken = |candidate: &str| {
+                        assets.media.iter().any(|(p, _, _)| p == candidate)
+                            || assets.reserved.contains(candidate)
+                    };
+                    let path = match wanted {
+                        Some(w) if !taken(&w) => w,
+                        _ => format!(
+                            "media/aistudio{}.{}",
+                            assets.media.len() + 1,
+                            ext.to_ascii_lowercase()
+                        ),
+                    };
+                    assets.media.push((path.clone(), data, content_type));
+                    assets.placed.insert(src, (path.clone(), natural));
+                    Some((path, natural))
+                });
                 match embedded {
                     Some((path, natural)) => {
                         let rel_id = format!("rId{}", rels.len() + 2);
@@ -1048,6 +1094,14 @@ pub fn export(project: &Project) -> Result<Vec<u8>> {
 
     let template = Template::load(&project.dir);
     let mut assets = Assets::default();
+    if let Some(t) = &template {
+        assets.reserved = t
+            .parts
+            .iter()
+            .filter_map(|(n, _)| n.strip_prefix("ppt/").map(str::to_string))
+            .filter(|n| n.starts_with("media/"))
+            .collect();
+    }
     let parts: Vec<SlidePart> = slides
         .iter()
         .map(|s| slide_part(s, &project.dir, &mut assets, template.is_some()))

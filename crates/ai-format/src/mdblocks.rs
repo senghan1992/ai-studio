@@ -97,8 +97,8 @@ pub fn split_markdown_blocks(md: &str) -> Vec<MdBlock> {
     macro_rules! flush {
         () => {{
             let text = buf.join("\n");
-            let text = text.trim_end();
-            if !text.trim().is_empty() {
+            let text = text.trim_end_matches([' ', '\t', '\n', '\r']);
+            if !is_blank(text) {
                 out.push(MdBlock {
                     md: text.to_string(),
                     block_type: run.unwrap_or_else(|| classify(text)),
@@ -130,7 +130,7 @@ pub fn split_markdown_blocks(md: &str) -> Vec<MdBlock> {
             continue;
         }
 
-        if line.trim().is_empty() {
+        if is_blank(line) {
             flush!();
             continue;
         }
@@ -223,6 +223,48 @@ pub fn heading_level(md: &str) -> usize {
 }
 
 static RE_CODE_FENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```.*?```").unwrap());
+static RE_LITERAL_MARKER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\s*)(\d{1,3}[.)]|[-+*]|#{1,6}|>)(\s)").unwrap());
+static RE_ESCAPED_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\([!-/:-@\[-`{-~])").unwrap());
+
+/// Blank in the markdown sense: only ASCII spaces and tabs. A no-break space
+/// (U+00A0) is content — it is how an imported slide keeps an empty line.
+pub fn is_blank(text: &str) -> bool {
+    text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+}
+
+/// Keep a line that merely *looks* like markdown structure literal.
+///
+/// A slide title typed as `2. 클라우드 전환` or a step label `0. 배경` is plain
+/// text in PowerPoint, but as markdown it is an ordered list — and an export
+/// would renumber it from 1. Escaping the marker (`2\. 클라우드 전환`) keeps the
+/// renderer, the exporters and the file all reading it as the author typed it.
+/// Real bullets never come through here: the importers mark those with `- `.
+pub fn escape_literal_marker(text: &str) -> String {
+    // Line by line: a paragraph with Shift+Enter breaks has several starts.
+    text.split('\n')
+        .map(escape_line_marker)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn escape_line_marker(line: &str) -> String {
+    RE_LITERAL_MARKER
+        .replace(line, |c: &regex::Captures| {
+            let marker = &c[2];
+            // `2.` escapes its dot; a single-character marker escapes itself.
+            let escaped = if marker.len() > 1
+                && marker.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+            {
+                let (digits, punct) = marker.split_at(marker.len() - 1);
+                format!("{digits}\\{punct}")
+            } else {
+                format!("\\{marker}")
+            };
+            format!("{}{escaped}{}", &c[1], &c[3])
+        })
+        .into_owned()
+}
 static RE_CODE_SPAN: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`]*)`").unwrap());
 static RE_IMAGE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\([^)]*\)").unwrap());
 static RE_LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]*)\]\([^)]*\)").unwrap());
@@ -253,6 +295,7 @@ pub fn plain_text(md: &str) -> String {
     let s = RE_STRIKE.replace_all(&s, "$1");
     let s = RE_SPAN_TAG.replace_all(&s, "");
     let s = RE_TABLE_EDGE.replace_all(&s, "");
+    let s = RE_ESCAPED_PUNCT.replace_all(&s, "$1");
     let s = s.replace('|', " ");
     let s = RE_SPACES.replace_all(&s, " ");
     s.trim().to_string()
@@ -287,6 +330,24 @@ pub fn count_words(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_literal_marker_is_escaped_and_reads_back_plain() {
+        assert_eq!(
+            escape_literal_marker("2. 클라우드 전환"),
+            "2\\. 클라우드 전환"
+        );
+        assert_eq!(escape_literal_marker("0) 배경"), "0\\) 배경");
+        assert_eq!(escape_literal_marker("- 항목"), "\\- 항목");
+        assert_eq!(escape_literal_marker("# 제목"), "\\# 제목");
+        assert_eq!(
+            escape_literal_marker("2026. 계획"),
+            "2026. 계획",
+            "years are not markers"
+        );
+        assert_eq!(escape_literal_marker("보통 문장"), "보통 문장");
+        assert_eq!(plain_text("2\\. 클라우드 전환"), "2. 클라우드 전환");
+    }
+
     use super::*;
 
     fn types(md: &str) -> Vec<&'static str> {

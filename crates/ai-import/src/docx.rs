@@ -524,7 +524,10 @@ impl DocCtx<'_> {
             // An empty paragraph is Word's spacing, not content.
             return None;
         } else {
-            (text, BlockType::Paragraph)
+            (
+                ai_format::mdblocks::escape_literal_marker(&text),
+                BlockType::Paragraph,
+            )
         };
 
         Some(DocBlock {
