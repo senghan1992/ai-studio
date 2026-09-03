@@ -68,7 +68,13 @@ export const adjustRefs = (formula, axis, at, delta) =>
 export function recalcSheet(sheet, others = []) {
   assertReady();
   return wasm.recalcSheet(
-    { cells: sheet?.cells ?? {}, names: sheet?.names ?? {}, name: sheet?.name ?? '' },
+    {
+      cells: sheet?.cells ?? {},
+      names: sheet?.names ?? {},
+      name: sheet?.name ?? '',
+      // A dynamic array refuses to spill into (or out of) a merged cell.
+      merges: sheet?.merges ?? [],
+    },
     others.map((s) => ({ cells: s?.cells ?? {}, names: {}, name: s?.name ?? '' }))
   );
 }

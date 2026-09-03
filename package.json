@@ -18,7 +18,7 @@
     "seed": "cargo run -q -p ai-core --example seed -- workspace",
     "test": "npm run test:rust && npm run test:web",
     "test:rust": "cargo test --workspace --exclude ai-studio-app",
-    "test:web": "node --test apps/web/test/",
+    "test:web": "node --test \"apps/web/test/**/*.test.js\" \"apps/web/test/**/*.mjs\"",
     "e2e": "node scripts/e2e.mjs",
     "smoke": "node scripts/ui-smoke.mjs"
   },

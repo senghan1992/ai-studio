@@ -10,9 +10,10 @@ import FindBar from '../components/FindBar.jsx';
 import ChartDialog from '../components/ChartDialog.jsx';
 import {
   Ribbon, Group, Btn, Select, NumInput, ColorPicker, Check, Dialog, Field,
-  ContextMenu, useContextMenu, ZoomSlider,
+  ContextMenu, useContextMenu, ZoomSlider, usePrinting,
 } from '../components/ui.jsx';
 import SheetView from './Sheet.jsx';
+import PrintSheet from './PrintSheet.jsx';
 import {
   setCellInput, patchCells, paintFormat, clearRange, structuralEdit,
   rangeToTsv, rangeToFormulaTsv, pasteTsv,
@@ -123,6 +124,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   const [chartDialog, setChartDialog] = useState(null);
   const [selectedChartId, setSelectedChartId] = useState(null);
   const ctx = useContextMenu();
+  const printing = usePrinting();
 
   const index = Math.min(sheetIndex, Math.max(0, sheets.length - 1));
   const sheet = sheets[index];
@@ -156,6 +158,9 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const activeRef = toRef(sel.col, sel.row);
   const activeCell = sheet?.cells?.[activeRef];
+  // A spilled cell shows its anchor's formula in the formula bar, the way
+  // Excel greys it there: the value on screen belongs to that formula.
+  const spillAnchor = activeCell?.spillFrom ? sheet?.cells?.[activeCell.spillFrom] : null;
 
   const move = useCallback((direction, extend) => {
     setSel((current) => {
@@ -451,6 +456,12 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       if (mod && e.key.toLowerCase() === 'h') {
         e.preventDefault();
         setFind((f) => ({ ...(f ?? emptyFind), replace: true }));
+        return;
+      }
+      // Ctrl+P prints the active sheet's used range — PDF via the print dialog.
+      if (mod && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        window.print();
         return;
       }
       if (editing || typing) return;
@@ -770,6 +781,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           onSave={save}
           onHome={onHome}
           onNewProject={onNewProject}
+          onPrint={() => window.print()}
           notify={notify}
         />
       )}
@@ -1144,6 +1156,10 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         </>
       }
     >
+      {/* Ctrl+P: the active sheet's used range on paper — mounted only while
+          the browser is actually printing. */}
+      {printing && <PrintSheet sheet={sheet} />}
+
       <div className="gridwrap" style={{ flex: 1, minWidth: 0, position: 'relative' }}>
         <div className="formulabar">
           <input
@@ -1170,8 +1186,14 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           </span>
           <FormulaInput
             key={`${activeRef}:${editing ? 'edit' : 'view'}`}
-            value={editing?.value ?? editValue(activeCell)}
-            onCommit={(value) => commitCell(value, 'down')}
+            value={editing?.value ?? editValue(spillAnchor ?? activeCell)}
+            ghost={!editing && !!spillAnchor}
+            onCommit={(value) => {
+              // Committing the anchor's own formula over its ghost unchanged
+              // is a no-op, not a copy that would break the spill.
+              if (spillAnchor && value === editValue(spillAnchor)) return;
+              commitCell(value, 'down');
+            }}
           />
         </div>
 
@@ -1379,7 +1401,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
 /* ------------------------------------------------------------ formula bar */
 
-function FormulaInput({ value, onCommit }) {
+function FormulaInput({ value, onCommit, ghost = false }) {
   const [draft, setDraft] = useState(value ?? '');
   const [hint, setHint] = useState(null);
 
@@ -1388,7 +1410,8 @@ function FormulaInput({ value, onCommit }) {
   return (
     <div style={{ flex: 1, position: 'relative' }}>
       <input
-        className="formulabar__input"
+        className={`formulabar__input${ghost ? ' formulabar__input--ghost' : ''}`}
+        title={ghost ? '스필된 값 — 수식은 앵커 셀의 것입니다' : undefined}
         value={draft}
         onChange={(e) => {
           setDraft(e.target.value);

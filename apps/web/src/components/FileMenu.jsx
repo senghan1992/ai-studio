@@ -16,10 +16,39 @@ export default function FileMenu({
   const [copyDialog, setCopyDialog] = useState(null);
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(null);
+  /** null = closed, 'loading', or { snapshots, keep } from the server. */
+  const [history, setHistory] = useState(null);
+  const [restoring, setRestoring] = useState(null);
 
   const type = project.type;
   const folder = project.folder;
   const targets = EXPORT_TARGETS[type] ?? [];
+
+  const openHistory = async () => {
+    setHistory('loading');
+    try {
+      setHistory(await api.history(folder));
+    } catch (e) {
+      setHistory(null);
+      notify(e.message);
+    }
+  };
+
+  const restore = async (snapshot) => {
+    setRestoring(snapshot.name);
+    try {
+      // Flush the current state first so the trail keeps what the screen shows.
+      if (dirty) await onSave?.();
+      await api.restore(folder, snapshot.name);
+      // Reload rather than patch: a restore replaces the whole document, and
+      // the undo stack, the save-format panel and the cursor all belong to the
+      // old one. Word closes and reopens too.
+      window.location.reload();
+    } catch (e) {
+      setRestoring(null);
+      notify(e.message);
+    }
+  };
 
   const saveCopy = async () => {
     const title = copyDialog.title.trim();
@@ -61,6 +90,12 @@ export default function FileMenu({
           label="사본 만들기"
           onClick={() => setCopyDialog({ title: `${project.manifest?.title ?? '문서'} 사본` })}
         />
+        <Btn
+          icon="🕘"
+          label="버전 기록"
+          title="이전에 저장된 버전을 보고 되돌립니다"
+          onClick={openHistory}
+        />
       </Group>
 
       <Group label="내보내기">
@@ -96,6 +131,48 @@ export default function FileMenu({
         </div>
       </Group>
 
+      {history !== null && (
+        <Dialog
+          title="버전 기록"
+          confirmLabel="닫기"
+          onCancel={() => setHistory(null)}
+          onConfirm={() => setHistory(null)}
+        >
+          {history === 'loading' ? (
+            <p>불러오는 중…</p>
+          ) : history.snapshots?.length ? (
+            <>
+              <p>
+                저장할 때마다 직전 상태가 보관됩니다 (최근 {history.keep}개). 복원해도 지금
+                상태가 먼저 보관되므로, 복원 자체도 이 목록에서 되돌릴 수 있습니다.
+              </p>
+              <ul className="versions">
+                {history.snapshots.map((snapshot) => (
+                  <li key={snapshot.name} className="versions__row">
+                    <span className="versions__main">
+                      <span className="versions__when">{formatSavedAt(snapshot.savedAt)}</span>
+                      <span className="versions__meta">
+                        {snapshot.title} · 파일 {snapshot.files}개 · {formatBytes(snapshot.bytes)}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={!!restoring}
+                      onClick={() => restore(snapshot)}
+                    >
+                      {restoring === snapshot.name ? '복원 중…' : '복원'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p>아직 보관된 버전이 없습니다. 문서를 고쳐 저장하면 직전 상태가 여기에 남습니다.</p>
+          )}
+        </Dialog>
+      )}
+
       {copyDialog && (
         <Dialog
           title="사본 만들기"
@@ -118,4 +195,18 @@ function formatDate(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('ko-KR', { dateStyle: 'medium' });
+}
+
+function formatSavedAt(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString('ko-KR', { dateStyle: 'medium', timeStyle: 'medium' });
+}
+
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }

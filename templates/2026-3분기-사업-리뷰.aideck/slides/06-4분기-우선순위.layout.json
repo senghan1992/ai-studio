@@ -15,10 +15,7 @@
       "kind": "text",
       "style": {
         "fontSize": 38,
-        "weight": 700,
-        "align": "left",
-        "color": "#1f2937",
-        "lineHeight": 1.45
+        "weight": 700
       }
     },
     "b_y3dzy": {
@@ -30,9 +27,6 @@
       "kind": "text",
       "style": {
         "fontSize": 22,
-        "weight": 400,
-        "align": "left",
-        "color": "#1f2937",
         "lineHeight": 2
       }
     },
@@ -45,10 +39,7 @@
       "kind": "text",
       "style": {
         "fontSize": 17,
-        "weight": 400,
-        "align": "left",
-        "color": "#4f46e5",
-        "lineHeight": 1.45
+        "color": "#4f46e5"
       }
     }
   }

@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { indexToCol, toRef, displayValue, dependencies, LIMITS } from '../core/index.js';
+import { indexToCol, toRef, parseRange, displayValue, dependencies, LIMITS } from '../core/index.js';
 import { normalizeRange, mergeCovering, fillTarget, cycleRefLocks } from './gridOps.js';
 import SheetCharts from './SheetCharts.jsx';
+import { borderStyles } from '../lib/borderStyle.js';
 
 const ROW_BUFFER = 24;
 const MIN_VISIBLE_ROWS = 32;
@@ -95,6 +96,23 @@ export default function Sheet({
     if (editing || range.r1 !== range.r2 || range.c1 !== range.c2) return new Set();
     const cell = sheet.cells[toRef(range.c1, range.r1)];
     return cell?.f ? new Set(dependencies(cell.f)) : new Set();
+  }, [sheet.cells, range.r1, range.c1, range.r2, range.c2, editing]);
+
+  /** The spill range the selected cell belongs to — anchor or ghost — outlined
+   *  the way Excel frames a dynamic array when you land inside one. */
+  const spillRefs = useMemo(() => {
+    if (editing || range.r1 !== range.r2 || range.c1 !== range.c2) return new Set();
+    const cell = sheet.cells[toRef(range.c1, range.r1)];
+    const anchor = cell?.spill ? cell : sheet.cells[cell?.spillFrom ?? ''];
+    const spec = anchor?.spill;
+    if (!spec) return new Set();
+    const r = parseRange(spec);
+    if (!r) return new Set();
+    const out = new Set();
+    for (let row = r.start.row; row <= r.end.row; row++) {
+      for (let col = r.start.col; col <= r.end.col; col++) out.add(toRef(col, row));
+    }
+    return out;
   }, [sheet.cells, range.r1, range.c1, range.r2, range.c2, editing]);
 
   const hitSet = useMemo(() => new Set((findHits ?? []).map((h) => h.ref)), [findHits]);
@@ -324,6 +342,7 @@ export default function Sheet({
                         isSelected ? 'is-selected' : '',
                         inRange ? 'is-inrange' : '',
                         depRefs.has(ref) ? 'is-dep' : '',
+                        spillRefs.has(ref) && !isSelected ? 'is-spill' : '',
                         inFillPreview(r, c) ? 'is-fillpreview' : '',
                         frozenCol || frozenRow ? 'is-frozen' : '',
                       ].filter(Boolean).join(' ')}
@@ -467,20 +486,11 @@ function vAlignOf(valign) {
   return undefined;
 }
 
-const BORDER = '1px solid #9ca3af';
-
 function cellVisualStyle(cell) {
   const style = cell?.style;
   if (!style) return undefined;
-  const out = {};
+  const out = { ...borderStyles(style.border) };
   if (style.bg) out.background = style.bg;
-  const b = style.border;
-  if (b) {
-    if (b.t) out.borderTop = BORDER;
-    if (b.b) out.borderBottom = BORDER;
-    if (b.l) out.borderLeft = BORDER;
-    if (b.r) out.borderRight = BORDER;
-  }
   return out;
 }
 

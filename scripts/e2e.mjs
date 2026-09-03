@@ -451,5 +451,227 @@ console.log('\n■ 경로 보안');
   }
 }
 
+/* -------------------------------------------------------- 동시 편집 보호 */
+
+console.log('\n■ 동시 편집 보호 (baseModified)');
+{
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'doc', title: '충돌 문서' }),
+  });
+  const folder = created.folder;
+  const loaded = created.manifest.modified;
+
+  // A stale editor must be refused with 409 rather than eating the disk copy.
+  let refused = null;
+  try {
+    await call(`/api/projects/${encodeURIComponent(folder)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        baseModified: '2000-01-01T00:00:00.000Z',
+        sections: created.sections,
+      }),
+    });
+  } catch (e) {
+    refused = e.message;
+  }
+  check('a stale baseModified is refused with 409', /409/.test(refused ?? ''), refused);
+  check('the refusal says what happened', /다른 곳에서 문서가 수정/.test(refused ?? ''), refused);
+
+  // The editor that is actually current saves normally…
+  const saved = await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ baseModified: loaded, sections: created.sections }),
+  });
+  check('the current baseModified saves', !!saved.manifest.modified);
+
+  // …and a write-without-reading agent (no baseModified) still overwrites.
+  const overwritten = await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sections: created.sections }),
+  });
+  check('omitting baseModified keeps the agent overwrite path', !!overwritten.manifest.modified);
+
+  await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+}
+
+/* ------------------------------------------------------------- 버전 기록 */
+
+console.log('\n■ 버전 기록');
+{
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'doc', title: '기록 문서' }),
+  });
+  const folder = created.folder;
+  const put = (sections) =>
+    call(`/api/projects/${encodeURIComponent(folder)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ sections }),
+    });
+
+  // First edition; saving it snapshots the default state it replaced.
+  created.sections[0].blocks[created.sections[0].blocks.length - 1].md = '첫 번째 판';
+  await put(created.sections);
+
+  // The 120s snapshot floor would fold the next quick save into the same window
+  // and drop the first edition as a restore point. Real edits land minutes
+  // apart; backdate the newest snapshot on disk so the next save is kept as its
+  // own point, the same way edits spaced out in time would be.
+  {
+    const h = await call(`/api/projects/${encodeURIComponent(folder)}/history`);
+    const snapDir = path.join(workspace, folder, '.history', h.snapshots[0].name);
+    const snapManifest = JSON.parse(await fs.readFile(path.join(snapDir, 'manifest.json'), 'utf8'));
+    snapManifest.modified = '2000-01-01T00:00:00.000Z';
+    await fs.writeFile(path.join(snapDir, 'manifest.json'), JSON.stringify(snapManifest, null, 2));
+  }
+
+  created.sections[0].blocks[created.sections[0].blocks.length - 1].md = '두 번째 판';
+  await put(created.sections);
+
+  const history = await call(`/api/projects/${encodeURIComponent(folder)}/history`);
+  check('every replaced state is kept', history.snapshots.length >= 1,
+    JSON.stringify(history.snapshots));
+  check('a snapshot names its save time and title',
+    !!history.snapshots[0]?.savedAt && history.snapshots[0]?.title === '기록 문서',
+    JSON.stringify(history.snapshots[0]));
+  check('the version trail stays out of the file listing',
+    (await call(`/api/projects/${encodeURIComponent(folder)}/files`)).files
+      .every((f) => !f.path.startsWith('.history')));
+
+  // Restore the newest snapshot: the first edition comes back.
+  const target = history.snapshots.find((s) => true);
+  const restored = await call(`/api/projects/${encodeURIComponent(folder)}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ snapshot: target.name }),
+  });
+  const text = JSON.stringify(restored.sections);
+  check('restoring brings the replaced edition back', text.includes('첫 번째 판'), text.slice(0, 300));
+
+  // The restore kept the state it replaced, so it is itself undoable.
+  const after = await call(`/api/projects/${encodeURIComponent(folder)}/history`);
+  check('the restore itself is undoable', after.snapshots.length > history.snapshots.length,
+    `before ${history.snapshots.length}, after ${after.snapshots.length}`);
+
+  let rejected = false;
+  try {
+    await call(`/api/projects/${encodeURIComponent(folder)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ snapshot: '../../etc' }),
+    });
+  } catch (e) {
+    rejected = /400|404/.test(e.message);
+  }
+  check('a snapshot name cannot escape the history dir', rejected);
+
+  await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+}
+
+/* --------------------------------------------------------- 동적 배열 스필 */
+
+console.log('\n■ 동적 배열 스필');
+{
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'grid', title: '스필 시트' }),
+  });
+  const folder = created.folder;
+  const sheet = created.sheets[0];
+  sheet.cells = {
+    A1: { v: '서울', t: 's' }, A2: { v: '부산', t: 's' }, A3: { v: '서울', t: 's' },
+    C1: { f: '=UNIQUE(A1:A3)' },
+  };
+  const saved = await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sheets: [sheet] }),
+  });
+
+  const cells = saved.sheets[0].cells;
+  check('the anchor knows its spill range', cells.C1?.spill === 'C1:C2', JSON.stringify(cells.C1));
+  check('the spilled value is a real cell', cells.C2?.v === '부산' && cells.C2?.spillFrom === 'C1',
+    JSON.stringify(cells.C2));
+
+  const disk = await readJson(saved.folder, saved.manifest.sheets[0].json);
+  check('the spill is on disk in the cells json', disk.cells.C1.spill === 'C1:C2');
+  const md = await read(saved.folder, saved.manifest.sheets[0].md);
+  check('the projection shows the spilled value', md.includes('부산'), md.slice(0, 400));
+  check('the projection names the spill on the formula line', md.includes('(C1:C2로 스필)'),
+    md.slice(0, 400));
+  const digest = await call(`/api/projects/${encodeURIComponent(folder)}/digest`);
+  check('AI.md names the spill too', digest.includes('(C1:C2로 스필)'), digest.slice(0, 600));
+
+  // A merge in the way turns the anchor into #SPILL! instead of writing
+  // values that a covered cell would never show.
+  const withMerge = saved.sheets[0];
+  withMerge.merges = ['C2:D2'];
+  const blocked = await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sheets: [withMerge] }),
+  });
+  check('a merged cell blocks the spill on save', blocked.sheets[0].cells.C1?.v === '#SPILL!',
+    JSON.stringify(blocked.sheets[0].cells.C1));
+  check('nothing lands under the merge', !blocked.sheets[0].cells.C2?.spillFrom,
+    JSON.stringify(blocked.sheets[0].cells.C2));
+
+  await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+}
+
+/* -------------------------------------------- 부분 저장 (생략한 항목은 보존) */
+
+console.log('\n■ 부분 저장 (보낸 항목만 교체, 생략한 항목은 유지)');
+{
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'doc', title: '부분 저장 문서' }),
+  });
+  const folder = created.folder;
+
+  // Establish a body the client can recognise later.
+  created.sections[0].blocks[created.sections[0].blocks.length - 1].md = '원래 내용';
+  await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ sections: created.sections }),
+  });
+
+  // A PUT that changes only the title, omitting `sections` entirely, must keep
+  // the sections already on disk rather than wiping them to a blank default.
+  const renamedBody = await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ title: '이름만 바꿈' }),
+  });
+  const kept = JSON.stringify(renamedBody.sections ?? []).includes('원래 내용');
+  check('omitting sections keeps the sections on disk', kept,
+    JSON.stringify(renamedBody.sections)?.slice(0, 300));
+
+  await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+}
+
+/* ------------------------------------------ 깨진 JSON은 경고로 드러난다 */
+
+console.log('\n■ 깨진 layout.json은 조용히 삼키지 않고 경고로 알린다');
+{
+  const created = await call('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'deck', title: '경고 문서' }),
+  });
+  const folder = created.folder;
+  await call(`/api/projects/${encodeURIComponent(folder)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ slides: created.slides }),
+  });
+
+  // Corrupt a per-slide geometry file on disk, then load: the server must not
+  // silently replace it with defaults and lose the edit on the next save.
+  const layoutRel = created.manifest.slides[0].json;
+  await fs.writeFile(path.join(workspace, folder, layoutRel), '{ this is not json', 'utf8');
+
+  const reopened = await call(`/api/projects/${encodeURIComponent(folder)}`);
+  check('a broken layout file surfaces a warning',
+    (reopened.warnings ?? []).some((w) => w.includes('읽을 수 없어')),
+    JSON.stringify(reopened.warnings));
+
+  await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
+}
+
 console.log(`\n${failures === 0 ? '통과' : '실패'}: ${checks - failures}/${checks} 검사 성공`);
 process.exit(failures === 0 ? 0 : 1);

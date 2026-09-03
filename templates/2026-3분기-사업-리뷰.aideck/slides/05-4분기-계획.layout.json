@@ -17,8 +17,7 @@
         "fontSize": 44,
         "weight": 600,
         "align": "center",
-        "color": "#ffffff",
-        "lineHeight": 1.45
+        "color": "#ffffff"
       }
     },
     "b_v3yew": {
@@ -29,11 +28,8 @@
       "z": 2,
       "kind": "text",
       "style": {
-        "fontSize": 20,
-        "weight": 400,
         "align": "center",
-        "color": "#9ca3af",
-        "lineHeight": 1.45
+        "color": "#9ca3af"
       }
     }
   }

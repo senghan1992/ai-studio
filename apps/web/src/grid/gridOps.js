@@ -12,8 +12,19 @@ import {
  * a final pass with the workbook after each edit.
  */
 export function withRecalc(sheet, others = []) {
-  const { cells } = recalcSheet({ cells: sheet.cells, names: sheet.names, name: sheet.name }, others);
-  return { ...sheet, cells };
+  const { cells } = recalcSheet(
+    { cells: sheet.cells, names: sheet.names, name: sheet.name, merges: sheet.merges },
+    others
+  );
+  // A dynamic array can spill past the grid's current edge; grow the grid so
+  // every spilled value is on screen rather than silently below the fold.
+  let dims = sheet.dims;
+  for (const [ref, cell] of Object.entries(cells)) {
+    if (!cell?.spillFrom) continue;
+    const at = parseRef(ref);
+    if (at) dims = growDims(dims, at.row, at.col);
+  }
+  return { ...sheet, cells, dims };
 }
 
 export function setCellInput(sheet, row, col, raw) {

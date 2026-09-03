@@ -536,3 +536,57 @@ test('painting nothing onto an empty cell leaves the file alone', () => {
   const painted = paintFormat(sheetOf({}), ['C3'], { style: null, fmt: '' });
   assert.equal(at(painted, 'C3'), undefined);
 });
+
+/* ------------------------------------------------------------ 동적 배열 스필 */
+
+test('an array formula spills into the empty cells below', () => {
+  const sheet = setCellInput(
+    sheetOf({
+      A1: { v: '서울', t: 's' }, A2: { v: '부산', t: 's' }, A3: { v: '서울', t: 's' },
+    }),
+    0, 2, '=UNIQUE(A1:A3)'
+  );
+  assert.equal(shown(sheet, 'C1'), '서울');
+  assert.equal(at(sheet, 'C1').spill, 'C1:C2');
+  assert.equal(shown(sheet, 'C2'), '부산');
+  assert.equal(at(sheet, 'C2').spillFrom, 'C1');
+});
+
+test('typing over a spilled cell breaks the spill with #SPILL!', () => {
+  let sheet = setCellInput(sheetOf({}), 0, 0, '=SEQUENCE(3)');
+  assert.equal(shown(sheet, 'A3'), '3');
+  sheet = setCellInput(sheet, 1, 0, '점유');
+  assert.equal(shown(sheet, 'A1'), '#SPILL!');
+  assert.equal(shown(sheet, 'A2'), '점유');
+  assert.equal(at(sheet, 'A3'), undefined, 'the retracted ghost is cleared');
+});
+
+test('a spill past the grid edge grows the grid', () => {
+  const sheet = setCellInput(
+    sheetOf({}, { dims: { rows: 5, cols: 3 } }),
+    0, 0, '=SEQUENCE(10)'
+  );
+  assert.equal(shown(sheet, 'A10'), '10');
+  assert.ok(sheet.dims.rows >= 10, `rows grew to ${sheet.dims.rows}`);
+});
+
+test('formulas read spilled values', () => {
+  let sheet = setCellInput(sheetOf({}), 0, 0, '=SEQUENCE(3)');
+  sheet = setCellInput(sheet, 0, 2, '=SUM(A1:A3)');
+  assert.equal(shown(sheet, 'C1'), '6');
+});
+
+test('a spill reference (#) reads the whole spilled range', () => {
+  let sheet = setCellInput(
+    sheetOf({ A1: { v: 3, t: 'n' }, A2: { v: 1, t: 'n' }, A3: { v: 3, t: 'n' } }),
+    0, 2, '=UNIQUE(A1:A3)'
+  );
+  sheet = setCellInput(sheet, 0, 4, '=SUM(C1#)');
+  assert.equal(shown(sheet, 'E1'), '4');
+});
+
+test('a spill refuses to enter a merged range', () => {
+  const sheet = setCellInput(sheetOf({}, { merges: ['A2:B2'] }), 0, 0, '=SEQUENCE(3)');
+  assert.equal(shown(sheet, 'A1'), '#SPILL!');
+  assert.equal(at(sheet, 'A2'), undefined, 'nothing lands under the merge');
+});

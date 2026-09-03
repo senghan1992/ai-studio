@@ -150,7 +150,12 @@ async function capture(hash, act) {
     'HTMLTextAreaElement',
   ]) {
     restore[key] = global[key];
-    global[key] = key === 'getComputedStyle' ? window.getComputedStyle.bind(window) : window[key];
+    // Node ≥ 21 defines some of these (navigator) as getter-only accessors, so
+    // a plain assignment throws; redefining leaves them writable for the restore.
+    Object.defineProperty(global, key, {
+      value: key === 'getComputedStyle' ? window.getComputedStyle.bind(window) : window[key],
+      configurable: true, writable: true,
+    });
   }
 
   const errors = [];

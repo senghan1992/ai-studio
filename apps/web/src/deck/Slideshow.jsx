@@ -1,9 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { renderMarkdown } from '../lib/markdown.js';
-import { assetUrl, isProjectAsset } from '../api.js';
-import ChartView from '../components/ChartView.jsx';
-import ShapeView from '../components/ShapeView.jsx';
-import TableView from '../components/TableView.jsx';
+import StaticSlide from './StaticSlide.jsx';
 
 /**
  * Full-screen presentation mode.
@@ -99,41 +95,18 @@ export default function Slideshow({ slides, start = 0, folder, onClose }) {
   if (!slide) return null;
 
   const scale = Math.min((viewport.w - 40) / canvas.w, (viewport.h - 40) / canvas.h);
-  const blocks = [...slide.blocks].sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
 
   return (
     <div className="slideshow" onClick={(e) => e.target === e.currentTarget && go(1)}>
-      <div
+      {/* The same read-only renderer the print layout uses — the show and the
+          paper cannot disagree about what a slide looks like. */}
+      <StaticSlide
+        slide={slide}
+        folder={folder}
+        scale={scale}
         className="slideshow__stage"
-        style={{
-          width: canvas.w * scale,
-          height: canvas.h * scale,
-          background: canvas.bg ?? '#ffffff',
-        }}
-      >
-        {blocks.map((block) => (
-          <div
-            key={block.id}
-            className="slideshow__block"
-            style={{
-              left: block.x * scale,
-              top: block.y * scale,
-              width: block.w * scale,
-              height: block.h * scale,
-              zIndex: block.z ?? 1,
-              transform: transformOf(block),
-            }}
-          >
-            {/* A shape is its preset geometry here exactly as on the canvas: a
-                diamond drawn as a CSS rectangle is not the slide the author
-                built, and a presentation is where that shows. */}
-            {block.kind === 'shape' && (
-              <ShapeView shape={block.shape} width={block.w * scale} height={block.h * scale} />
-            )}
-            <BlockContent block={block} scale={scale} folder={folder} canvasBg={canvas.bg} />
-          </div>
-        ))}
-      </div>
+        blockClass="slideshow__block"
+      />
 
       {/* B and W blank the screen over everything, including the notes. */}
       {blank && (
@@ -165,76 +138,4 @@ export default function Slideshow({ slides, start = 0, folder, onClose }) {
       </div>
     </div>
   );
-}
-
-function BlockContent({ block, scale, folder, canvasBg }) {
-  if (block.kind === 'chart') {
-    return <ChartView md={block.md} width={block.w * scale} height={block.h * scale} surface={canvasBg ?? '#ffffff'} />;
-  }
-
-  // A table keeps its column widths, merges and header band — the same renderer
-  // the canvas uses, read-only because there is nothing to edit in a show.
-  if (block.kind === 'table') {
-    return (
-      <TableView md={block.md} spec={block.table} width={block.w * scale} height={block.h * scale} />
-    );
-  }
-
-  if (block.kind === 'image') {
-    const match = String(block.md ?? '').match(/!\[([^\]]*)\]\(([^)\s]+)/);
-    if (!match) return null;
-    const src = isProjectAsset(match[2]) ? assetUrl(folder, match[2]) : match[2];
-    return (
-      <img
-        src={src}
-        alt={match[1]}
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: block.style?.fit === 'cover' ? 'cover' : 'contain',
-          borderRadius: (block.style?.radius ?? 0) * scale,
-        }}
-      />
-    );
-  }
-
-  const style = block.style ?? {};
-  return (
-    <div
-      className="md"
-      style={{
-        // Scale the type with the stage so the slide looks the same, just bigger.
-        fontSize: `${(style.fontSize ?? 20) * scale}px`,
-        fontWeight: style.weight,
-        textAlign: style.align,
-        color: style.color,
-        lineHeight: style.lineHeight ?? 1.45,
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent:
-          style.valign === 'middle' ? 'center' : style.valign === 'bottom' ? 'flex-end' : 'flex-start',
-        padding: `${4 * scale}px ${6 * scale}px`,
-      }}
-      dangerouslySetInnerHTML={{
-        __html: renderMarkdown(block.md, {
-          assetResolver: (src) => (isProjectAsset(src) ? assetUrl(folder, src) : src),
-        }),
-      }}
-    />
-  );
-}
-
-/**
- * Rotation and flips, in the same order the canvas applies them.
- *
- * Without this a rotated arrow points the wrong way in the show — the one place
- * the audience is looking at it.
- */
-function transformOf(block) {
-  const parts = [];
-  if (block.shape?.rotation) parts.push(`rotate(${block.shape.rotation}deg)`);
-  if (block.shape?.flipH) parts.push('scaleX(-1)');
-  if (block.shape?.flipV) parts.push('scaleY(-1)');
-  return parts.length ? parts.join(' ') : undefined;
 }

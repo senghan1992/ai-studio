@@ -15,10 +15,7 @@
       "kind": "text",
       "style": {
         "fontSize": 38,
-        "weight": 700,
-        "align": "left",
-        "color": "#1f2937",
-        "lineHeight": 1.45
+        "weight": 700
       }
     },
     "b_0b3iq": {
@@ -30,9 +27,6 @@
       "kind": "text",
       "style": {
         "fontSize": 21,
-        "weight": 400,
-        "align": "left",
-        "color": "#1f2937",
         "lineHeight": 1.85
       }
     },
@@ -44,11 +38,7 @@
       "z": 3,
       "kind": "text",
       "style": {
-        "fontSize": 16,
-        "weight": 400,
-        "align": "left",
-        "color": "#1f2937",
-        "lineHeight": 1.45
+        "fontSize": 16
       }
     },
     "b_ns3s7": {
@@ -60,10 +50,7 @@
       "kind": "text",
       "style": {
         "fontSize": 13,
-        "weight": 400,
-        "align": "left",
-        "color": "#9ca3af",
-        "lineHeight": 1.45
+        "color": "#9ca3af"
       }
     }
   }

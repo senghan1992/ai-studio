@@ -5,6 +5,7 @@ import ChartView from '../components/ChartView.jsx';
 import ShapeView from '../components/ShapeView.jsx';
 import TableView from '../components/TableView.jsx';
 import { adjustHandles, adjustValueAt } from '../lib/shapeAdjust.js';
+import { blockTransform, cropImageStyle } from '../lib/imageStyle.js';
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const SNAP = 7;
@@ -457,20 +458,8 @@ function Block({
     zIndex: block.z ?? 1,
     // A shape's fill and outline are drawn by its preset geometry, not by a CSS
     // background — a diamond with a rectangular background is not a diamond.
-    ...(block.shape?.rotation
-      ? { transform: `rotate(${block.shape.rotation}deg)` }
-      : {}),
-    ...(block.shape?.flipH || block.shape?.flipV
-      ? {
-          transform: [
-            block.shape?.rotation ? `rotate(${block.shape.rotation}deg)` : '',
-            block.shape?.flipH ? 'scaleX(-1)' : '',
-            block.shape?.flipV ? 'scaleY(-1)' : '',
-          ]
-            .filter(Boolean)
-            .join(' '),
-        }
-      : {}),
+    // Rotation/flip live on `shape` for shapes and on `style` for images.
+    transform: blockTransform(block),
   };
 
   const contentStyle = {
@@ -596,17 +585,18 @@ function ImageBlock({ block, folder }) {
     return <span className="block__placeholder">두 번 눌러 이미지를 지정</span>;
   }
   const url = isProjectAsset(src) ? assetUrl(folder, src) : src;
-  return (
-    <img
-      className="block__image"
-      src={url}
-      alt={alt}
-      style={{
+  const radius = block.style?.radius ?? 0;
+  // A cropped image is enlarged and offset; the block wrapper's overflow clips
+  // it. Otherwise it is contained (or covered) in the box as before.
+  const crop = cropImageStyle(block.style?.crop);
+  const imgStyle = crop
+    ? { ...crop, borderRadius: radius }
+    : {
         objectFit: block.style?.fit === 'cover' ? 'cover' : 'contain',
-        borderRadius: block.style?.radius ?? 0,
-      }}
-      draggable={false}
-    />
+        borderRadius: radius,
+      };
+  return (
+    <img className="block__image" src={url} alt={alt} style={imgStyle} draggable={false} />
   );
 }
 

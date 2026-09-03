@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-02T07:30:00Z",
+  "title": "Design System: AI Studio",
+  "extensions": {
+    "colorMeta": {
+      "deck": { "role": "primary", "displayName": "Deck 빨강", "canonical": "oklch(55.4% 0.176 34.8)", "tonalRamp": ["oklch(15% 0.176 34.8)", "oklch(26% 0.176 34.8)", "oklch(37% 0.176 34.8)", "oklch(48% 0.176 34.8)", "oklch(59% 0.176 34.8)", "oklch(70% 0.176 34.8)", "oklch(81% 0.176 34.8)", "oklch(95% 0.176 34.8)"] },
+      "doc": { "role": "primary", "displayName": "Doc 파랑", "canonical": "oklch(48.8% 0.169 259.2)", "tonalRamp": ["oklch(15% 0.169 259.2)", "oklch(26% 0.169 259.2)", "oklch(37% 0.169 259.2)", "oklch(48% 0.169 259.2)", "oklch(59% 0.169 259.2)", "oklch(70% 0.169 259.2)", "oklch(81% 0.169 259.2)", "oklch(95% 0.169 259.2)"] },
+      "grid": { "role": "primary", "displayName": "Grid 초록", "canonical": "oklch(51.6% 0.129 152.5)", "tonalRamp": ["oklch(15% 0.129 152.5)", "oklch(26% 0.129 152.5)", "oklch(37% 0.129 152.5)", "oklch(48% 0.129 152.5)", "oklch(59% 0.129 152.5)", "oklch(70% 0.129 152.5)", "oklch(81% 0.129 152.5)", "oklch(95% 0.129 152.5)"] },
+      "ink": { "role": "neutral", "displayName": "잉크", "canonical": "oklch(24% 0.002 67.7)", "tonalRamp": ["oklch(15% 0.002 67.7)", "oklch(26% 0.002 67.7)", "oklch(37% 0.002 67.7)", "oklch(48% 0.002 67.7)", "oklch(59% 0.002 67.7)", "oklch(70% 0.002 67.7)", "oklch(81% 0.002 67.7)", "oklch(95% 0.002 67.7)"] },
+      "surface": { "role": "neutral", "displayName": "표면", "canonical": "oklch(100% 0 90)", "tonalRamp": ["oklch(15% 0 90)", "oklch(26% 0 90)", "oklch(37% 0 90)", "oklch(48% 0 90)", "oklch(59% 0 90)", "oklch(70% 0 90)", "oklch(81% 0 90)", "oklch(95% 0 90)"] },
+      "line": { "role": "neutral", "displayName": "선", "canonical": "oklch(90.5% 0.003 67.8)", "tonalRamp": ["oklch(15% 0.003 67.8)", "oklch(26% 0.003 67.8)", "oklch(37% 0.003 67.8)", "oklch(48% 0.003 67.8)", "oklch(59% 0.003 67.8)", "oklch(70% 0.003 67.8)", "oklch(81% 0.003 67.8)", "oklch(95% 0.003 67.8)"] },
+      "focus": { "role": "functional", "displayName": "포커스 파랑", "canonical": "oklch(52.6% 0.149 251.6)", "tonalRamp": ["oklch(15% 0.149 251.6)", "oklch(26% 0.149 251.6)", "oklch(37% 0.149 251.6)", "oklch(48% 0.149 251.6)", "oklch(59% 0.149 251.6)", "oklch(70% 0.149 251.6)", "oklch(81% 0.149 251.6)", "oklch(95% 0.149 251.6)"] },
+      "danger": { "role": "functional", "displayName": "위험 빨강", "canonical": "oklch(47.5% 0.162 23.7)", "tonalRamp": ["oklch(15% 0.162 23.7)", "oklch(26% 0.162 23.7)", "oklch(37% 0.162 23.7)", "oklch(48% 0.162 23.7)", "oklch(59% 0.162 23.7)", "oklch(70% 0.162 23.7)", "oklch(81% 0.162 23.7)", "oklch(95% 0.162 23.7)"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "런처 히어로 제목 전용. 앱 크롬 안에서는 등장하지 않는다." },
+      "headline": { "displayName": "Headline", "purpose": "대화상자 제목, 런처 섹션·카드 이름." },
+      "title": { "displayName": "Title", "purpose": "패널 머리글(대문자, +0.04em). 크롬의 구획 표지." },
+      "body": { "displayName": "Body", "purpose": "크롬 본문 14px. 문서 본문은 별도 15px/1.72(.md--doc)로 Rust 상수와 짝." },
+      "label": { "displayName": "Label", "purpose": "리본 버튼 라벨과 그룹 이름. Office의 밀도를 만드는 크기." },
+      "mono": { "displayName": "Mono", "purpose": "수식·셀 주소·저장 포맷 패널 등 기계가 읽는 텍스트 전용. tabular-nums." }
+    },
+    "shadows": [
+      { "name": "shadow-1", "value": "0 1px 2px rgba(0,0,0,.08), 0 2px 6px rgba(0,0,0,.06)", "purpose": "낮게 뜬 것 — 카드, 시트 위 차트, 수식 힌트." },
+      { "name": "shadow-2", "value": "0 4px 12px rgba(0,0,0,.12), 0 12px 28px rgba(0,0,0,.12)", "purpose": "높이 뜬 것 — 캔버스·종이, 메뉴, 대화상자, 토스트. 크롬에는 절대 쓰지 않는다." }
+    ],
+    "motion": [
+      { "name": "state-color", "value": "background-color .1s ease, border-color .1s ease, color .1s ease", "purpose": "모든 컨트롤의 hover/pressed 상태 전환. 이 하나로 통일." },
+      { "name": "surface-in", "value": "opacity+translateY(4px), .14s cubic-bezier(.16,1,.3,1)", "purpose": "팝오버·컨텍스트 메뉴·찾기 바의 공유 진입 모션." },
+      { "name": "dialog-in", "value": "opacity+translateY(6px)+scale(.985), .16s cubic-bezier(.16,1,.3,1)", "purpose": "대화상자 진입. 오버레이는 .12s 페이드." },
+      { "name": "toast-in", "value": "opacity+translate(-50%,8px), .18s cubic-bezier(.16,1,.3,1)", "purpose": "토스트 진입. 중앙 정렬 transform을 함께 나른다." }
+    ],
+    "breakpoints": [
+      { "name": "shortcuts-1col", "value": "700px", "purpose": "단축키 시트가 2단에서 1단으로. 크롬 자체는 반응형 대신 가로 스크롤." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "대화상자의 확인 동작 전용. 앱 강조색 배경, hover에 밝기 8% 상승.",
+      "html": "<button class=\"ds-btn-primary\">만들기</button>",
+      "css": ".ds-btn-primary { background: var(--accent, #185abd); border: 1px solid var(--accent, #185abd); color: #fff; padding: 7px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; transition: filter .1s ease; } .ds-btn-primary:hover { filter: brightness(1.08); } .ds-btn-primary:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 1px; }"
+    },
+    {
+      "name": "Default Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "보조 동작. 흰 배경 + 헤어라인, hover에 회색.",
+      "html": "<button class=\"ds-btn\">취소</button>",
+      "css": ".ds-btn { background: #fff; border: 1px solid #e1dfdd; color: #201f1e; padding: 7px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; transition: background-color .1s ease; } .ds-btn:hover { background: #f3f2f1; } .ds-btn:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 1px; }"
+    },
+    {
+      "name": "Ribbon Button",
+      "kind": "button",
+      "description": "리본의 큰 버튼: 아이콘 위 11px 라벨. 투명에서 시작해 hover에 배경+테두리, 눌린 상태는 #edebe9.",
+      "html": "<button class=\"ds-rbtn\" aria-pressed=\"false\"><span class=\"ds-rbtn-icon\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"2\"/></svg></span><span>도형</span></button>",
+      "css": ".ds-rbtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-width: 44px; padding: 6px 7px; background: none; border: 1px solid transparent; border-radius: 4px; cursor: pointer; font-size: 11px; color: #201f1e; line-height: 1.25; transition: background-color .1s ease, border-color .1s ease; } .ds-rbtn:hover { background: #f3f2f1; border-color: #e1dfdd; } .ds-rbtn[aria-pressed=\"true\"] { background: #edebe9; border-color: #e1dfdd; } .ds-rbtn:focus-visible { outline: 2px solid #0f6cbd; outline-offset: -2px; } .ds-rbtn-icon { height: 20px; display: grid; place-items: center; }"
+    },
+    {
+      "name": "Ribbon Tab",
+      "kind": "nav",
+      "description": "리본 탭줄. 활성 탭은 강조색 글자 + 아래 2px 강조색 언더라인 — Office의 탭 문법.",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab\" role=\"tab\" aria-selected=\"true\">홈</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">삽입</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">디자인</button></div>",
+      "css": ".ds-tabs { display: flex; align-items: flex-end; gap: 2px; padding: 0 8px; height: 34px; border-bottom: 1px solid #edebe9; background: #fff; } .ds-tab { background: none; border: 0; cursor: pointer; padding: 7px 14px; border-radius: 4px 4px 0 0; color: #484644; font-size: 13px; position: relative; transition: background-color .1s ease, color .1s ease; } .ds-tab:hover { background: #f3f2f1; } .ds-tab[aria-selected=\"true\"] { color: var(--accent, #185abd); font-weight: 600; } .ds-tab[aria-selected=\"true\"]::after { content: \"\"; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 2px; background: var(--accent, #185abd); border-radius: 2px; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "크롬 표준 26px 입력. 포커스에 테두리+1px 링이 겹쳐 2px 두께가 된다.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"문서 제목\" aria-label=\"문서 제목\" />",
+      "css": ".ds-input { height: 26px; padding: 0 6px; font-size: 12px; border: 1px solid #e1dfdd; border-radius: 4px; background: #fff; color: #201f1e; caret-color: var(--accent, #185abd); } .ds-input::placeholder { color: #797775; } .ds-input:focus { border-color: #0f6cbd; outline: none; box-shadow: 0 0 0 1px #0f6cbd; }"
+    },
+    {
+      "name": "Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "필터·토글 칩. 선택되면 앱 강조색으로 채워진다.",
+      "html": "<button class=\"ds-chip\" aria-pressed=\"false\">최근 사용</button> <button class=\"ds-chip\" aria-pressed=\"true\">전체</button>",
+      "css": ".ds-chip { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: #f3f2f1; color: #484644; border: 1px solid #e1dfdd; cursor: pointer; transition: background-color .1s ease, color .1s ease; } .ds-chip:hover { background: #edebe9; } .ds-chip[aria-pressed=\"true\"] { background: var(--accent, #185abd); color: #fff; border-color: var(--accent, #185abd); }"
+    },
+    {
+      "name": "New Document Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "런처의 새 문서 카드. hover에 -2px 리프트 + shadow-2 + 강조색 테두리 — 이 시스템에서 hover 그림자가 허용된 유일한 곳.",
+      "html": "<button class=\"ds-newcard\"><span class=\"ds-newcard-icon\">W</span><span class=\"ds-newcard-name\">AI Doc</span><span class=\"ds-newcard-desc\">순수 마크다운으로 흐르는 문서. 서식을 준 문단만 JSON에 기록됩니다.</span></button>",
+      "css": ".ds-newcard { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; padding: 18px; background: #fff; cursor: pointer; text-align: left; border: 1px solid #e1dfdd; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 2px 6px rgba(0,0,0,.06); transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; max-width: 260px; } .ds-newcard:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.12), 0 12px 28px rgba(0,0,0,.12); border-color: color-mix(in srgb, var(--accent, #185abd) 32%, #e1dfdd); } .ds-newcard-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 8px; background: var(--accent, #185abd); color: #fff; font-size: 18px; font-weight: 700; } .ds-newcard-name { font-size: 16px; font-weight: 600; color: #201f1e; } .ds-newcard-desc { font-size: 12.5px; color: #484644; line-height: 1.5; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "낯익은 책상 (The Familiar Desk)",
+    "overview": "리본은 그 자리에, 단축키는 그 손가락에. 이 시스템의 야심은 새로워 보이는 것이 아니라 사용자가 \"배울 게 없네\"라고 느끼는 것이다. 20년 된 Office의 근육 기억을 그대로 잇고, 새로움은 오직 마감의 품질로만 드러낸다. 시각적 뿌리는 Microsoft Fluent의 밝은 사무 환경이다. 따뜻한 회색 중립 축 위에 앱마다 하나의 강조색이 얹힌다 — Deck의 빨강, Doc의 파랑, Grid의 초록. 크롬은 밀도가 높고 평평하며, 문서만이 흰 표면과 그림자를 가지고 떠 있다. 화면의 주인공은 언제나 문서다. 컴포넌트의 성격은 정직하고 재빠른 것이다: 네이티브 툴바처럼 즉각 반응하고, 장식이 없으며, 누르면 무조건 그 일이 일어난다.",
+    "keyCharacteristics": [
+      "Office의 자리와 이름을 그대로 잇는 고밀도 크롬 (26px 컨트롤, 1px 헤어라인)",
+      "앱별 단일 강조색(빨강·파랑·초록)이 타이틀바부터 텍스트 선택까지 일관되게 물듦",
+      "평평한 크롬 / 떠 있는 문서 — 그림자는 오직 \"문서 위에 떠 있다\"는 뜻",
+      "글꼴 하나(Pretendard), 언어 하나(한국어 Office 용어)",
+      "모든 일시 표면(메뉴·대화상자·토스트)이 공유하는 단일 진입 모션"
+    ],
+    "rules": [
+      { "name": "한 화면 한 강조색 규칙", "body": "한 화면에는 그 앱의 강조색 하나만 산다. 두 번째 유채색이 필요해 보이면 그것은 상태(위험·포커스)이거나 설계 오류다.", "section": "colors" },
+      { "name": "Office 팔레트 규칙", "body": "사용자가 고르는 색(도형 채우기·글자색·셀 음영)은 Office의 테마 색 60 + 표준 색 10 팔레트에서 나온다. 내보낸 .pptx에서 같은 색이 나와야 하기 때문이다. 이 팔레트를 장식적으로 재해석하지 않는다.", "section": "colors" },
+      { "name": "글꼴 하나 규칙", "body": "새 글꼴을 추가하지 않는다. 가져온 문서가 어떤 글꼴을 요구해도 Pretendard로 치환되며(치환 사실은 보고), UI가 두 번째 목소리를 갖는 순간 이 규칙의 근거가 무너진다.", "section": "typography" },
+      { "name": "문서-수출 짝 규칙", "body": "문서 타이포 수치는 Rust 상수와 한 쌍이다 (.md--doc 15px ↔ doc::BODY_PX 등). 한쪽만 바꾸면 내보낸 문서의 크기가 달라진다 — 스타일시트 단독 변경 금지.", "section": "typography" },
+      { "name": "뜨는 것만 그림자 규칙", "body": "그림자는 장식이 아니라 \"문서 위에 떠 있다\"는 뜻이다. 크롬에는 절대 그림자를 주지 않고, hover로 그림자를 켜지 않는다 (유일한 예외: 런처의 새 문서 카드 리프트).", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 새 컨트롤은 Office에 있는 자리, Office의 한국어 이름으로 넣는다 — 리본 탭·그룹의 이름과 순서는 스모크 테스트가 검증하는 계약이다.",
+      "Do 강조가 필요한 곳은 var(--accent) 또는 color-mix(in srgb, var(--accent) N%, ...)로 유도한다. 앱이 바뀌면 색이 따라 바뀌어야 한다.",
+      "Do 텍스트 선택·캐럿·체크박스·스크롤바 같은 브라우저 표면도 팔레트로 테마한다.",
+      "Do 새 일시 표면(메뉴류)은 Popover를 재사용하고 공유 진입 모션을 상속한다.",
+      "Do 본문·플레이스홀더 4.5:1, 큰 글자 3:1의 대비 하한을 지킨다 (#797775가 흰 바탕의 하한)."
+    ],
+    "donts": [
+      "Don't 크롬(리본·패널·상태 표시줄)에 그림자를 주지 않는다. 그림자는 \"떠 있다\"는 뜻이다.",
+      "Don't 두 번째 글꼴, 그라데이션 장식, 유리 효과를 들이지 않는다. 유일한 블러는 대화상자 오버레이의 2px이다.",
+      "Don't 고정 유채색 틴트(#d6e4f7 같은)를 쓰지 않는다 — 앱 강조색과 싸운다. 틴트는 color-mix로 유도한다.",
+      "Don't .md--doc의 문서 타이포 수치를 Rust 상수(BODY_PX 등) 없이 단독 변경하지 않는다. 내보낸 문서의 크기가 달라진다.",
+      "Don't 사용자 색 팔레트(테마 60 + 표준 10)를 재구성하지 않는다. 내보낸 Office 파일의 색 일치가 존재 이유다."
+    ]
+  }
+}

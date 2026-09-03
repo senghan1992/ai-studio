@@ -1,5 +1,29 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
+
+/**
+ * True while the browser is printing.
+ *
+ * Print-only layouts (a deck's one-slide-per-page, a sheet's used range) are
+ * mounted only for the duration: keeping them in the DOM all the time doubles
+ * every block for anything that counts elements, and costs render time on
+ * every edit. `flushSync` matters — the print snapshot is taken right after
+ * `beforeprint`, so the mount cannot wait for the next React tick.
+ */
+export function usePrinting() {
+  const [printing, setPrinting] = useState(false);
+  useEffect(() => {
+    const before = () => flushSync(() => setPrinting(true));
+    const after = () => setPrinting(false);
+    window.addEventListener('beforeprint', before);
+    window.addEventListener('afterprint', after);
+    return () => {
+      window.removeEventListener('beforeprint', before);
+      window.removeEventListener('afterprint', after);
+    };
+  }, []);
+  return printing;
+}
 
 /* ------------------------------------------------------------------ ribbon */
 
@@ -260,6 +284,11 @@ export function ColorPicker({ value, onChange, title, none, accent, small, disab
     setOpen(false);
   };
   const theme = themeRow(accent);
+  // The "다른 색…" swatch and the system picker prefill with the document's own
+  // accent, falling back to the Office default the theme row also uses. The
+  // native colour input only accepts six-digit hex.
+  const isHex = (c) => /^#[0-9a-f]{6}$/i.test(c ?? '');
+  const prefill = isHex(accent) ? accent : '#4472c4';
 
   return (
     <>
@@ -339,11 +368,11 @@ export function ColorPicker({ value, onChange, title, none, accent, small, disab
               </button>
             )}
             <label className="palette__item">
-              <span className="colorbtn__swatch" style={{ background: value || '#4f46e5' }} />
+              <span className="colorbtn__swatch" style={{ background: value || prefill }} />
               다른 색…
               <input
                 type="color"
-                value={/^#[0-9a-f]{6}$/i.test(value ?? '') ? value : '#4f46e5'}
+                value={isHex(value) ? value : prefill}
                 onChange={(e) => onChange(e.target.value)}
                 aria-label={`${title} 직접 선택`}
               />

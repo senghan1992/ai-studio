@@ -14,11 +14,12 @@ import TablePicker from '../components/TablePicker.jsx';
 import ImageDialog from '../components/ImageDialog.jsx';
 import {
   Ribbon, Group, Btn, Select, NumInput, ColorPicker, Check, Popover,
-  ContextMenu, useContextMenu, ZoomSlider,
+  ContextMenu, useContextMenu, ZoomSlider, usePrinting,
 } from '../components/ui.jsx';
 import SlideCanvas from './SlideCanvas.jsx';
 import SlideSorter from './SlideSorter.jsx';
 import Slideshow from './Slideshow.jsx';
+import PrintDeck from './PrintDeck.jsx';
 import { toggleWrap, toggleLinePrefix } from '../lib/markdown.js';
 import { alignBlocks, distributeBlocks } from './blockOps.js';
 
@@ -162,6 +163,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
   const [presenting, setPresenting] = useState(false);
   const [clipboard, setClipboard] = useState(null);
   const ctx = useContextMenu();
+  const printing = usePrinting();
 
   const slideIndex = Math.min(current, Math.max(0, slides.length - 1));
   const slide = slides[slideIndex];
@@ -572,6 +574,12 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
         addSlide();
         return;
       }
+      // Ctrl+P prints the deck, one slide per page — PDF via the print dialog.
+      if (mod && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        window.print();
+        return;
+      }
       /*
        * Tab walks the objects on the slide, Shift+Tab walks back.
        *
@@ -810,6 +818,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
           onSave={save}
           onHome={onHome}
           onNewProject={onNewProject}
+          onPrint={() => window.print()}
           notify={notify}
         />
       )}
@@ -1644,6 +1653,10 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
       {inspectorOpen && <FileInspector project={project} activeIndex={slideIndex} />}
 
       {ctx.menu && <ContextMenu {...ctx.menu} onClose={ctx.close} />}
+
+      {/* Ctrl+P: the whole deck, one slide per page — mounted only while
+          the browser is actually printing. */}
+      {printing && <PrintDeck slides={slides} folder={project.folder} />}
 
       {presenting && (
         <Slideshow

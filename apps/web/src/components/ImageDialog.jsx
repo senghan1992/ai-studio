@@ -47,7 +47,8 @@ export default function ImageDialog({ folder, initial, onCancel, onConfirm, noti
         });
         const saved = await api.uploadAsset(folder, file.name, dataUrl);
         setAssets((list) => [...list.filter((a) => a.path !== saved.path), saved].sort((a, b) => a.path.localeCompare(b.path)));
-        setSrc(`../${saved.path}`);
+        // `saved.path` is already `../assets/…` — the canonical markdown form.
+        setSrc(saved.path);
         if (!alt) setAlt(file.name.replace(/\.[^.]+$/, ''));
         notify?.(`${saved.path} 저장됨`);
       } catch (e) {
@@ -107,7 +108,7 @@ export default function ImageDialog({ folder, initial, onCancel, onConfirm, noti
                 type="button"
                 className={`imgpicker__item${src.endsWith(asset.path) ? ' is-on' : ''}`}
                 title={`${asset.path} · ${Math.round(asset.bytes / 1024)}KB`}
-                onClick={() => setSrc(`../${asset.path}`)}
+                onClick={() => setSrc(asset.path)}
               >
                 <img src={assetUrl(folder, asset.path)} alt="" />
               </button>

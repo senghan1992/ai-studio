@@ -15,10 +15,7 @@
       "kind": "text",
       "style": {
         "fontSize": 38,
-        "weight": 700,
-        "align": "left",
-        "color": "#1f2937",
-        "lineHeight": 1.45
+        "weight": 700
       }
     },
     "b_1nt7t": {

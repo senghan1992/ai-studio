@@ -26,12 +26,76 @@ async function invoke(command, args) {
 const BASE = '/api';
 const enc = encodeURIComponent;
 
-async function request(path, options = {}) {
+/* ------------------------------------------------------------------- token */
+
+/**
+ * The access token, when the server was started with `--token`.
+ *
+ * It rides as a Bearer header on API calls, and as `?token=` on the two
+ * requests that cannot carry headers: the export download (a navigation) and
+ * images loaded through `<img src>`. Kept in localStorage so a reload does not
+ * ask again. The desktop app talks over IPC and never needs it.
+ */
+const TOKEN_KEY = 'aiStudioToken';
+
+function storedToken() {
+  try {
+    return window.localStorage?.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function storeToken(token) {
+  try {
+    window.localStorage?.setItem(TOKEN_KEY, token);
+  } catch {
+    /* private mode: the token still works for this page's lifetime */
+  }
+}
+
+let memoryToken = '';
+const currentToken = () => memoryToken || storedToken();
+/** True after the user dismissed the token prompt: background calls (the
+ *  external-change poll) must not re-raise it every few seconds. */
+let promptDeclined = false;
+
+/** `?token=` (or `&token=`) when one is set — for URLs that cannot carry headers. */
+export function tokenQuery(joiner = '?') {
+  const token = currentToken();
+  return token ? `${joiner}token=${enc(token)}` : '';
+}
+
+async function request(path, options = {}, retried = false) {
+  const token = currentToken();
   const res = await fetch(`${BASE}${path}`, {
-    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
     ...options,
+    headers: {
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers ?? {}),
+    },
   });
   if (!res.ok) {
+    // A 401 means the server wants a token this page does not have. Ask once —
+    // the person standing at the browser is the one who knows it — and if they
+    // dismiss the prompt, stay quiet instead of re-asking on every background
+    // request until the page is reloaded.
+    if (
+      res.status === 401 &&
+      !retried &&
+      !promptDeclined &&
+      typeof window !== 'undefined' &&
+      typeof window.prompt === 'function'
+    ) {
+      const given = window.prompt('이 서버는 접속 토큰이 필요합니다.\n토큰을 입력하세요:');
+      if (given && given.trim()) {
+        memoryToken = given.trim();
+        storeToken(memoryToken);
+        return request(path, options, true);
+      }
+      promptDeclined = true;
+    }
     let message = `요청 실패 (${res.status})`;
     try {
       const data = await res.json();
@@ -39,7 +103,9 @@ async function request(path, options = {}) {
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = res.status;
+    throw error;
   }
   if (res.status === 204) return null;
   const type = res.headers.get('content-type') ?? '';
@@ -97,6 +163,21 @@ export const api = {
   listFiles: (folder) =>
     call('project_files', { folder }, { path: `/projects/${enc(folder)}/files` }),
 
+  /** The kept versions of a project, newest first. */
+  history: (folder) =>
+    call('history', { folder }, { path: `/projects/${enc(folder)}/history` }),
+
+  /** Put a kept version back. The state it replaces is kept first. */
+  restore: (folder, snapshot) =>
+    call(
+      'restore_snapshot',
+      { folder, snapshot },
+      {
+        path: `/projects/${enc(folder)}/restore`,
+        options: json({ data: { snapshot } }),
+      }
+    ),
+
   readFile: (folder, path) =>
     call(
       'read_file',
@@ -153,8 +234,9 @@ export async function exportProject(folder, ext) {
   if (isDesktop()) {
     return invoke('export_project', { folder, ext });
   }
-  // A plain navigation lets the browser handle the Content-Disposition header.
-  window.location.assign(`${BASE}/projects/${enc(folder)}/export/${enc(ext)}`);
+  // A plain navigation lets the browser handle the Content-Disposition header,
+  // which is why the token travels in the query here.
+  window.location.assign(`${BASE}/projects/${enc(folder)}/export/${enc(ext)}${tokenQuery()}`);
   return null;
 }
 
@@ -169,7 +251,8 @@ export async function exportProject(folder, ext) {
 export function assetUrl(folder, relPath) {
   const clean = String(relPath ?? '').replace(/^\.\.\//, '').replace(/^\.\//, '');
   if (!isDesktop()) {
-    return `${BASE}/projects/${enc(folder)}/asset?path=${enc(clean)}`;
+    // `<img src>` cannot carry a header, so the token rides in the query.
+    return `${BASE}/projects/${enc(folder)}/asset?path=${enc(clean)}${tokenQuery('&')}`;
   }
   const target = `${enc(folder)}/${clean.split('/').map(enc).join('/')}`;
   const internals = window.__TAURI_INTERNALS__;

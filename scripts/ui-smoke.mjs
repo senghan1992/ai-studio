@@ -187,11 +187,15 @@ const fixtures = {};
     ],
   };
 
+  // On disk a sheet is always saved recalculated; the in-memory fixture gets
+  // the same treatment so the formula cells carry their cached values.
+  const sample = core.makeSheet({ name: '시트1', withSample: true });
+  const recalced = core.recalcSheet({ cells: sample.cells, names: sample.names, name: sample.name }, []);
   fixtures['스모크-시트.aigrid'] = {
     type: 'grid',
     folder: '스모크-시트.aigrid',
     manifest: manifestOf('스모크 grid', 'grid'),
-    sheets: [core.makeSheet({ name: '시트1', withSample: true })],
+    sheets: [{ ...sample, cells: recalced.cells }],
   };
 }
 const folders = Object.keys(fixtures);
@@ -267,7 +271,7 @@ async function mount(hash, { interact } = {}) {
         folder,
         project: fixtures[folder],
         warnings: [
-          '글꼴은 모두 Pretendard로 바꿔 열었습니다 (Calibri)',
+          '화면에서는 글꼴을 Pretendard로 표시합니다 (Calibri) — 내보낼 때는 원래 글꼴 이름을 유지합니다',
           'SmartArt는 같은 모양의 도형들로 바꿨습니다',
           '조건부 서식은 저장된 값 기준의 고정 서식으로 바꿨습니다',
         ],
@@ -295,7 +299,11 @@ async function mount(hash, { interact } = {}) {
   };
   global.window = window;
   global.document = window.document;
-  global.navigator = window.navigator;
+  // Node ≥ 21 defines `globalThis.navigator` as a getter-only accessor, so a
+  // plain assignment throws; redefining leaves it writable for the restore.
+  Object.defineProperty(global, 'navigator', {
+    value: window.navigator, configurable: true, writable: true,
+  });
   // The bundle calls bare `fetch`, which resolves against globalThis rather than
   // the `window` we pass in, so the stub has to be installed globally too.
   global.fetch = window.fetch;
@@ -524,6 +532,87 @@ console.log('\n■ Grid 편집 상호작용');
   check('Enter가 아래 셀로 이동', captured.ref === 'B3', `ref = ${captured.ref}`);
   check('저장 포맷 패널의 json에 새 값이 보임', captured.json?.includes('5000'),
     (captured.json ?? '').slice(0, 200));
+}
+
+console.log('\n■ Grid 동적 배열 스필');
+{
+  const captured = {};
+  const { errors } = await mount(`#/grid/${encodeURIComponent(byType.grid)}`, {
+    async interact({ window, settle, $, $$, click, key, setValue, cellText }) {
+      // F2 (빈 셀)에 SEQUENCE(3)를 입력하면 F3·F4로 흘러넘친다.
+      const rows = $$('.sheet tbody tr');
+      const f2 = rows[1].querySelectorAll('td')[5];
+      click(f2);
+      await settle(4);
+      key(window.document.body, '=');
+      await settle(4);
+      const editor = $('.cell__editor');
+      if (!editor) throw new Error('typing = did not open the cell editor');
+      setValue(editor, '=SEQUENCE(3)');
+      key(editor, 'Enter');
+      await settle(8);
+
+      captured.anchor = cellText(2, 5);
+      captured.spill2 = cellText(3, 5);
+      captured.spill3 = cellText(4, 5);
+
+      // 스필된 셀을 고르면 수식 입력줄이 앵커의 수식을 회색으로 보여준다.
+      const f3 = $$('.sheet tbody tr')[2].querySelectorAll('td')[5];
+      click(f3);
+      await settle(4);
+      captured.ghostFormula = $('.formulabar__input')?.value;
+      captured.ghostClass = $('.formulabar__input')?.className ?? '';
+      captured.outlined = $$('.sheet td.is-spill').length;
+    },
+  });
+
+  check('스필 편집 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('앵커에 첫 값이 계산됨', captured.anchor?.includes('1'), `F2 = ${captured.anchor}`);
+  check('배열이 아래 셀로 흘러넘침', captured.spill2?.includes('2') && captured.spill3?.includes('3'),
+    `F3 = ${captured.spill2}, F4 = ${captured.spill3}`);
+  check('스필된 셀의 수식 입력줄이 앵커의 수식을 보여줌',
+    captured.ghostFormula === '=SEQUENCE(3)', `수식 입력줄 = ${captured.ghostFormula}`);
+  check('그 수식은 회색(ghost)으로 표시됨', captured.ghostClass.includes('--ghost'), captured.ghostClass);
+  check('스필 범위에 테두리가 그려짐', captured.outlined >= 2, `outlined = ${captured.outlined}`);
+}
+
+console.log('\n■ 인쇄 레이아웃 (Deck · Grid)');
+{
+  const captured = {};
+  const deckMount = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    async interact({ window, settle, $, $$ }) {
+      // 인쇄 레이아웃은 인쇄 중에만 마운트된다 — 화면 DOM을 복제하지 않는다.
+      captured.deckBefore = $$('.printdeck').length;
+      window.dispatchEvent(new window.Event('beforeprint'));
+      await settle(2);
+      captured.deckPages = $$('.printdeck__page').length;
+      captured.deckSlides = $$('.slidesorter .sorter-item').length;
+      window.dispatchEvent(new window.Event('afterprint'));
+      await settle(2);
+      captured.deckAfter = $$('.printdeck').length;
+    },
+  });
+  check('인쇄 전에는 인쇄 레이아웃이 DOM에 없음', captured.deckBefore === 0);
+  check('인쇄 중에는 슬라이드마다 한 페이지', captured.deckPages > 0 && captured.deckPages === captured.deckSlides,
+    `pages=${captured.deckPages}, slides=${captured.deckSlides}`);
+  check('인쇄가 끝나면 레이아웃이 내려감', captured.deckAfter === 0);
+  check('덱 인쇄 중 런타임 오류 없음', deckMount.errors.length === 0, deckMount.errors.join('\n      '));
+
+  const gridMount = await mount(`#/grid/${encodeURIComponent(byType.grid)}`, {
+    async interact({ window, settle, $, $$ }) {
+      window.dispatchEvent(new window.Event('beforeprint'));
+      await settle(2);
+      captured.gridCells = $$('.printsheet__table td').length;
+      captured.gridText = $('.printsheet')?.textContent ?? '';
+      window.dispatchEvent(new window.Event('afterprint'));
+      await settle(2);
+      captured.gridAfter = $$('.printsheet').length;
+    },
+  });
+  check('시트 인쇄가 사용 범위를 표로 그림', captured.gridCells > 0, `cells=${captured.gridCells}`);
+  check('인쇄된 시트에 계산된 값이 있음', captured.gridText.includes('2,550'), captured.gridText.slice(0, 120));
+  check('시트 인쇄 레이아웃도 인쇄 후 내려감', captured.gridAfter === 0);
+  check('시트 인쇄 중 런타임 오류 없음', gridMount.errors.length === 0, gridMount.errors.join('\n      '));
 }
 
 console.log('\n■ Deck 편집 상호작용');

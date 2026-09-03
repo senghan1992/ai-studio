@@ -66,7 +66,11 @@ export default function App() {
  * rather than trying to reconcile two different documents in one hook instance.
  */
 function EditorRoute({ route, onHome, notify, fail, onFolderChange }) {
-  const ctl = useProject(route.folder, { onError: fail, onFolderChange });
+  const ctl = useProject(route.folder, {
+    onError: fail,
+    onFolderChange,
+    onExternalChange: () => notify('다른 곳에서 저장된 변경을 불러왔습니다'),
+  });
   const Editor = EDITORS[route.type];
 
   if (ctl.loading) {

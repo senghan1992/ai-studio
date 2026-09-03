@@ -16,9 +16,7 @@
       "style": {
         "fontSize": 52,
         "weight": 700,
-        "align": "center",
-        "color": "#1f2937",
-        "lineHeight": 1.45
+        "align": "center"
       }
     },
     "b_b5k30": {
@@ -30,10 +28,8 @@
       "kind": "text",
       "style": {
         "fontSize": 22,
-        "weight": 400,
         "align": "center",
-        "color": "#6b7280",
-        "lineHeight": 1.45
+        "color": "#6b7280"
       }
     },
     "b_qwr3x": {
@@ -45,10 +41,8 @@
       "kind": "text",
       "style": {
         "fontSize": 14,
-        "weight": 400,
         "align": "center",
-        "color": "#9ca3af",
-        "lineHeight": 1.45
+        "color": "#9ca3af"
       }
     }
   }
