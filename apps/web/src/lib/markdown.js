@@ -4,13 +4,62 @@ import DOMPurify from 'dompurify';
 marked.setOptions({ gfm: true, breaks: true });
 
 /**
- * A line that is only a list marker (`- `, `1. `) does not become a list in
- * CommonMark — it renders as literal text, which is exactly the raw syntax a
- * non-technical writer would see and delete. Give it an invisible character so
- * an empty bullet stays a bullet everywhere markdown is drawn.
+ * Lines that are only a marker (`- `, `1. `, `> `) do not become a list or quote
+ * in CommonMark — they render as literal text, which is exactly the raw syntax
+ * a non-technical writer would see and delete. The same goes for a lone
+ * leading/trailing newline: marked folds it away, but that is the line the
+ * caret is sitting on after Enter. Give each an invisible occupant so the
+ * structure survives everywhere markdown is drawn.
  */
 export function normalizeMd(md) {
-  return String(md ?? '').replace(/^[ \t]*(?:[-+*]|\d+[.)])[ \t]+$/gm, (m) => `${m}\u200B`);
+  let s = String(md ?? '').replace(
+    /^[ \t]*((?:[-+*]|\d+[.)])[ \t]+|>[ \t]*)[\u200B\uFFFF]*$/gm,
+    (m) => `${m}\u200B`
+  );
+  if (/^\n/.test(s) && !/^\n\n/.test(s)) s = `\u200B${s}`;
+  if (/\n$/.test(s) && !/\n\n$/.test(s)) s = `${s}\u200B`;
+  return s;
+}
+
+/** The markdown line around an offset, split at the caret. */
+export function mdLineAt(md, offset) {
+  const source = String(md ?? '');
+  const lineStart = source.lastIndexOf('\n', offset - 1) + 1;
+  const nl = source.indexOf('\n', offset);
+  const lineEnd = nl === -1 ? source.length : nl;
+  return {
+    lineStart,
+    lineEnd,
+    before: source.slice(lineStart, offset),
+    after: source.slice(offset, lineEnd),
+  };
+}
+
+const stripMarker = (s) => s.replace(/^[ \t]*(?:>|(?:[-+*]|\d+[.)]))[ \t]?/, '');
+
+/**
+ * True when the caret sits on an empty line — the Enter that splits the block
+ * into two paragraphs. A lone quote/list marker counts as empty.
+ */
+export function mdLineEmptyAt(md, offset) {
+  const { before, after } = mdLineAt(md, offset);
+  return stripMarker(before).trim() === '' && stripMarker(after).trim() === '';
+}
+
+/**
+ * A heading typed below the block's first line — marked renders it fine in
+ * place, but the outline and anchors treat headings as block boundaries, so it
+ * becomes its own block. Returns the line's offset, or -1.
+ */
+export function mdMidHeadingOffset(md) {
+  const source = String(md ?? '');
+  let offset = 0;
+  const lines = source.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0 && /^#{1,6} /.test(lines[i])) return offset;
+    offset += lines[i].length + 1;
+  }
+  return -1;
 }
 
 /**

@@ -221,8 +221,12 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
       const block = section?.blocks.find((b) => b.id === blockId);
       if (!block) return;
       const md = String(block.md ?? '');
-      const head = md.slice(0, caret);
-      const tail = md.slice(caret);
+      // The split point sits on an empty line: the head loses the closed line
+      // (its bare newline or marker), the tail loses the opened one.
+      const head = md
+        .slice(0, caret)
+        .replace(/\n[ \t]*(?:>[ \t]*|(?:[-+*]|\d+[.)])[ \t]*)?$/, '');
+      const tail = md.slice(caret).replace(/^\n+/, '');
       const newId = newBlockId();
       patchSection((s) => {
         const at = s.blocks.findIndex((b) => b.id === blockId);
@@ -239,6 +243,35 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
         setEditingId(newId);
         setFocusRequest({ id: newId, caret: 0 });
       }
+    },
+    [patchSection, section]
+  );
+
+  /**
+   * A heading typed below the block's first line becomes its own block — the
+   * outline and anchors treat headings as boundaries even though marked draws
+   * them fine in place. `md` is the block's fresh markdown straight from the
+   * DOM; `caret` is where the writer was when the heading completed.
+   */
+  const autoSplitHeading = useCallback(
+    (blockId, md, splitOffset, caretOffset) => {
+      const block = section?.blocks.find((b) => b.id === blockId);
+      if (!block) return;
+      const head = md.slice(0, splitOffset).replace(/\n+$/, '');
+      const tail = md.slice(splitOffset);
+      if (!tail.trim()) return;
+      const newId = newBlockId();
+      patchSection((s) => {
+        const at = s.blocks.findIndex((b) => b.id === blockId);
+        if (at < 0) return s;
+        const next = [...s.blocks];
+        next[at] = { ...block, md: head, type: classify(head) };
+        next.splice(at + 1, 0, { id: newId, md: tail, type: classify(tail), override: block.override ?? null });
+        return { ...s, blocks: next };
+      });
+      setSelectedId(newId);
+      setEditingId(newId);
+      setFocusRequest({ id: newId, caret: textOffsetForMd(tail, Math.max(0, caretOffset - splitOffset)) });
     },
     [patchSection, section]
   );
@@ -1301,6 +1334,7 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
     },
     onChange: (md) => setBlockMd(block.id, md),
     onSplit: (caret) => splitBlock(block.id, caret),
+    onAutoSplit: (md, splitOffset, caretOffset) => autoSplitHeading(block.id, md, splitOffset, caretOffset),
     onMergeBackward: (caretInMd) => mergeBackward(block.id, caretInMd),
     onStepParagraph: (direction) => stepParagraph(block.id, direction),
     onIndent: (direction) => stepIndent(direction),

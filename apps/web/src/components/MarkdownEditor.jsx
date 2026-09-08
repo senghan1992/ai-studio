@@ -1,8 +1,8 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { markHtml, renderMarkdown, continueList, indentLines, isListLine } from '../lib/markdown.js';
+import { markHtml, renderMarkdown, continueList, indentLines, isListLine, mdLineAt, mdLineEmptyAt, mdMidHeadingOffset } from '../lib/markdown.js';
 import {
-  caretMdOffset, caretTextOffset, domToMd, setCaretAtTextOffset, textLength, textOffsetForMd,
-  toggleInlineWrap,
+  caretMdOffset, caretTextOffset, domToMd, seatForTextOffset, setCaretAtTextOffset, textLength,
+  textOffsetForMd, toggleInlineWrap,
 } from '../lib/richText.js';
 
 /**
@@ -15,9 +15,10 @@ import {
  * turns the paragraph into a heading — and the stored text is recovered from
  * the DOM so the file on disk stays clean.
  *
- * `mode="doc"` is a word processor's flow (Enter splits, Backspace merges,
- * arrows cross paragraphs). `mode="slide"` is a text box (Enter makes a line
- * break or continues a list).
+ * `mode="doc"` is a word processor's flow: Enter is a line break inside the
+ * paragraph, Enter on an empty line starts a new one, Backspace at the start
+ * joins, arrows cross paragraphs. `mode="slide"` is a text box (Enter makes a
+ * line break or continues a list).
  */
 export default function MarkdownEditor({
   value = '',
@@ -38,6 +39,8 @@ export default function MarkdownEditor({
   onFocusHandled,
   onInput,
   onSplit,
+  /** A heading completed below the block's first line — split it off. */
+  onAutoSplit,
   onMergeBackward,
   onStepParagraph,
   onUndo,
@@ -131,6 +134,14 @@ export default function MarkdownEditor({
   const syncFromDom = useCallback(
     (el) => {
       const md = domToMd(el);
+      // 문단 중간에서 완성된 제목(`# `)은 자기 블록으로 — 개요와 앵커의 경계를 지킨다.
+      if (mode === 'doc' && onAutoSplit) {
+        const at = mdMidHeadingOffset(md);
+        if (at > 0) {
+          onAutoSplit(md, at, caretMdOffset(el));
+          return;
+        }
+      }
       const nextHtml = renderHtml(md);
       if (md === lastMd.current && nextHtml === lastHtml.current) return;
       if (nextHtml !== lastHtml.current) {
@@ -141,7 +152,7 @@ export default function MarkdownEditor({
       lastMd.current = md;
       onInput?.(md);
     },
-    [renderHtml, onInput]
+    [renderHtml, onInput, mode, onAutoSplit]
   );
 
   /** Adopt a markdown the editor itself produced (list continuation, Tab). */
@@ -163,12 +174,13 @@ export default function MarkdownEditor({
     [renderHtml, onInput]
   );
 
-  const inCode = () => {
+  const inside = (selector) => {
     const sel = window.getSelection();
     if (!sel?.rangeCount) return false;
     const node = sel.getRangeAt(0).startContainer;
-    return !!((node.nodeType === 1 ? node : node.parentElement)?.closest?.('pre'));
+    return !!((node.nodeType === 1 ? node : node.parentElement)?.closest?.(selector));
   };
+  const inCode = () => inside('pre');
 
   const onKeyDown = (e) => {
     const el = root.current;
@@ -249,7 +261,7 @@ export default function MarkdownEditor({
       // serialization keeps it (a browser <br> or <div> would not survive).
       if (inCode()) {
         e.preventDefault();
-        document.execCommand('insertText', false, '\n');
+        insertTextAtCaret('\n');
         return;
       }
       if (mode === 'slide' && !e.shiftKey) {
@@ -257,24 +269,107 @@ export default function MarkdownEditor({
         const offset = caretMdOffset(el);
         const cont = isListLine(md, offset) ? continueList(md, offset) : null;
         if (cont) commitMd(cont.value, cont.caret);
-        else document.execCommand('insertLineBreak');
+        else insertLineBreak();
         return;
       }
-      // doc: Shift+Enter — a plain line break inside the paragraph.
-      if (e.shiftKey) return;
+      // doc: Shift+Enter follows the same path as Enter — a line break, or a
+      // new paragraph on an empty line. Letting the browser answer would drop
+      // a stray <div> that the serialization cannot keep.
       e.preventDefault();
       const offset = caretMdOffset(el);
-      const cont = isListLine(md, offset) ? continueList(md, offset) : null;
-      if (cont) commitMd(cont.value, cont.caret);
-      else onSplit?.(offset);
+      // 제목은 한 줄 — Enter는 항상 다음 문단으로 내려간다.
+      if (inside('h1,h2,h3,h4,h5,h6')) {
+        onSplit?.(offset);
+        return;
+      }
+      if (isListLine(md, offset)) {
+        // 빈 항목에서의 Enter: 마지막 항목이면 목록을 나가 새 문단, 중간이면
+        // 항목을 지우고 그 사이를 잇는다.
+        const { lineStart, lineEnd, before } = mdLineAt(md, offset);
+        const emptyItem = /^[ \t]*(?:[-+*]|\d+[.)])[ \t]*$/.test(before) && md.slice(offset, lineEnd).trim() === '';
+        if (emptyItem && md.slice(lineEnd).trim() === '') {
+          onSplit?.(offset);
+          return;
+        }
+        const cont = continueList(md, offset);
+        if (cont) commitMd(cont.value, cont.caret);
+        else onSplit?.(offset);
+        return;
+      }
+      // 빈 줄에서의 Enter — 문단을 나눈다 (Enter 두 번 = 새 문단).
+      if (mdLineEmptyAt(md, offset)) {
+        onSplit?.(offset);
+        return;
+      }
+      // 그 외의 Enter — 같은 문단 안의 줄바꿈.
+      insertLineBreak();
     }
+  };
+
+  /**
+   * Insert nodes at the caret without execCommand — its line-break behaviour
+   * differs per browser and it does not exist in every DOM (jsdom). Splitting
+   * the text node at the boundary keeps the drawn form intact. Manual DOM
+   * changes fire no input event, so the markdown is re-read right away.
+   */
+  const insertNodes = (...nodes) => {
+    const sel = window.getSelection();
+    if (!sel?.rangeCount) return false;
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed) {
+      range.deleteContents();
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    // Seat the insertion inside the content: an element-boundary caret (the
+    // end of a block, say) would drop the nodes outside every block, where
+    // the serialization loses them.
+    const seat = seatForTextOffset(root.current, caretTextOffset(root.current));
+    const at = document.createRange();
+    if (seat?.node) at.setStart(seat.node, seat.offset);
+    else if (seat?.br) {
+      if (seat.after) at.setStartAfter(seat.br);
+      else at.setStartBefore(seat.br);
+    } else {
+      at.setStart(range.startContainer, range.startOffset);
+    }
+    at.collapse(true);
+    let last = null;
+    for (const node of nodes) {
+      at.insertNode(node);
+      at.setStartAfter(node);
+      at.collapse(true);
+      last = node;
+    }
+    if (last) {
+      at.setStartAfter(last);
+      at.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(at);
+    }
+    return true;
+  };
+  const insertLineBreak = () => {
+    if (!insertNodes(document.createElement('br'))) return;
+    syncFromDom(root.current);
+  };
+  const insertTextAtCaret = (text) => {
+    if (!insertNodes(document.createTextNode(text))) return;
+    syncFromDom(root.current);
   };
 
   const onPaste = (e) => {
     if (!(editable || alwaysEditable)) return;
     e.preventDefault();
     const text = e.clipboardData?.getData('text/plain') ?? '';
-    document.execCommand('insertText', false, text);
+    // Pasted newlines are line breaks in the same paragraph, matching Enter.
+    const nodes = [];
+    String(text).split('\n').forEach((part, i) => {
+      if (i > 0) nodes.push(document.createElement('br'));
+      if (part) nodes.push(document.createTextNode(part));
+    });
+    if (nodes.length && insertNodes(...nodes)) syncFromDom(root.current);
   };
 
   return (

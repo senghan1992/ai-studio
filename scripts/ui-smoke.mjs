@@ -1082,6 +1082,88 @@ console.log('\n■ Doc 자유로운 문단 편집 UX');
   check('새 문단이 바로 편집 모드로 열림', got.newParagraphEditing === true);
 }
 
+console.log('\n■ Doc Enter (같은 문단 줄바꿈 · 빈 줄에서 새 문단)');
+{
+  const got = {};
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    async interact({ window, settle, $, $$, click, fire, typeContent }) {
+      const doc = window.document;
+      // Put a real caret at the end of the surface, as a browser would after a click.
+      const caretToEnd = (el) => {
+        const sel = window.getSelection();
+        const range = doc.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      };
+      const readMd = async () => {
+        const mdTab = $$('.inspector__tab').find((t) => t.textContent.endsWith('.md'));
+        if (!mdTab) return null;
+        click(mdTab);
+        await settle(4);
+        return $('.code')?.textContent ?? '';
+      };
+
+      const block = $$('.docblock').find((b) => b.textContent.includes('들여다쓴 본문') || b.querySelector('.docblock__editor'));
+      click(block);
+      await settle(6);
+      const ta = $('.docblock__editor');
+      if (!ta) return;
+
+      // Enter in the middle of a sentence: a line break in the SAME block.
+      typeContent(ta, '<p>한 문장</p>');
+      await settle(6);
+      got.blocksBefore = $$('.docblock').length;
+      caretToEnd(ta);
+      fire(ta, 'keydown', { key: 'Enter' });
+      await settle(8);
+      got.softBreakHtml = ta.innerHTML;
+      got.blocksAfterSoft = $$('.docblock').length;
+      got.mdAfterSoft = await readMd();
+
+      // Enter again — the caret now sits on the empty line: a NEW paragraph.
+      const ta2 = $('.docblock.is-editing .docblock__editor') ?? ta;
+      caretToEnd(ta2);
+      fire(ta2, 'keydown', { key: 'Enter' });
+      await settle(8);
+      got.blocksAfterSplit = $$('.docblock').length;
+      got.firstAfterSplit = $$('.docblock')[0]?.querySelector('.docblock__editor, .docblock__content')?.innerHTML;
+
+      // Exit a list the Word way: Enter on an empty bullet closes the list.
+      const first = $$('.docblock')[0];
+      click(first);
+      await settle(6);
+      const ta3 = $('.docblock__editor');
+      if (!ta3) return;
+      typeContent(ta3, '<ul><li>항목</li></ul>');
+      await settle(6);
+      got.blocksBeforeList = $$('.docblock').length;
+      caretToEnd(ta3);
+      fire(ta3, 'keydown', { key: 'Enter' });
+      await settle(8);
+      caretToEnd(ta3);
+      fire(ta3, 'keydown', { key: 'Enter' });
+      await settle(8);
+      got.listMds = $$('.docblock').map((b) => b.textContent.trim());
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('문장 중간 Enter는 같은 문단 안 줄바꿈',
+    got.blocksAfterSoft === got.blocksBefore && /<br>/.test(got.softBreakHtml ?? ''),
+    `blocks ${got.blocksBefore} → ${got.blocksAfterSoft}, html ${JSON.stringify(got.softBreakHtml)}`);
+  check('줄바꿈이 마크다운 \n으로 저장됨', got.mdAfterSoft?.includes('한 문장\n'), JSON.stringify(got.mdAfterSoft));
+  check('빈 줄에서 Enter는 새 문단을 만듦', got.blocksAfterSplit === got.blocksBefore + 1,
+    `blocks ${got.blocksAfterSplit}`);
+  check('분할 후 앞 문단은 줄바꿈을 되돌려 저장됨',
+    (got.firstAfterSplit ?? '').startsWith('<p>한 문장</p>') && !got.firstAfterSplit.includes('<br>'),
+    JSON.stringify(got.firstAfterSplit));
+  check('빈 항목에서 Enter는 목록을 나가 새 문단을 만듦',
+    got.listMds?.[0] === '항목' && got.listMds[1] === '' && got.listMds.length === got.blocksBeforeList + 1,
+    `blocks ${got.blocksBeforeList} → ${got.listMds?.length}, ${JSON.stringify(got.listMds)}`);
+}
+
 console.log('\n■ Grid 이동 (Excel의 손버릇)');
 {
   const got = {};
