@@ -14,7 +14,7 @@ import TablePicker from '../components/TablePicker.jsx';
 import ImageDialog from '../components/ImageDialog.jsx';
 import ChartView from '../components/ChartView.jsx';
 import TableView from '../components/TableView.jsx';
-import MarkdownEditor from '../components/MarkdownEditor.jsx';
+import DocSurface from './DocSurface.jsx';
 import {
   Ribbon, Group, Btn, Select, Check, NumInput, ColorPicker, Dialog, Field, Popover,
   ContextMenu, useContextMenu, ZoomSlider,
@@ -590,10 +590,10 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
        * Word's formatting shortcuts.
        *
        * They have to work with the caret in the paragraph — that is the only
-       * time anyone presses them — so the paragraph's own textarea is allowed
-       * through while the find box and the title field are not.
+       * time anyone presses them — so the document's own edit surface is
+       * allowed through while the find box and the title field are not.
        */
-      const inParagraph = !!e.target?.classList?.contains?.('docblock__editor');
+      const inParagraph = !!e.target?.closest?.('.doc-surface');
       const tag = e.target?.tagName;
       if ((tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') && !inParagraph) return;
       if (!mod) return;
@@ -1299,16 +1299,14 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
   /* ----------------------------------------------------------------- render */
 
   // `key` is passed explicitly at the call site: React refuses to accept it via a
-  // spread, and doing so silently breaks reconciliation.
-  const blockProps = (block) => ({
-    block,
-    zoom,
-    folder: project.folder,
-    selected: selectedId === block.id,
-    editing: editingId === block.id,
-    focusRequest: focusRequest?.id === block.id ? focusRequest : null,
-    onFocusHandled: () => setFocusRequest(null),
-    onSelect: () => {
+  /**
+   * Click on a block (or its text): Word's one-shot brush, then open the
+   * block's own surface — a table is edited cell by cell, a chart in its
+   * dialog, the rest in the continuous document surface.
+   */
+  const selectBlock = useCallback(
+    (block) => {
+      if (!block) return;
       // With the brush loaded, the next paragraph clicked gets the formatting
       // instead of being opened for typing — Word's one-shot behaviour.
       if (painter !== null) {
@@ -1317,8 +1315,6 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
         return;
       }
       setSelectedId(block.id);
-      // A table is edited cell by cell, not as a block of markdown in a
-      // textarea — the same distinction Office makes.
       if (block.type === 'table') {
         setEditingId(null);
         return;
@@ -1332,27 +1328,49 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
       // An empty paragraph has no text to click into; put the caret there.
       if (!String(block.md ?? '').trim()) setFocusRequest({ id: block.id, caret: 0 });
     },
-    onChange: (md) => setBlockMd(block.id, md),
-    onSplit: (caret) => splitBlock(block.id, caret),
-    onAutoSplit: (md, splitOffset, caretOffset) => autoSplitHeading(block.id, md, splitOffset, caretOffset),
-    onMergeBackward: (caretInMd) => mergeBackward(block.id, caretInMd),
-    onStepParagraph: (direction) => stepParagraph(block.id, direction),
-    onIndent: (direction) => stepIndent(direction),
-    onUndo: undo,
-    onRedo: redo,
-    onExit: () => setEditingId(null),
-    onContextMenu: (e) => {
+    [painter, paintOnto, openBlock]
+  );
+
+  /** Caret moved by keyboard or by typing — the visuals follow it quietly. */
+  const caretBlock = useCallback(
+    (block) => {
+      if (!block) {
+        setEditingId(null);
+        return;
+      }
       setSelectedId(block.id);
-      ctx.open(e, blockMenu(block));
+      if (block.type === 'table' || TEXTLESS_TYPES.has(block.type)) setEditingId(null);
+      else setEditingId(block.id);
     },
-    highlight: find?.query ?? '',
-    activeCell: activeCell?.id === block.id ? activeCell : null,
-    onActiveCellChange: (next) => setActiveCell(next ? { ...next, id: block.id } : null),
-    onChangeTable:
-      block.type === 'table'
-        ? (md, table) => patchBlock(block.id, { md, table })
-        : undefined,
-  });
+    []
+  );
+
+  /**
+   * The browser destroyed or merged wrappers (select-all + type, delete across
+   * a boundary): adopt the page's rebuilt block list, giving fresh ids to any
+   * block the surface created and keeping every other block untouched.
+   */
+  const rebuildBlocks = useCallback(
+    (next) => {
+      const byId = new Map(next.map((b) => [b.id, b]));
+      patchSection((s) => {
+        const list = s.blocks
+          .map((b) => {
+            const n = byId.get(b.id);
+            if (!n) return b;
+            if (/^new-\d+$/.test(n.id)) {
+              // The surface could not know the project's id scheme.
+              return { ...n, id: newBlockId(), type: classify(n.md), override: null };
+            }
+            return { ...n, type: classify(n.md) };
+          })
+          .filter(Boolean);
+        const blocks2 = list.length ? list : [{ id: `${newBlockId()}`, md: '', type: 'paragraph', override: null }];
+        return { ...s, blocks: blocks2 };
+      });
+    },
+    [patchSection]
+  );
 
   return (
     <Shell
@@ -1471,9 +1489,62 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
                   insertBlock(last?.id ?? null, '');
                 }}
               >
-                {pageBlocks.map((block) => (
-                  <DocBlock key={block.id} {...blockProps(block)} />
-                ))}
+                {/* The whole page is one edit surface: the blocks inside it
+                    share a single contentEditable, so the caret moves across
+                    them the way it does on a word processor's page. The
+                    wrappers keep the block boundaries the saved markdown
+                    needs. */}
+                <DocSurface
+                  blocks={pageBlocks}
+                  blockStyle={(block) => blockStyle(block, zoom)}
+                  isTextless={(block) => TEXTLESS_TYPES.has(block.type)}
+                  textlessView={(block) => (
+                    <BlockContent
+                      block={block}
+                      folder={project.folder}
+                      highlight={find?.query ?? ''}
+                      activeCell={activeCell?.id === block.id ? activeCell : null}
+                      onActiveCellChange={(next) => setActiveCell(next ? { ...next, id: block.id } : null)}
+                      onChangeTable={
+                        block.type === 'table'
+                          ? (md, table) => patchBlock(block.id, { md, table })
+                          : undefined
+                      }
+                      onSelectBlock={() => selectBlock(block)}
+                    />
+                  )}
+                  assetResolver={(src) => (isProjectAsset(src) ? assetUrl(folder, src) : src)}
+                  highlight={find?.query ?? ''}
+                  selectedId={selectedId}
+                  editingId={editingId}
+                  focusRequest={focusRequest}
+                  onFocusHandled={() => setFocusRequest(null)}
+                  onBlockChange={(id, md) => setBlockMd(id, md)}
+                  onRebuild={rebuildBlocks}
+                  onSplit={(id, caret) => splitBlock(id, caret)}
+                  onAutoSplit={(id, md, splitOffset, caretOffset) => autoSplitHeading(id, md, splitOffset, caretOffset)}
+                  onMergeBackward={(id, caretInMd) => mergeBackward(id, caretInMd)}
+                  onStepParagraph={(id, direction) => stepParagraph(id, direction)}
+                  onIndent={(direction) => stepIndent(direction)}
+                  onUndo={undo}
+                  onRedo={redo}
+                  onSelect={selectBlock}
+                  onCaret={caretBlock}
+                  onDeselect={() => setSelectedId(null)}
+                  onAddParagraphAtEnd={() => insertBlock(pageBlocks[pageBlocks.length - 1]?.id ?? null, '')}
+                  onExit={() => setEditingId(null)}
+                  onContextMenu={(e, block) => {
+                    if (block) {
+                      setSelectedId(block.id);
+                      ctx.open(e, blockMenu(block));
+                    } else {
+                      ctx.open(e, [
+                        { label: '문단 추가', onClick: () => insertBlock(section.blocks[section.blocks.length - 1]?.id, '') },
+                        { label: '인쇄', shortcut: 'Ctrl+P', onClick: () => window.print() },
+                      ]);
+                    }
+                  }}
+                />
 
                 {pageNumber === pages.length - 1 && (
                   <button
@@ -1625,90 +1696,6 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
   );
 }
 
-/* ---------------------------------------------------------------- doc block */
-
-function DocBlock({
-  block, folder, selected, editing, focusRequest, onFocusHandled, highlight,
-  onSelect, onChange, onSplit, onMergeBackward, onExit, onContextMenu,
-  onStepParagraph, onIndent, onUndo, onRedo,
-  activeCell, onActiveCellChange, onChangeTable, zoom = 1,
-}) {
-  const style = blockStyle(block, zoom);
-
-  // Tables, charts, images, page breaks and rules are not paragraphs — they
-  // are selected, and edited through their own surfaces (dialog, table grid).
-  if (TEXTLESS_TYPES.has(block.type)) {
-    return (
-      <div
-        id={`block-${block.id}`}
-        className={`docblock${selected ? ' is-selected' : ''}`}
-        style={style}
-        onClick={() => !editing && onSelect()}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          onContextMenu(e);
-        }}
-      >
-        <BlockContent
-          block={block}
-          folder={folder}
-          highlight={highlight}
-          activeCell={activeCell}
-          onActiveCellChange={onActiveCellChange}
-          onChangeTable={onChangeTable}
-          onSelectBlock={onSelect}
-        />
-        {selected && block.override && <span className="docblock__badge">meta.json</span>}
-      </div>
-    );
-  }
-
-  return (
-    <div
-      id={`block-${block.id}`}
-      className={`docblock${selected ? ' is-selected' : ''}${editing ? ' is-editing' : ''}${
-        block.override?.style?.fontSize ? ' md--sized' : ''
-      }`}
-      style={style}
-      onClick={() => !editing && onSelect()}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onContextMenu(e);
-      }}
-    >
-      {/*
-        The paragraph is always drawn the way it reads: rendered markdown
-        becomes the editable surface, so `#` and `**` never show up — typing
-        `# ` + space turns the paragraph into a heading, and the stored text is
-        recovered from the DOM. Clicking anywhere lands the caret where the
-        mouse is, the way a word processor's page does.
-      */}
-      <MarkdownEditor
-        className={`docblock__editor md md--doc${block.override?.style?.fontSize ? ' md--sized' : ''}`}
-        editable={editing}
-        alwaysEditable
-        value={block.md ?? ''}
-        highlight={highlight}
-        assetResolver={(src) => (isProjectAsset(src) ? assetUrl(folder, src) : src)}
-        focusRequest={focusRequest}
-        onFocusHandled={onFocusHandled}
-        onInput={onChange}
-        onSplit={onSplit}
-        onMergeBackward={onMergeBackward}
-        onStepParagraph={onStepParagraph}
-        onIndent={onIndent}
-        onUndo={onUndo}
-        onRedo={onRedo}
-        onExit={onExit}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          onContextMenu(e);
-        }}
-      />
-      {selected && block.override && <span className="docblock__badge">meta.json</span>}
-    </div>
-  );
-}
 /** Edit one header or footer: three slots and the tokens they accept. */
 function RunningDialog({ where, initial, onCancel, onConfirm }) {
   const [value, setValue] = useState({

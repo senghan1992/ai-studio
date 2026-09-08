@@ -436,24 +436,18 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 }
 .page__inner { height: 100%; overflow: hidden; }
 
-.docblock {
+/* The whole page is one continuous edit surface: the document reads as one
+   flow, and the only seams are the thin selection bar and the faintest film
+   on the paragraph actually being edited — Word highlights neither. */
+.doc-surface { outline: none; }
+.doc-surface:focus { outline: none; }
+.docblk {
   position: relative; border-radius: 3px; padding: 1px 4px; margin: 0 -4px;
   cursor: text;
 }
-/* A document reads as one flow: paragraphs do not box themselves. Selection is
-   a thin accent bar on the left, and only the paragraph actually being edited
-   gets the faintest film — Word highlights neither. */
-.docblock.is-selected { box-shadow: inset 3px 0 0 rgba(15, 108, 189, .4); }
-.docblock.is-editing { background: rgba(15, 108, 189, .03); }
-.docblock__editor {
-  /* The rendered paragraph itself is the edit surface: clicking anywhere in it
-     puts the caret where the mouse is, and typing never shows markdown — `# `
-     + space turns the paragraph into a heading before your eyes. */
-  outline: none;
-  padding: 1px 0;
-  margin: -1px 0;
-}
-.docblock__editor:focus { outline: none; }
+.docblk.is-selected { box-shadow: inset 3px 0 0 rgba(15, 108, 189, .4); }
+.docblk.is-editing { background: rgba(15, 108, 189, .03); }
+.docblk--static { cursor: default; }
 .docblock__empty { color: #b9b7b5; }
 .docblock__badge {
   position: absolute; top: 2px; right: -68px; font-size: 10px;
@@ -1159,7 +1153,7 @@ mark.findhit.is-current { background: #b45309; color: #fff; }
     break-after: page; page-break-after: always;
   }
   .page:last-child { break-after: auto; page-break-after: auto; }
-  .docblock:hover, .docblock.is-selected { background: none !important; box-shadow: none !important; }
+  .docblk:hover, .docblk.is-selected { background: none !important; box-shadow: none !important; }
   .docblock__badge, .pagebreak, .outline-item { display: none !important; }
 
   .pagenum { color: #6b7280 !important; }

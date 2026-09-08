@@ -440,7 +440,19 @@ function placeCaretBeside(br, side) {
 /** The caret as an offset into the block's markdown. */
 export function caretMdOffset(root) {
   const sel = window.getSelection();
-  if (!sel || !sel.rangeCount || !root.contains(sel.anchorNode)) return 0;
+  if (!sel || !sel.rangeCount) return 0;
+  if (!root.contains(sel.anchorNode)) {
+    // An element-boundary caret (a range set on the wrapper or the surface,
+    // as programmatic ranges and boundary clicks produce) still names a real
+    // position: re-anchor it at the body's own start/end and fall through to
+    // the normal probe mapping so the markdown offset stays exact.
+    const atStart = sel.anchorNode === root.parentElement && sel.anchorOffset === 0;
+    const r = document.createRange();
+    r.selectNodeContents(root);
+    r.collapse(atStart);
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
   const range = sel.getRangeAt(0);
   // Find the marker's seat with the same walk setCaretAtTextOffset uses: a
   // caret anchored to an element boundary (after a list's last item, say) has

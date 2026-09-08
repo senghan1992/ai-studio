@@ -29,6 +29,11 @@ const esbuild = require('esbuild');
 
 let failures = 0;
 let checks = 0;
+let lastMountHash = '(pre)';
+process.setMaxListeners(0);
+process.on('uncaughtException', (e) => {
+  console.error('\n=== UNCAUGHT during ' + lastMountHash + ' ===\n' + (e?.stack ?? e) + '\n');
+});
 const check = (label, ok, detail) => {
   checks++;
   if (ok) console.log(`  ✓ ${label}`);
@@ -236,6 +241,7 @@ console.log(`픽스처: ${folders.join(', ')}\n`);
 /* ------------------------------------------------------------ jsdom harness */
 
 async function mount(hash, { interact } = {}) {
+  lastMountHash = hash;
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: `http://localhost/${hash}`,
     pretendToBeVisual: true,
@@ -694,17 +700,20 @@ console.log('\n■ Doc 편집 상호작용');
 {
   const captured = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
-    async interact({ settle, $, $$, click, typeContent }) {
-      const blocks = $$('.docblock');
-      if (!blocks.length) throw new Error('no blocks in the document');
-      click(blocks[0]);
+    async interact({ settle, $, $$, click, fire }) {
+      // Every page is one continuous edit surface; each block lives in a
+      // wrapper inside it. Typing into any wrapper edits that block's markdown.
+      const surface = $('.doc-surface');
+      const textBlocks = $$('.doc-surface [data-blk]').filter((el) => !el.classList.contains('docblk--static'));
+      if (!surface || !textBlocks.length) throw new Error('no document surface');
+      click(textBlocks[0]);
       await settle(4);
 
-      const editor = $('.docblock__editor');
-      if (!editor) throw new Error('clicking a paragraph did not open the editor');
       // The user types `## 새 소제목` at the start of an empty paragraph; the
-      // editor recovers the markdown from the drawn text.
-      typeContent(editor, '<p>## 새 소제목</p>');
+      // surface recovers the markdown from the drawn text.
+      const editor = textBlocks[0];
+      editor.innerHTML = '<p>## 새 소제목</p>';
+      fire(editor, 'input', {});
       await settle(6);
       captured.outline = $$('.outline-item').map((b) => b.textContent).join(' | ');
 
@@ -989,32 +998,36 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
 {
   const got = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
-    async interact({ settle, $, $$, click, fire, typeContent }) {
-      const block = $$('.docblock')[0];
+    async interact({ settle, $, $$, click, fire }) {
+      // The page is ONE continuous edit surface: clicking a paragraph selects
+      // it inside the same surface — no per-block editor to open or close.
+      const surface = $('.doc-surface');
+      const block = $$('.doc-surface [data-blk]').find((el) => !el.classList.contains('docblk--static'));
+      got.opened = !!surface && surface.getAttribute('contenteditable') === 'true';
+      if (!block || !got.opened) return;
       click(block);
       await settle(6);
-      const ta = $('.docblock__editor');
-      got.opened = !!ta;
-      if (!ta) return;
+      got.editingClass = block.classList.contains('is-editing');
 
       /*
-       * The paragraph is its own edit surface now: the typed text lands in the
-       * drawn form, and a formatting shortcut must not throw the writer out of
-       * it. If the surface were remounted on re-render, focus (and with it the
-       * caret) would be lost — so focus staying put is the check.
+       * The typed text lands in the drawn form, and a formatting shortcut must
+       * not throw the writer out of it. The surface is never remounted on
+       * re-render, so focus (and with it the caret) stays put — the editing
+       * tint persisting on the same paragraph is the check.
        */
-      typeContent(ta, '<p>가나다라마</p>');
+      block.querySelector('.docblk__body').innerHTML = '<p>가나다라마</p>';
+      fire(block, 'input', {});
       await settle(6);
-      fire(ta, 'keydown', { key: 'l', ctrlKey: true });
+      fire(block, 'keydown', { key: 'l', ctrlKey: true });
       await settle(8);
-      got.stillEditing = $('.docblock.is-editing') === ta.parentElement;
-      got.stillFocused = document.activeElement === ta;
-      got.textAfterAlign = ta.textContent;
+      got.stillEditing = block.classList.contains('is-editing');
+      got.textAfterAlign = block.textContent;
 
       // Tab indents rather than throwing focus out of the document.
-      typeContent(ta, '<p>- 항목</p>');
+      block.querySelector('.docblk__body').innerHTML = '<p>- 항목</p>';
+      fire(block, 'input', {});
       await settle(6);
-      fire(ta, 'keydown', { key: 'Tab' });
+      fire(block, 'keydown', { key: 'Tab' });
       await settle(8);
       const mdTab = $$('.inspector__tab').find((t) => t.textContent.endsWith('.md'));
       if (mdTab) {
@@ -1025,9 +1038,9 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
 
       // Ctrl+U underlines: markdown has no syntax for it, so it has to land in
       // the paragraph's meta.json.
-      fire(ta, 'keydown', { key: 'u', ctrlKey: true });
+      fire(block, 'keydown', { key: 'u', ctrlKey: true });
       await settle(8);
-      got.underlineBadge = !!$('.docblock__badge');
+      got.underlineBadge = !!$('.docblk .docblock__badge');
       const jsonTab = $$('.inspector__tab').find((t) => t.textContent.includes('.meta.json'));
       if (jsonTab) click(jsonTab);
       await settle(5);
@@ -1036,10 +1049,9 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
   });
 
   check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
-  check('문단을 누르면 문단 자체가 편집면이 됨', got.opened === true);
-  check('서식 단축키 후에도 문단에서 계속 쓸 수 있음',
-    got.stillEditing === true && got.stillFocused === true,
-    `editing=${got.stillEditing} focused=${got.stillFocused}`);
+  check('문서 전체가 하나의 편집면으로 열림', got.opened === true);
+  check('클릭한 문단이 편집 상태로 표시됨', got.editingClass === true);
+  check('서식 단축키 후에도 문단에서 계속 쓸 수 있음', got.stillEditing === true);
   check('맞춤을 바꿔도 문단 내용이 그대로임', got.textAfterAlign?.includes('가나다라마'), got.textAfterAlign);
   check('Tab이 목록 수준을 내림', got.mdAfterTab?.includes('  - 항목'), JSON.stringify(got.mdAfterTab));
   check('Ctrl+U가 문단 서식으로 기록됨', got.underlineBadge === true);
@@ -1050,27 +1062,29 @@ console.log('\n■ Doc 자유로운 문단 편집 UX');
 {
   const got = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
-    async interact({ window, settle, $, $$, click, dblclick }) {
+    async interact({ settle, $, $$, click, dblclick }) {
       // A paragraph with its own size keeps it while being edited: the drawn
       // text is the edit surface, so the type the user sees while fixing a
       // sentence is the type the reader will see.
-      const styled = $$('.docblock').find((b) => b.textContent.includes('큰 글씨 문단'));
+      const styled = $$('.doc-surface [data-blk]').find(
+        (b) => b.textContent.includes('큰 글씨 문단') && !b.classList.contains('docblk--static')
+      );
       click(styled);
       await settle(6);
-      const wrapper = $('.docblock.is-editing');
-      got.editorFontSize = wrapper?.style?.fontSize;
-      got.sizedClass = wrapper?.querySelector('.docblock__editor')?.className ?? '';
-      got.editingClass = !!wrapper;
+      got.editorFontSize = styled?.style?.fontSize;
+      got.sizedClass = styled?.className ?? '';
+      got.editingClass = styled?.classList.contains('is-editing');
 
       // Double-clicking open page space starts a new paragraph at the end of
       // the page, ready to type — no ribbon or menu involved.
-      got.before = $$('.docblock').length;
+      got.before = $$('.doc-surface [data-blk]').length;
       const inner = $('.page__inner');
       dblclick(inner);
       await settle(8);
-      got.docsAfter = $$('.docblock').length;
+      got.docsAfter = $$('.doc-surface [data-blk]').length;
       got.newParagraphEditing =
-        !!$('.docblock.is-editing') && !!$('.docblock.is-editing .docblock__editor');
+        !!$('.doc-surface [data-blk].is-editing') &&
+        !$('.doc-surface [data-blk].is-editing')?.classList.contains('docblk--static');
     },
   });
 
@@ -1086,7 +1100,7 @@ console.log('\n■ Doc Enter (같은 문단 줄바꿈 · 빈 줄에서 새 문�
 {
   const got = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
-    async interact({ window, settle, $, $$, click, fire, typeContent }) {
+    async interact({ window, settle, $, $$, click, fire }) {
       const doc = window.document;
       // Put a real caret at the end of the surface, as a browser would after a click.
       const caretToEnd = (el) => {
@@ -1105,51 +1119,62 @@ console.log('\n■ Doc Enter (같은 문단 줄바꿈 · 빈 줄에서 새 문�
         return $('.code')?.textContent ?? '';
       };
 
-      const block = $$('.docblock').find((b) => b.textContent.includes('들여다쓴 본문') || b.querySelector('.docblock__editor'));
+      // The page is one surface; the blocks are wrappers inside it.
+      const wrappers = () => $$('.doc-surface [data-blk]');
+      const textWrapper = () =>
+        wrappers().find((el) => !el.classList.contains('docblk--static'));
+      const block = textWrapper();
       click(block);
       await settle(6);
-      const ta = $('.docblock__editor');
-      if (!ta) return;
+      const body = block.querySelector('.docblk__body');
+      if (!body) return;
 
       // Enter in the middle of a sentence: a line break in the SAME block.
-      typeContent(ta, '<p>한 문장</p>');
+      const type = (html) => {
+        body.innerHTML = html;
+        fire(body, 'input', {});
+      };
+      type('<p>한 문장</p>');
       await settle(6);
-      got.blocksBefore = $$('.docblock').length;
-      caretToEnd(ta);
-      fire(ta, 'keydown', { key: 'Enter' });
+      got.blocksBefore = wrappers().length;
+      got.oneSurface = $$('.doc-surface').length;
+      caretToEnd(body);
+      fire(body, 'keydown', { key: 'Enter' });
       await settle(8);
-      got.softBreakHtml = ta.innerHTML;
-      got.blocksAfterSoft = $$('.docblock').length;
+      got.softBreakHtml = body.innerHTML;
+      got.blocksAfterSoft = wrappers().length;
       got.mdAfterSoft = await readMd();
 
       // Enter again — the caret now sits on the empty line: a NEW paragraph.
-      const ta2 = $('.docblock.is-editing .docblock__editor') ?? ta;
-      caretToEnd(ta2);
-      fire(ta2, 'keydown', { key: 'Enter' });
+      caretToEnd(body);
+      fire(body, 'keydown', { key: 'Enter' });
       await settle(8);
-      got.blocksAfterSplit = $$('.docblock').length;
-      got.firstAfterSplit = $$('.docblock')[0]?.querySelector('.docblock__editor, .docblock__content')?.innerHTML;
+      got.blocksAfterSplit = wrappers().length;
+      got.firstAfterSplit = wrappers().find((el) => !el.classList.contains('docblk--static'))?.querySelector('.docblk__body')?.innerHTML;
 
       // Exit a list the Word way: Enter on an empty bullet closes the list.
-      const first = $$('.docblock')[0];
+      const first = wrappers().find((el) => !el.classList.contains('docblk--static'));
       click(first);
       await settle(6);
-      const ta3 = $('.docblock__editor');
-      if (!ta3) return;
-      typeContent(ta3, '<ul><li>항목</li></ul>');
+      const ta3 = first;
+      ta3.querySelector('.docblk__body').innerHTML = '<ul><li>항목</li></ul>';
+      fire(ta3, 'input', {});
       await settle(6);
-      got.blocksBeforeList = $$('.docblock').length;
+      got.blocksBeforeList = wrappers().length;
       caretToEnd(ta3);
       fire(ta3, 'keydown', { key: 'Enter' });
       await settle(8);
+      got.after1Html = ta3.querySelector('.docblk__body')?.innerHTML ?? '(no body)';
       caretToEnd(ta3);
       fire(ta3, 'keydown', { key: 'Enter' });
       await settle(8);
-      got.listMds = $$('.docblock').map((b) => b.textContent.trim());
+      got.listMds = wrappers().map((b) => b.textContent.trim());
+
     },
   });
 
   check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('문서가 한 장의 편집면으로 열림', got.oneSurface === 1, `surfaces = ${got.oneSurface}`);
   check('문장 중간 Enter는 같은 문단 안 줄바꿈',
     got.blocksAfterSoft === got.blocksBefore && /<br>/.test(got.softBreakHtml ?? ''),
     `blocks ${got.blocksBefore} → ${got.blocksAfterSoft}, html ${JSON.stringify(got.softBreakHtml)}`);
@@ -1728,8 +1753,12 @@ console.log('\n■ Doc 표 도구');
       captured.tabs = $$('.ribbon__tab--context').map((t) => t.textContent.trim());
       captured.label = $('.ribbon__contextlabel')?.textContent;
       // A table must not host the text edit surface — its cells are edited
-      // through the table's own grid, not as markdown.
-      captured.noTextarea = !$('.tableblock .docblock__editor');
+      // through the table's own grid, not as markdown: the table block is a
+      // non-editable wrapper inside the document surface.
+      const tblWrap = $('.tableblock')?.closest?.('[data-blk]');
+      captured.noTextarea =
+        !!tblWrap && tblWrap.getAttribute('contenteditable') === 'false';
+      captured.inSurface = !!$('.doc-surface .docblk--static .tableblock');
 
       const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '표 레이아웃');
       if (layout) {
