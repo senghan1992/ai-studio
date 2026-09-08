@@ -1400,6 +1400,14 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
                   columnCount: columns > 1 ? columns : undefined,
                   columnGap: columns > 1 ? COLUMN_GAP * zoom : undefined,
                 }}
+                onDoubleClick={(e) => {
+                  // Double-clicking open page space starts a new paragraph at
+                  // the end of this page — the free-form reflex of "click where
+                  // the text should go".
+                  if (e.target !== e.currentTarget) return;
+                  const last = pageBlocks[pageBlocks.length - 1];
+                  insertBlock(last?.id ?? null, '');
+                }}
               >
                 {pageBlocks.map((block) => (
                   <DocBlock key={block.id} {...blockProps(block)} />
@@ -1565,6 +1573,18 @@ function DocBlock({
 }) {
   const ref = useRef(null);
   const style = blockStyle(block, zoom);
+  /**
+   * The edit box wears the paragraph's own typography — the same size, weight,
+   * colour, alignment and indent as the rendered text — so clicking into a
+   * paragraph does not shrink it to a small mono box. Body text (no override)
+   * matches the page's base size at this zoom, like the rendered `.md p` does.
+   */
+  const editorStyle = {
+    ...style,
+    fontFamily: 'var(--doc-font)',
+    fontSize: style.fontSize ?? `${BODY_PT * zoom}px`,
+    lineHeight: style.lineHeight ?? 1.72,
+  };
   /** The block this editor has already claimed focus for. */
   const focused = useRef(null);
 
@@ -1695,7 +1715,7 @@ function DocBlock({
   return (
     <div
       id={`block-${block.id}`}
-      className={`docblock${selected ? ' is-selected' : ''}${
+      className={`docblock${selected ? ' is-selected' : ''}${editing ? ' is-editing' : ''}${
         block.override?.style?.fontSize ? ' md--sized' : ''
       }`}
       style={style}
@@ -1709,6 +1729,7 @@ function DocBlock({
         <textarea
           ref={ref}
           className="docblock__editor"
+          style={editorStyle}
           value={block.md ?? ''}
           onChange={(e) => {
             onChange(e.target.value);

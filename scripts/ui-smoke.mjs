@@ -143,6 +143,14 @@ const fixtures = {};
     override: null,
     table: blank.table,
   });
+  // A paragraph with its own size, so the editor's style inheritance can be
+  // checked: the edit box must look like the rendered paragraph, not shrink.
+  docSection.blocks.push({
+    id: 'b_docstyled',
+    md: '큰 글씨 문단',
+    type: 'text',
+    override: { style: { fontSize: 22 } },
+  });
   fixtures['스모크-문서.aidoc'] = {
     type: 'doc',
     folder: '스모크-문서.aidoc',
@@ -696,7 +704,9 @@ console.log('\n■ Doc 편집 상호작용');
   check('편집 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
   check('입력한 내용이 md에 반영됨', captured.md?.includes('## 새 소제목'),
     (captured.md ?? '').slice(0, 200));
-  check('기본 서식이므로 md에 앵커가 없음', captured.md ? !captured.md.includes('<!-- block:') : false,
+  const anchors = (captured.md.match(/<!-- block:/g) ?? []).length;
+  check('서식을 준 문단만 md에 앵커가 생김',
+    captured.md ? anchors === 1 && captured.md.includes('b_docstyled') : false,
     (captured.md ?? '').slice(0, 200));
   check('개요 패널이 새 제목을 반영', captured.outline?.includes('새 소제목'),
     `outline = ${captured.outline}`);
@@ -1015,6 +1025,43 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
   check('Tab이 목록 수준을 내림', got.afterTab === '  - 항목', JSON.stringify(got.afterTab));
   check('Ctrl+U가 문단 서식으로 기록됨', got.underlineBadge === true);
   check('밑줄이 meta.json에 들어감', got.metaHasUnderline === true);
+}
+
+console.log('\n■ Doc 자유로운 문단 편집 UX');
+{
+  const got = {};
+  const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
+    async interact({ window, settle, $, $$, click, dblclick }) {
+      // A paragraph with its own size opens an edit box that looks like it —
+      // same size, weight, colour and alignment, in the document's own font.
+      const styled = $$('.docblock').find((b) => b.textContent.includes('큰 글씨 문단'));
+      click(styled);
+      await settle(6);
+      const editor = $('.docblock__editor');
+      got.editorFontSize = editor?.style?.fontSize;
+      got.editorFont = editor?.style?.fontFamily;
+      got.editorLineHeight = editor?.style?.lineHeight;
+      got.editingClass = !!$('.docblock.is-editing');
+
+      // Double-clicking open page space starts a new paragraph at the end of
+      // the page, ready to type — no ribbon or menu involved.
+      got.before = $$('.docblock').length;
+      const inner = $('.page__inner');
+      dblclick(inner);
+      await settle(8);
+      got.docsAfter = $$('.docblock').length;
+      got.newParagraphEditing =
+        !!$('.docblock.is-editing') && !!$('.docblock.is-editing .docblock__editor');
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('문단 글꼴 크기로 편집기가 열림', got.editorFontSize === '22px', `fontSize = ${got.editorFontSize}`);
+  check('편집기가 문서 글꼴을 씀', got.editorFont === 'var(--doc-font)', `fontFamily = ${got.editorFont}`);
+  check('문단 줄 간격 유지', got.editorLineHeight === '1.72', `lineHeight = ${got.editorLineHeight}`);
+  check('편집 중임이 표시됨', got.editingClass === true);
+  check('빈 영역 더블클릭으로 문단 추가', got.docsAfter === got.before + 1, `blocks ${got.before} → ${got.docsAfter}`);
+  check('새 문단이 바로 편집 모드로 열림', got.newParagraphEditing === true);
 }
 
 console.log('\n■ Grid 이동 (Excel의 손버릇)');
@@ -1973,6 +2020,49 @@ console.log('\n■ Deck 겹친 요소 · 캔버스 밖 배치 · 편집 글꼴 �
   check('패널에 닫기 단추가 있음', got.hasCloseBtn === true);
   check('✕로 패널이 닫힘', got.panelClosed === true);
   check('제목줄 단추로 패널이 다시 열림', got.panelReopened === true);
+}
+
+console.log('\n■ Deck Ctrl+휠 확대 · 축소');
+{
+  const got = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    async interact({ window, settle, $, fire }) {
+      const stage = $('.stage');
+      const wheel = (init) => {
+        const Ctor = window.WheelEvent ?? window.MouseEvent;
+        stage.dispatchEvent(new Ctor('wheel', { bubbles: true, cancelable: true, ...init }));
+      };
+      const scaleOf = () => {
+        const m = $('.canvas')?.style.transform.match(/scale\(([\d.]+)\)/);
+        return m ? parseFloat(m[1]) : null;
+      };
+      got.start = scaleOf();
+      got.modeBefore = $('.statusbar button')?.textContent?.trim();
+
+      // Without Ctrl the wheel must leave the view alone.
+      wheel({ deltaY: -120 });
+      await settle(4);
+      got.afterPlain = scaleOf();
+
+      // Ctrl+wheel zooms in and leaves "fit" mode.
+      wheel({ deltaY: -120, ctrlKey: true });
+      await settle(4);
+      got.zoomedIn = scaleOf();
+      got.modeAfter = $('.statusbar button')?.textContent?.trim();
+
+      // And back out.
+      wheel({ deltaY: 120, ctrlKey: true });
+      await settle(4);
+      got.zoomedOut = scaleOf();
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('Ctrl 없이 휠은 확대하지 않음', got.afterPlain === got.start, `scale ${got.start} → ${got.afterPlain}`);
+  check('Ctrl+휠 위로 확대함', typeof got.zoomedIn === 'number' && got.zoomedIn > got.start,
+    `scale ${got.start} → ${got.zoomedIn}`);
+  check('수동 확대 모드로 전환', got.modeAfter === '직접 지정', `mode = ${got.modeAfter}`);
+  check('Ctrl+휠 아래로 축소함', got.zoomedOut < got.zoomedIn, `${got.zoomedIn} → ${got.zoomedOut}`);
 }
 
 console.log('\n■ 이미지 삽입 (Doc)');

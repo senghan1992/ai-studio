@@ -670,12 +670,36 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
     );
   }, [zoomMode, zoom, stageSize, slide]);
 
+  const stageNode = useRef(null);
   const stageRef = useCallback((node) => {
+    stageNode.current = node;
+  }, []);
+
+  /**
+   * Ctrl+wheel (and the trackpad pinch browsers deliver as one) zooms the
+   * canvas, like PowerPoint's Ctrl+wheel. The listener has to be native and
+   * non-passive: React attaches its wheel handler passively at the root, so a
+   * preventDefault there would not stop the browser's own page zoom.
+   */
+  useEffect(() => {
+    const node = stageNode.current;
     if (!node) return;
     const observer = new ResizeObserver(([entry]) => {
       setStageSize({ w: entry.contentRect.width, h: entry.contentRect.height });
     });
     observer.observe(node);
+    const onWheel = (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      setZoomMode('manual');
+      setZoom((z) => Math.min(2, Math.max(0.25, z * factor)));
+    };
+    node.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      observer.disconnect();
+      node.removeEventListener('wheel', onWheel);
+    };
   }, []);
 
   const selected = slide?.blocks.find((b) => b.id === selectedId) ?? null;

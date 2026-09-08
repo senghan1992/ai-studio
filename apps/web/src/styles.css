@@ -440,13 +440,23 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
   position: relative; border-radius: 3px; padding: 1px 4px; margin: 0 -4px;
   cursor: text;
 }
-.docblock:hover { background: rgba(15, 108, 189, .04); }
-.docblock.is-selected { background: rgba(15, 108, 189, .07); box-shadow: inset 2px 0 0 var(--focus); }
+/* A document reads as one flow: paragraphs do not box themselves. Selection is
+   a thin accent bar on the left, and only the paragraph actually being edited
+   gets the faintest film — Word highlights neither. */
+.docblock.is-selected { box-shadow: inset 3px 0 0 rgba(15, 108, 189, .4); }
+.docblock.is-editing { background: rgba(15, 108, 189, .03); }
 .docblock__editor {
-  width: 100%; border: 0; resize: none; background: rgba(15, 108, 189, .05);
-  font-family: var(--mono); font-size: 13.5px; line-height: 1.6;
-  padding: 6px 8px; outline: none; color: var(--ink); border-radius: 3px;
+  width: 100%; border: 0; resize: none; outline: none; background: transparent;
   display: block;
+  font-family: var(--doc-font);
+  /* The paragraph's own typography arrives as inline styles — the same
+     blockStyle the rendered view uses — so typing looks like the page: the
+     same size, weight, colour and alignment. No small-mono jump on click. */
+  padding: 0; margin: .55em 0;  /* the gap a rendered .md p carries */
+  color: var(--ink);
+  line-height: 1.72;
+  white-space: pre-wrap; word-break: break-word;
+  overflow: hidden;
 }
 .docblock__badge {
   position: absolute; top: 2px; right: -68px; font-size: 10px;
