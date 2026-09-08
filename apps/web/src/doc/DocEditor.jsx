@@ -14,13 +14,15 @@ import TablePicker from '../components/TablePicker.jsx';
 import ImageDialog from '../components/ImageDialog.jsx';
 import ChartView from '../components/ChartView.jsx';
 import TableView from '../components/TableView.jsx';
+import MarkdownEditor from '../components/MarkdownEditor.jsx';
 import {
   Ribbon, Group, Btn, Select, Check, NumInput, ColorPicker, Dialog, Field, Popover,
   ContextMenu, useContextMenu, ZoomSlider,
 } from '../components/ui.jsx';
 import {
-  renderMarkdown, toggleWrap, toggleLinePrefix, continueList, indentLines, isListLine,
+  renderMarkdown, toggleWrap, toggleLinePrefix, markHtml,
 } from '../lib/markdown.js';
+import { textOffsetForMd } from '../lib/richText.js';
 import { assetUrl, isProjectAsset } from '../api.js';
 import {
   paginate, isPageBreak, PAGE_BREAK, contentHeightOf, contentWidthOf, columnWidthOf, COLUMN_GAP,
@@ -40,7 +42,7 @@ const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 44
 const BODY_PT = 15;
 const INDENT_STEP = 24;
 /** Block types with no caret to put: selected, not opened for typing. */
-const TEXTLESS_TYPES = new Set(['table', 'chart', 'image', 'pagebreak']);
+const TEXTLESS_TYPES = new Set(['table', 'chart', 'image', 'pagebreak', 'hr']);
 
 const TABLE_STYLES = [
   { value: 'banded', label: '줄무늬' },
@@ -170,9 +172,14 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
       });
       if (focus) {
         setSelectedId(id);
-        if (classify(md) !== 'chart' && classify(md) !== 'image') {
+        // Blocks without a caret (tables, images, page breaks, rules) are only
+        // selected — they are edited through their own surfaces.
+        if (!TEXTLESS_TYPES.has(classify(md))) {
           setEditingId(id);
-          setFocusRequest({ id, caret: 0 });
+          // The caret lands past the inserted text, ready to type. The offset
+          // is a rendered-text offset — the same currency the editor's caret
+          // maths speak — not a markdown offset.
+          setFocusRequest({ id, caret: textOffsetForMd(md, String(md).length) });
         }
       }
       return id;
@@ -211,27 +218,33 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
 
   const splitBlock = useCallback(
     (blockId, caret) => {
+      const block = section?.blocks.find((b) => b.id === blockId);
+      if (!block) return;
+      const md = String(block.md ?? '');
+      const head = md.slice(0, caret);
+      const tail = md.slice(caret);
       const newId = newBlockId();
       patchSection((s) => {
         const at = s.blocks.findIndex((b) => b.id === blockId);
         if (at < 0) return s;
-        const block = s.blocks[at];
-        const head = String(block.md ?? '').slice(0, caret);
-        const tail = String(block.md ?? '').slice(caret);
         const next = [...s.blocks];
         next[at] = { ...block, md: head, type: classify(head) };
         next.splice(at + 1, 0, { id: newId, md: tail, type: classify(tail), override: block.override ?? null });
         return { ...s, blocks: next };
       });
       setSelectedId(newId);
-      setEditingId(newId);
-      setFocusRequest({ id: newId, caret: 0 });
+      // The caret moves into the new block — unless the split produced a block
+      // that has no caret to put there (a table drawn from pipes, say).
+      if (!TEXTLESS_TYPES.has(classify(tail))) {
+        setEditingId(newId);
+        setFocusRequest({ id: newId, caret: 0 });
+      }
     },
-    [patchSection]
+    [patchSection, section]
   );
 
   const mergeBackward = useCallback(
-    (blockId) => {
+    (blockId, caretInMd = 0) => {
       let target = null;
       let caret = 0;
       patchSection((s) => {
@@ -239,10 +252,16 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
         if (at <= 0) return s;
         const prev = s.blocks[at - 1];
         const block = s.blocks[at];
+        const md = String(block.md ?? '');
+        // Backspace at the very start of a heading lands after its `# `, so
+        // joining drops the invisible marker — the text merges as plain words.
+        const [kept, dropped] =
+          caretInMd > 0 ? [md.slice(caretInMd), md.slice(0, caretInMd)] : [md, ''];
         target = prev.id;
-        caret = String(prev.md ?? '').length;
+        const joined = `${prev.md ?? ''}${dropped}`;
+        caret = textOffsetForMd(joined, joined.length);
         const next = [...s.blocks];
-        next[at - 1] = { ...prev, md: `${prev.md ?? ''}${block.md ?? ''}` };
+        next[at - 1] = { ...prev, md: `${prev.md ?? ''}${kept}` };
         next.splice(at, 1);
         return { ...s, blocks: next };
       });
@@ -496,7 +515,7 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
       setEditingId(target.id);
       setFocusRequest({
         id: target.id,
-        caret: direction > 0 ? 0 : String(target.md ?? '').length,
+        caret: direction > 0 ? 0 : textOffsetForMd(target.md ?? '', String(target.md ?? '').length),
       });
       return true;
     },
@@ -1271,13 +1290,22 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
         setEditingId(null);
         return;
       }
-      if (!openBlock(block)) setEditingId(block.id);
+      if (openBlock(block)) return;
+      if (TEXTLESS_TYPES.has(block.type)) {
+        setEditingId(null);
+        return;
+      }
+      setEditingId(block.id);
+      // An empty paragraph has no text to click into; put the caret there.
+      if (!String(block.md ?? '').trim()) setFocusRequest({ id: block.id, caret: 0 });
     },
     onChange: (md) => setBlockMd(block.id, md),
     onSplit: (caret) => splitBlock(block.id, caret),
-    onMergeBackward: () => mergeBackward(block.id),
+    onMergeBackward: (caretInMd) => mergeBackward(block.id, caretInMd),
     onStepParagraph: (direction) => stepParagraph(block.id, direction),
     onIndent: (direction) => stepIndent(direction),
+    onUndo: undo,
+    onRedo: redo,
     onExit: () => setEditingId(null),
     onContextMenu: (e) => {
       setSelectedId(block.id);
@@ -1568,149 +1596,38 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
 function DocBlock({
   block, folder, selected, editing, focusRequest, onFocusHandled, highlight,
   onSelect, onChange, onSplit, onMergeBackward, onExit, onContextMenu,
-  onStepParagraph, onIndent,
+  onStepParagraph, onIndent, onUndo, onRedo,
   activeCell, onActiveCellChange, onChangeTable, zoom = 1,
 }) {
-  const ref = useRef(null);
   const style = blockStyle(block, zoom);
-  /**
-   * The edit box wears the paragraph's own typography — the same size, weight,
-   * colour, alignment and indent as the rendered text — so clicking into a
-   * paragraph does not shrink it to a small mono box. Body text (no override)
-   * matches the page's base size at this zoom, like the rendered `.md p` does.
-   */
-  const editorStyle = {
-    ...style,
-    fontFamily: 'var(--doc-font)',
-    fontSize: style.fontSize ?? `${BODY_PT * zoom}px`,
-    lineHeight: style.lineHeight ?? 1.72,
-  };
-  /** The block this editor has already claimed focus for. */
-  const focused = useRef(null);
 
-  const resize = () => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  };
-
-  /*
-   * Place the caret once when the editor opens, and again only when a caller
-   * asks for a particular position.
-   *
-   * `onFocusHandled` is a fresh closure on every render, so an effect that
-   * lists it re-ran after every keystroke and moved the caret to the end of the
-   * paragraph — which makes it impossible to type anywhere but the last word.
-   * Keying off the block's id instead runs it exactly when it should.
-   */
-  useLayoutEffect(() => {
-    if (!editing) {
-      focused.current = null;
-      return;
-    }
-    const el = ref.current;
-    if (!el) return;
-    resize();
-    if (focusRequest) {
-      const caret = Math.max(0, Math.min(focusRequest.caret, el.value.length));
-      el.focus();
-      el.setSelectionRange(caret, caret);
-      focused.current = block.id;
-      onFocusHandled();
-      return;
-    }
-    if (focused.current !== block.id) {
-      focused.current = block.id;
-      el.focus();
-      el.setSelectionRange(el.value.length, el.value.length);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, focusRequest, block.id]);
-
-  const onKeyDown = (e) => {
-    const el = e.currentTarget;
-    const mod = e.metaKey || e.ctrlKey;
-    const atStart = el.selectionStart === 0 && el.selectionEnd === 0;
-
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onExit();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'b') {
-      e.preventDefault();
-      applyInline(el, '**', onChange);
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'i') {
-      e.preventDefault();
-      applyInline(el, '*', onChange);
-      return;
-    }
-    if (e.key === 'Backspace' && atStart) {
-      e.preventDefault();
-      onMergeBackward();
-      return;
-    }
-    /*
-     * Tab indents instead of leaving the paragraph.
-     *
-     * A textarea's default Tab moves focus to the next control, so pressing it
-     * mid-sentence threw the writer out of the document — the single most
-     * jarring thing about typing here. On a list item it changes the level, as
-     * Word does; anywhere else it moves the paragraph's own indent.
-     */
-    if (e.key === 'Tab' && !mod) {
-      e.preventDefault();
-      if (isListLine(el.value, el.selectionStart)) {
-        const next = indentLines(el.value, el.selectionStart, el.selectionEnd, e.shiftKey);
-        if (next) {
-          onChange(next.value);
-          requestAnimationFrame(() => {
-            ref.current?.setSelectionRange(next.start, next.end);
-            resize();
-          });
-          return;
-        }
-      }
-      onIndent?.(e.shiftKey ? -1 : 1);
-      return;
-    }
-    /*
-     * The arrows carry on into the next paragraph.
-     *
-     * Only from the first or the last line, so moving within a long paragraph
-     * still works normally. A line here is a real newline: the caret before the
-     * first one is on the first line.
-     */
-    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !mod && !e.shiftKey && el.selectionStart === el.selectionEnd) {
-      const value = el.value;
-      const caret = el.selectionStart;
-      const onFirstLine = value.lastIndexOf('\n', caret - 1) === -1;
-      const onLastLine = value.indexOf('\n', caret) === -1;
-      if ((e.key === 'ArrowUp' && onFirstLine) || (e.key === 'ArrowDown' && onLastLine)) {
-        if (onStepParagraph?.(e.key === 'ArrowUp' ? -1 : 1)) e.preventDefault();
-      }
-      return;
-    }
-    if (e.key === 'Enter' && !e.shiftKey && !mod) {
-      const continued = el.selectionStart === el.selectionEnd ? continueList(el.value, el.selectionStart) : null;
-      if (continued) {
-        e.preventDefault();
-        onChange(continued.value);
-        requestAnimationFrame(() => {
-          ref.current?.setSelectionRange(continued.caret, continued.caret);
-          resize();
-        });
-        return;
-      }
-      if (block.type !== 'code' && block.type !== 'table') {
-        e.preventDefault();
-        onSplit(el.selectionStart);
-      }
-    }
-  };
+  // Tables, charts, images, page breaks and rules are not paragraphs — they
+  // are selected, and edited through their own surfaces (dialog, table grid).
+  if (TEXTLESS_TYPES.has(block.type)) {
+    return (
+      <div
+        id={`block-${block.id}`}
+        className={`docblock${selected ? ' is-selected' : ''}`}
+        style={style}
+        onClick={() => !editing && onSelect()}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onContextMenu(e);
+        }}
+      >
+        <BlockContent
+          block={block}
+          folder={folder}
+          highlight={highlight}
+          activeCell={activeCell}
+          onActiveCellChange={onActiveCellChange}
+          onChangeTable={onChangeTable}
+          onSelectBlock={onSelect}
+        />
+        {selected && block.override && <span className="docblock__badge">meta.json</span>}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1725,38 +1642,39 @@ function DocBlock({
         onContextMenu(e);
       }}
     >
-      {editing ? (
-        <textarea
-          ref={ref}
-          className="docblock__editor"
-          style={editorStyle}
-          value={block.md ?? ''}
-          onChange={(e) => {
-            onChange(e.target.value);
-            resize();
-          }}
-          onKeyDown={onKeyDown}
-          onBlur={onExit}
-          spellCheck={false}
-          placeholder="내용을 입력하세요. 마크다운을 그대로 쓸 수 있습니다."
-        />
-      ) : (
-        <BlockContent
-          block={block}
-          folder={folder}
-          highlight={highlight}
-          activeCell={activeCell}
-          onActiveCellChange={onActiveCellChange}
-          onChangeTable={onChangeTable}
-          onSelectBlock={onSelect}
-        />
-      )}
-
+      {/*
+        The paragraph is always drawn the way it reads: rendered markdown
+        becomes the editable surface, so `#` and `**` never show up — typing
+        `# ` + space turns the paragraph into a heading, and the stored text is
+        recovered from the DOM. Clicking anywhere lands the caret where the
+        mouse is, the way a word processor's page does.
+      */}
+      <MarkdownEditor
+        className={`docblock__editor md md--doc${block.override?.style?.fontSize ? ' md--sized' : ''}`}
+        editable={editing}
+        alwaysEditable
+        value={block.md ?? ''}
+        highlight={highlight}
+        assetResolver={(src) => (isProjectAsset(src) ? assetUrl(folder, src) : src)}
+        focusRequest={focusRequest}
+        onFocusHandled={onFocusHandled}
+        onInput={onChange}
+        onSplit={onSplit}
+        onMergeBackward={onMergeBackward}
+        onStepParagraph={onStepParagraph}
+        onIndent={onIndent}
+        onUndo={onUndo}
+        onRedo={onRedo}
+        onExit={onExit}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onContextMenu(e);
+        }}
+      />
       {selected && block.override && <span className="docblock__badge">meta.json</span>}
     </div>
   );
 }
-
 /** Edit one header or footer: three slots and the tokens they accept. */
 function RunningDialog({ where, initial, onCancel, onConfirm }) {
   const [value, setValue] = useState({
@@ -1874,36 +1792,6 @@ function BlockContent({
     assetResolver: (src) => (isProjectAsset(src) ? assetUrl(folder, src) : src),
   });
   return <div dangerouslySetInnerHTML={{ __html: highlight ? markHtml(html, highlight) : html }} />;
-}
-
-/** Wrap search hits in the rendered HTML, skipping tag interiors. */
-function markHtml(html, query) {
-  if (!query) return html;
-  const parts = html.split(/(<[^>]*>)/);
-  const needle = query.toLowerCase();
-  return parts
-    .map((part) => {
-      if (part.startsWith('<')) return part;
-      let out = '';
-      let rest = part;
-      for (;;) {
-        const at = rest.toLowerCase().indexOf(needle);
-        if (at === -1) {
-          out += rest;
-          break;
-        }
-        out += `${rest.slice(0, at)}<mark class="findhit">${rest.slice(at, at + query.length)}</mark>`;
-        rest = rest.slice(at + query.length);
-      }
-      return out;
-    })
-    .join('');
-}
-
-function applyInline(el, marker, onChange) {
-  const result = toggleWrap(el.value, el.selectionStart, el.selectionEnd, marker);
-  onChange(result.value);
-  requestAnimationFrame(() => el.setSelectionRange(result.start, result.end));
 }
 
 /* -------------------------------------------------------------------- utils */

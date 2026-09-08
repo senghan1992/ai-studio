@@ -420,6 +420,19 @@ function makeDriver(window) {
     fire(el, 'input');
   };
 
+  /**
+   * Type into a rendered (contentEditable) surface.
+   *
+   * The paragraph editors are WYSIWYG: what a user types lands in the DOM and
+   * the editor recovers markdown from it. The harness plays the user by
+   * dropping the typed text into the surface as the browser would have it and
+   * firing the input event the editor listens for.
+   */
+  const typeContent = (el, html) => {
+    el.innerHTML = html;
+    fire(el, 'input');
+  };
+
   /** A `<select>` needs its own prototype's setter, and a `change` event. */
   const selectValue = (el, value) => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
@@ -437,6 +450,7 @@ function makeDriver(window) {
     fire,
     fireWindow,
     setValue,
+    typeContent,
     selectValue,
     /** Key event on window, for the app-level shortcut handlers. */
     winKey: (key, init = {}) =>
@@ -648,7 +662,7 @@ console.log('\n■ Deck 편집 상호작용');
 {
   const captured = {};
   const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
-    async interact({ settle, $, $$, dblclick, setValue }) {
+    async interact({ settle, $, $$, dblclick, typeContent }) {
       const block = $('.canvas .block');
       if (!block) throw new Error('no block on the canvas');
       dblclick(block);
@@ -656,7 +670,7 @@ console.log('\n■ Deck 편집 상호작용');
 
       const editor = $('.block__editor');
       if (!editor) throw new Error('double-click did not open the block editor');
-      setValue(editor, '# 편집된 제목\n\n두 번째 줄');
+      typeContent(editor, '<p># 편집된 제목</p><p>두 번째 줄</p>');
       await settle(6);
 
       const mdTab = $$('.inspector__tab').find((t) => t.textContent.endsWith('.md'));
@@ -680,7 +694,7 @@ console.log('\n■ Doc 편집 상호작용');
 {
   const captured = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
-    async interact({ settle, $, $$, click, setValue, key }) {
+    async interact({ settle, $, $$, click, typeContent }) {
       const blocks = $$('.docblock');
       if (!blocks.length) throw new Error('no blocks in the document');
       click(blocks[0]);
@@ -688,7 +702,9 @@ console.log('\n■ Doc 편집 상호작용');
 
       const editor = $('.docblock__editor');
       if (!editor) throw new Error('clicking a paragraph did not open the editor');
-      setValue(editor, '## 새 소제목');
+      // The user types `## 새 소제목` at the start of an empty paragraph; the
+      // editor recovers the markdown from the drawn text.
+      typeContent(editor, '<p>## 새 소제목</p>');
       await settle(6);
       captured.outline = $$('.outline-item').map((b) => b.textContent).join(' | ');
 
@@ -973,7 +989,7 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
 {
   const got = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
-    async interact({ settle, $, $$, click, fire, setValue }) {
+    async interact({ settle, $, $$, click, fire, typeContent }) {
       const block = $$('.docblock')[0];
       click(block);
       await settle(6);
@@ -982,26 +998,30 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
       if (!ta) return;
 
       /*
-       * Put the caret in the middle of the paragraph, then make the editor
-       * re-render (Ctrl+L sets the paragraph's alignment) and check the caret
-       * is still there. A focus effect that re-runs on every render drags it to
-       * the end, which makes typing anywhere but the last word impossible.
+       * The paragraph is its own edit surface now: the typed text lands in the
+       * drawn form, and a formatting shortcut must not throw the writer out of
+       * it. If the surface were remounted on re-render, focus (and with it the
+       * caret) would be lost — so focus staying put is the check.
        */
-      setValue(ta, '가나다라마');
+      typeContent(ta, '<p>가나다라마</p>');
       await settle(6);
-      ta.setSelectionRange(2, 2);
       fire(ta, 'keydown', { key: 'l', ctrlKey: true });
       await settle(8);
-      got.caretAfterTyping = $('.docblock__editor')?.selectionStart;
-      got.textLength = ta.value.length;
+      got.stillEditing = $('.docblock.is-editing') === ta.parentElement;
+      got.stillFocused = document.activeElement === ta;
+      got.textAfterAlign = ta.textContent;
 
       // Tab indents rather than throwing focus out of the document.
-      setValue(ta, '- 항목');
-      await settle(5);
-      ta.setSelectionRange(6, 6);
+      typeContent(ta, '<p>- 항목</p>');
+      await settle(6);
       fire(ta, 'keydown', { key: 'Tab' });
       await settle(8);
-      got.afterTab = $('.docblock__editor')?.value;
+      const mdTab = $$('.inspector__tab').find((t) => t.textContent.endsWith('.md'));
+      if (mdTab) {
+        click(mdTab);
+        await settle(4);
+        got.mdAfterTab = $('.code')?.textContent ?? '';
+      }
 
       // Ctrl+U underlines: markdown has no syntax for it, so it has to land in
       // the paragraph's meta.json.
@@ -1016,13 +1036,12 @@ console.log('\n■ Doc 문단 편집 (Word의 손버릇)');
   });
 
   check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
-  check('문단을 눌러 편집기가 열림', got.opened === true);
-  check(
-    '문단 중간에 입력해도 커서가 끝으로 튀지 않음',
-    got.caretAfterTyping === 2,
-    `caret = ${got.caretAfterTyping} (길이 ${got.textLength})`
-  );
-  check('Tab이 목록 수준을 내림', got.afterTab === '  - 항목', JSON.stringify(got.afterTab));
+  check('문단을 누르면 문단 자체가 편집면이 됨', got.opened === true);
+  check('서식 단축키 후에도 문단에서 계속 쓸 수 있음',
+    got.stillEditing === true && got.stillFocused === true,
+    `editing=${got.stillEditing} focused=${got.stillFocused}`);
+  check('맞춤을 바꿔도 문단 내용이 그대로임', got.textAfterAlign?.includes('가나다라마'), got.textAfterAlign);
+  check('Tab이 목록 수준을 내림', got.mdAfterTab?.includes('  - 항목'), JSON.stringify(got.mdAfterTab));
   check('Ctrl+U가 문단 서식으로 기록됨', got.underlineBadge === true);
   check('밑줄이 meta.json에 들어감', got.metaHasUnderline === true);
 }
@@ -1032,16 +1051,16 @@ console.log('\n■ Doc 자유로운 문단 편집 UX');
   const got = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
     async interact({ window, settle, $, $$, click, dblclick }) {
-      // A paragraph with its own size opens an edit box that looks like it —
-      // same size, weight, colour and alignment, in the document's own font.
+      // A paragraph with its own size keeps it while being edited: the drawn
+      // text is the edit surface, so the type the user sees while fixing a
+      // sentence is the type the reader will see.
       const styled = $$('.docblock').find((b) => b.textContent.includes('큰 글씨 문단'));
       click(styled);
       await settle(6);
-      const editor = $('.docblock__editor');
-      got.editorFontSize = editor?.style?.fontSize;
-      got.editorFont = editor?.style?.fontFamily;
-      got.editorLineHeight = editor?.style?.lineHeight;
-      got.editingClass = !!$('.docblock.is-editing');
+      const wrapper = $('.docblock.is-editing');
+      got.editorFontSize = wrapper?.style?.fontSize;
+      got.sizedClass = wrapper?.querySelector('.docblock__editor')?.className ?? '';
+      got.editingClass = !!wrapper;
 
       // Double-clicking open page space starts a new paragraph at the end of
       // the page, ready to type — no ribbon or menu involved.
@@ -1056,9 +1075,8 @@ console.log('\n■ Doc 자유로운 문단 편집 UX');
   });
 
   check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
-  check('문단 글꼴 크기로 편집기가 열림', got.editorFontSize === '22px', `fontSize = ${got.editorFontSize}`);
-  check('편집기가 문서 글꼴을 씀', got.editorFont === 'var(--doc-font)', `fontFamily = ${got.editorFont}`);
-  check('문단 줄 간격 유지', got.editorLineHeight === '1.72', `lineHeight = ${got.editorLineHeight}`);
+  check('문단 글꼴 크기가 편집 중에도 유지됨', got.editorFontSize === '22px', `fontSize = ${got.editorFontSize}`);
+  check('편집면이 문단 서식 클래스를 물려받음', got.sizedClass?.includes('md--sized'), got.sizedClass);
   check('편집 중임이 표시됨', got.editingClass === true);
   check('빈 영역 더블클릭으로 문단 추가', got.docsAfter === got.before + 1, `blocks ${got.before} → ${got.docsAfter}`);
   check('새 문단이 바로 편집 모드로 열림', got.newParagraphEditing === true);
@@ -1627,8 +1645,9 @@ console.log('\n■ Doc 표 도구');
       await settle(4);
       captured.tabs = $$('.ribbon__tab--context').map((t) => t.textContent.trim());
       captured.label = $('.ribbon__contextlabel')?.textContent;
-      // A table must not open the plain markdown textarea.
-      captured.noTextarea = !$('.docblock__editor');
+      // A table must not host the text edit surface — its cells are edited
+      // through the table's own grid, not as markdown.
+      captured.noTextarea = !$('.tableblock .docblock__editor');
 
       const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '표 레이아웃');
       if (layout) {

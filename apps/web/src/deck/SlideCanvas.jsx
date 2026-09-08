@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { renderMarkdown, toggleWrap, continueList } from '../lib/markdown.js';
+import { renderMarkdown } from '../lib/markdown.js';
 import { assetUrl, isProjectAsset } from '../api.js';
+import MarkdownEditor from '../components/MarkdownEditor.jsx';
 import ChartView from '../components/ChartView.jsx';
 import ShapeView from '../components/ShapeView.jsx';
 import TableView from '../components/TableView.jsx';
@@ -575,18 +576,6 @@ function Block({
     justifyContent: style.valign === 'middle' ? 'center' : style.valign === 'bottom' ? 'flex-end' : 'flex-start',
   };
 
-  /* The edit box wears the block's own type style, so what you type while
-     fixing a title looks like the title — the same size, weight and colour
-     the rendered block has. */
-  const editorStyle = {
-    fontSize: style.fontSize ? `${style.fontSize}px` : undefined,
-    fontWeight: style.weight,
-    textAlign: style.align,
-    color: style.color,
-    lineHeight: style.lineHeight,
-    fontStyle: style.italic ? 'italic' : undefined,
-  };
-
   return (
     <div
       className={`block${selected ? ' is-selected' : ''}${editing ? ' is-editing' : ''}`}
@@ -609,7 +598,17 @@ function Block({
       )}
 
       {editing && isText ? (
-        <BlockEditor value={block.md} onChange={onChangeMd} onExit={onExit} editorStyle={editorStyle} />
+        <MarkdownEditor
+          mode="slide"
+          className="block__editor block__content md md--slide"
+          style={contentStyle}
+          value={block.md ?? ''}
+          editable
+          onInput={onChangeMd}
+          onExit={onExit}
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        />
       ) : block.kind === 'table' ? (
         <TableView
           md={block.md}
@@ -719,75 +718,6 @@ function isDarkish(color) {
   if (!/^[0-9a-fA-F]{6}$/.test(hex)) return false;
   const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
   return (r * 299 + g * 587 + b * 114) / 1000 < 128;
-}
-
-/**
- * Markdown editor shown in place of the rendered block.
- * Ctrl+B / Ctrl+I insert markdown markers, so the formatting the user applies is
- * the formatting that ends up in the .md file — no hidden rich-text layer.
- */
-function BlockEditor({ value, onChange, onExit, editorStyle }) {
-  const ref = useRef(null);
-  const [text, setText] = useState(value ?? '');
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    el?.focus();
-    el?.setSelectionRange(el.value.length, el.value.length);
-  }, []);
-
-  const apply = (result) => {
-    setText(result.value);
-    onChange(result.value);
-    requestAnimationFrame(() => ref.current?.setSelectionRange(result.start, result.end));
-  };
-
-  const onKeyDown = (e) => {
-    const el = e.currentTarget;
-    const mod = e.metaKey || e.ctrlKey;
-
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onExit();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'b') {
-      e.preventDefault();
-      apply(toggleWrap(el.value, el.selectionStart, el.selectionEnd, '**'));
-      return;
-    }
-    if (mod && e.key.toLowerCase() === 'i') {
-      e.preventDefault();
-      apply(toggleWrap(el.value, el.selectionStart, el.selectionEnd, '*'));
-      return;
-    }
-    if (e.key === 'Enter' && !e.shiftKey && !mod && el.selectionStart === el.selectionEnd) {
-      const next = continueList(el.value, el.selectionStart);
-      if (next) {
-        e.preventDefault();
-        setText(next.value);
-        onChange(next.value);
-        requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
-      }
-    }
-  };
-
-  return (
-    <textarea
-      ref={ref}
-      className="block__editor"
-      value={text}
-      onChange={(e) => {
-        setText(e.target.value);
-        onChange(e.target.value);
-      }}
-      onKeyDown={onKeyDown}
-      onPointerDown={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-      spellCheck={false}
-      style={{ fontFamily: 'var(--doc-font)', whiteSpace: 'pre-wrap', overflowY: 'auto', ...editorStyle }}
-    />
-  );
 }
 
 /* ---------------------------------------------------------------- geometry */

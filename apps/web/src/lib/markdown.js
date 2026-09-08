@@ -4,6 +4,16 @@ import DOMPurify from 'dompurify';
 marked.setOptions({ gfm: true, breaks: true });
 
 /**
+ * A line that is only a list marker (`- `, `1. `) does not become a list in
+ * CommonMark — it renders as literal text, which is exactly the raw syntax a
+ * non-technical writer would see and delete. Give it an invisible character so
+ * an empty bullet stays a bullet everywhere markdown is drawn.
+ */
+export function normalizeMd(md) {
+  return String(md ?? '').replace(/^[ \t]*(?:[-+*]|\d+[.)])[ \t]+$/gm, (m) => `${m}\u200B`);
+}
+
+/**
  * Render block markdown to sanitized HTML.
  *
  * Sanitising matters even for local files: a project folder can be shared, and a
@@ -14,7 +24,7 @@ marked.setOptions({ gfm: true, breaks: true });
  * portable — so the rewrite happens at render time, never in the stored text.
  */
 export function renderMarkdown(md, { assetResolver } = {}) {
-  const source = String(md ?? '');
+  const source = normalizeMd(md);
   if (!source.trim()) return '';
   try {
     const html = DOMPurify.sanitize(marked.parse(source), { USE_PROFILES: { html: true } });
@@ -147,6 +157,30 @@ export function continueList(value, caret) {
   }
 
   return null;
+}
+
+/** Wrap search hits in the rendered HTML, skipping tag interiors. */
+export function markHtml(html, query) {
+  if (!query) return html;
+  const parts = html.split(/(<[^>]*>)/);
+  const needle = query.toLowerCase();
+  return parts
+    .map((part) => {
+      if (part.startsWith('<')) return part;
+      let out = '';
+      let rest = part;
+      for (;;) {
+        const at = rest.toLowerCase().indexOf(needle);
+        if (at === -1) {
+          out += rest;
+          break;
+        }
+        out += `${rest.slice(0, at)}<mark class="findhit">${rest.slice(at, at + query.length)}</mark>`;
+        rest = rest.slice(at + query.length);
+      }
+      return out;
+    })
+    .join('');
 }
 
 /* --------------------------------------------------------- syntax colouring */

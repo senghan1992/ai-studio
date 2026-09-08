@@ -386,14 +386,14 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .block.is-editing { cursor: text; border-color: var(--focus); }
 .block__content { width: 100%; height: 100%; overflow: hidden; padding: 4px 6px; }
 .block__editor {
-  width: 100%; height: 100%; border: 0; resize: none;
+  /* The rendered text is the edit surface — the block's own type style lands
+     here as inline styles (size, weight, colour, alignment…), so editing a
+     title looks like the title and shows only what the slide will show. */
+  width: 100%; height: 100%; overflow: auto; outline: none;
   background: rgba(15, 108, 189, .06);
-  /* The block's own type style lands here as inline styles (font size,
-     weight, colour, alignment…), so editing looks like the rendered block
-     instead of shrinking to a fixed small mono box. */
-  font-family: var(--doc-font); font-size: 20px; line-height: 1.45;
-  padding: 4px 6px; color: var(--ink); outline: none;
-  white-space: pre-wrap; word-break: break-word; overflow: auto;
+  font-family: var(--doc-font);
+  padding: 4px 6px; color: var(--ink);
+  word-break: break-word;
 }
 .block__placeholder { color: var(--ink-3); font-style: italic; }
 
@@ -446,18 +446,15 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .docblock.is-selected { box-shadow: inset 3px 0 0 rgba(15, 108, 189, .4); }
 .docblock.is-editing { background: rgba(15, 108, 189, .03); }
 .docblock__editor {
-  width: 100%; border: 0; resize: none; outline: none; background: transparent;
-  display: block;
-  font-family: var(--doc-font);
-  /* The paragraph's own typography arrives as inline styles — the same
-     blockStyle the rendered view uses — so typing looks like the page: the
-     same size, weight, colour and alignment. No small-mono jump on click. */
-  padding: 0; margin: .55em 0;  /* the gap a rendered .md p carries */
-  color: var(--ink);
-  line-height: 1.72;
-  white-space: pre-wrap; word-break: break-word;
-  overflow: hidden;
+  /* The rendered paragraph itself is the edit surface: clicking anywhere in it
+     puts the caret where the mouse is, and typing never shows markdown — `# `
+     + space turns the paragraph into a heading before your eyes. */
+  outline: none;
+  padding: 1px 0;
+  margin: -1px 0;
 }
+.docblock__editor:focus { outline: none; }
+.docblock__empty { color: #b9b7b5; }
 .docblock__badge {
   position: absolute; top: 2px; right: -68px; font-size: 10px;
   font-family: var(--mono); color: var(--accent); background: #eff6ff;
