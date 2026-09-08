@@ -117,7 +117,7 @@ export default function SlideCanvas({
       w < 8 || h < 8
         ? { x: x0 - 120, y: y0 - 70, w: 240, h: 140 }
         : { x: Math.min(x0, x), y: Math.min(y0, y), w, h };
-    onDrawShape?.(clamp({ ...box, w: Math.max(MIN_W, box.w), h: Math.max(MIN_H, box.h) }, canvas));
+    onDrawShape?.(clamp({ ...box, w: Math.max(MIN_W, box.w), h: Math.max(MIN_H, box.h) }));
   };
 
   /**
@@ -172,6 +172,7 @@ export default function SlideCanvas({
     if (block.locked) return;
 
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const rect = canvasRef.current?.getBoundingClientRect();
     setDrag({
       id: block.id,
       mode,
@@ -180,11 +181,70 @@ export default function SlideCanvas({
       startY: event.clientY,
       origin: { x: block.x, y: block.y, w: block.w, h: block.h },
       box: { x: block.x, y: block.y, w: block.w, h: block.h },
+      /*
+       * Alt+click steps down through the objects stacked at that point.
+       * A plain click never moves, so the first real movement turns it into
+       * an ordinary drag — which is also the existing Alt+drag = no snapping.
+       * `at` is where the pointer went down, in canvas coordinates.
+       */
+      altCycle: event.altKey,
+      at: rect
+        ? {
+            x: (event.clientX - rect.left) / scale,
+            y: (event.clientY - rect.top) / scale,
+          }
+        : { x: block.x + block.w / 2, y: block.y + block.h / 2 },
     });
+  };
+
+  /**
+   * The block directly below `id` at a canvas point, bottom-to-top order.
+   * If nothing is stacked under it (or the point wraps around), the topmost
+   * block at that point wins — Alt+click keeps cycling through the stack.
+   */
+  const blockBelowAt = (at, id) => {
+    const mine = slide.blocks.find((b) => b.id === id);
+    const under = [...slide.blocks]
+      .filter(
+        (b) =>
+          b.id !== id &&
+          at.x >= b.x &&
+          at.x <= b.x + b.w &&
+          at.y >= b.y &&
+          at.y <= b.y + b.h
+      )
+      .sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
+    if (under.length === 0) return id;
+    const myZ = mine?.z ?? 0;
+    const below = under.filter((b) => (b.z ?? 0) < myZ);
+    const pool = below.length ? below : under;
+    return pool[pool.length - 1].id;
+  };
+
+  /** Every block whose box contains the pointer, bottom to top — for the
+      right-click menu's "뒤에 있는 요소" list. */
+  const stackedAt = (event) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return [];
+    const x = (event.clientX - rect.left) / scale;
+    const y = (event.clientY - rect.top) / scale;
+    return [...slide.blocks]
+      .filter((b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h)
+      .sort((a, b) => (a.z ?? 0) - (b.z ?? 0))
+      .map((b) => b.id);
   };
 
   const pointerMove = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
+
+    // An Alt+click stops being a click the moment it moves 4px; from there it
+    // is the existing Alt+drag (move with snapping off).
+    if (drag.altCycle) {
+      if (Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) > 4) {
+        setDrag((d) => (d ? { ...d, altCycle: false } : d));
+      }
+      return;
+    }
 
     if (drag.mode === 'rotate') {
       const angle =
@@ -214,13 +274,13 @@ export default function SlideCanvas({
     const dy = (event.clientY - drag.startY) / scale;
 
     let box = drag.mode === 'move' ? moveBox(drag.origin, dx, dy) : resizeBox(drag.origin, drag.mode, dx, dy);
-    box = clamp(box, canvas);
+    box = clamp(box);
 
     const shown = [];
     if (!event.altKey) {
       const lines = snapLines(drag.id);
       const snapped = applySnap(box, lines, drag.mode, shown);
-      box = clamp(snapped, canvas);
+      box = clamp(snapped);
     }
 
     setGuides(shown);
@@ -253,6 +313,16 @@ export default function SlideCanvas({
           },
         });
       }
+      return;
+    }
+
+    // An Alt+click (never moved) selects the object below the pointer instead
+    // of dragging anything.
+    if (drag.altCycle) {
+      const { id, at } = drag;
+      setDrag(null);
+      setGuides([]);
+      onSelect(blockBelowAt(at, id));
       return;
     }
 
@@ -325,14 +395,14 @@ export default function SlideCanvas({
       if (e.altKey) {
         onChangeBlock(
           selectedId,
-          clamp({ ...block, w: block.w + delta[0], h: block.h + delta[1] }, canvas),
+          clamp({ ...block, w: block.w + delta[0], h: block.h + delta[1] }),
           { merge: true }
         );
         return;
       }
       onChangeBlock(
         selectedId,
-        clamp({ ...block, x: block.x + delta[0], y: block.y + delta[1] }, canvas),
+        clamp({ ...block, x: block.x + delta[0], y: block.y + delta[1] }),
         { merge: true }
       );
     };
@@ -363,7 +433,13 @@ export default function SlideCanvas({
         }}
         onPointerCancel={(event) => {
           setDraw(null);
-          pointerEnd(event);
+          // A cancelled Alt+click must not silently change the selection.
+          if (drag?.altCycle) {
+            setDrag(null);
+            setGuides([]);
+          } else {
+            pointerEnd(event);
+          }
         }}
         onDoubleClick={(e) => {
           if (e.target !== e.currentTarget) return;
@@ -407,7 +483,7 @@ export default function SlideCanvas({
               }
               onContextMenu={(e) => {
                 onSelect(block.id);
-                onContextMenu?.(e, block);
+                onContextMenu?.(e, block, stackedAt(e));
               }}
             />
           );
@@ -499,6 +575,18 @@ function Block({
     justifyContent: style.valign === 'middle' ? 'center' : style.valign === 'bottom' ? 'flex-end' : 'flex-start',
   };
 
+  /* The edit box wears the block's own type style, so what you type while
+     fixing a title looks like the title — the same size, weight and colour
+     the rendered block has. */
+  const editorStyle = {
+    fontSize: style.fontSize ? `${style.fontSize}px` : undefined,
+    fontWeight: style.weight,
+    textAlign: style.align,
+    color: style.color,
+    lineHeight: style.lineHeight,
+    fontStyle: style.italic ? 'italic' : undefined,
+  };
+
   return (
     <div
       className={`block${selected ? ' is-selected' : ''}${editing ? ' is-editing' : ''}`}
@@ -521,7 +609,7 @@ function Block({
       )}
 
       {editing && isText ? (
-        <BlockEditor value={block.md} onChange={onChangeMd} onExit={onExit} />
+        <BlockEditor value={block.md} onChange={onChangeMd} onExit={onExit} editorStyle={editorStyle} />
       ) : block.kind === 'table' ? (
         <TableView
           md={block.md}
@@ -638,7 +726,7 @@ function isDarkish(color) {
  * Ctrl+B / Ctrl+I insert markdown markers, so the formatting the user applies is
  * the formatting that ends up in the .md file — no hidden rich-text layer.
  */
-function BlockEditor({ value, onChange, onExit }) {
+function BlockEditor({ value, onChange, onExit, editorStyle }) {
   const ref = useRef(null);
   const [text, setText] = useState(value ?? '');
 
@@ -697,6 +785,7 @@ function BlockEditor({ value, onChange, onExit }) {
       onPointerDown={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
       spellCheck={false}
+      style={{ fontFamily: 'var(--doc-font)', whiteSpace: 'pre-wrap', overflowY: 'auto', ...editorStyle }}
     />
   );
 }
@@ -731,14 +820,17 @@ function resizeBox(origin, mode, dx, dy) {
   return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
 }
 
-function clamp(box, canvas) {
-  const w = Math.min(Math.max(MIN_W, box.w), canvas.w);
-  const h = Math.min(Math.max(MIN_H, box.h), canvas.h);
+/**
+ * Placement is free: an object may extend past the canvas edge (PowerPoint
+ * lets a shape bleed off the slide; the slideshow and print renderers clip to
+ * the slide). Only the minimum sizes keep a block grabbable.
+ */
+function clamp(box) {
   return {
-    x: Math.min(Math.max(0, box.x), canvas.w - w),
-    y: Math.min(Math.max(0, box.y), canvas.h - h),
-    w,
-    h,
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    w: Math.max(MIN_W, Math.round(box.w)),
+    h: Math.max(MIN_H, Math.round(box.h)),
   };
 }
 

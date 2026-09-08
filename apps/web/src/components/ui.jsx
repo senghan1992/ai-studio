@@ -533,6 +533,8 @@ export function ContextMenu({ x, y, items, onClose }) {
       {items.map((item, i) =>
         item === '-' ? (
           <div key={`sep-${i}`} className="ctxmenu__sep" role="separator" />
+        ) : item.head ? (
+          <div key={item.label} className="ctxmenu__head" role="presentation">{item.label}</div>
         ) : (
           <button
             key={item.label}

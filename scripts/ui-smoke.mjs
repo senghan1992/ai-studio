@@ -187,6 +187,27 @@ const fixtures = {};
     ],
   };
 
+  // Two blocks stacked on top of each other, for the overlap UX checks:
+  // Alt+click steps down the stack, the right-click menu lists what lies
+  // underneath, and a block may be dragged past the canvas edge. Their z is
+  // above the layout blocks so they are the ones hit at their point.
+  fixtures['스모크-표준.aideck'].slides[0].blocks.push(
+    {
+      id: 'b_ux_back',
+      kind: 'text',
+      md: '뒤 블록',
+      x: 300, y: 300, w: 300, h: 160, z: 50,
+      style: { fontSize: 40, weight: 700, align: 'left', color: '#1f2937', lineHeight: 1.45 },
+    },
+    {
+      id: 'b_ux_front',
+      kind: 'text',
+      md: '앞 블록',
+      x: 300, y: 300, w: 300, h: 160, z: 51,
+      style: { fontSize: 40, weight: 700, align: 'left', color: '#1f2937', lineHeight: 1.45 },
+    }
+  );
+
   // On disk a sheet is always saved recalculated; the in-memory fixture gets
   // the same treatment so the formula cells carry their cached values.
   const sample = core.makeSheet({ name: '시트1', withSample: true });
@@ -1874,6 +1895,84 @@ console.log('\n■ 16:9가 아닌 덱 (4:3)');
     },
   });
   check('4:3 덱에 오류 없음', errors.length === 0, errors.join('\n      '));
+}
+
+console.log('\n■ Deck 겹친 요소 · 캔버스 밖 배치 · 편집 글꼴 · 패널 토글');
+{
+  const got = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent('스모크-표준.aideck')}`, {
+    async interact({ window, settle, $, $$, fire, click, dblclick }) {
+      // Canvas coords → screen px, using the canvas's live scale transform.
+      const canvas = $('.canvas');
+      const m = canvas?.style.transform.match(/scale\(([\d.]+)\)/);
+      const scale = m ? parseFloat(m[1]) : 1;
+      const px = (x) => Math.round(x * scale);
+      const point = { x: px(340), y: px(340) };
+
+      const front = () => $$('.canvas .block').find((b) => b.textContent.includes('앞 블록'));
+      const back = () => $$('.canvas .block').find((b) => b.textContent.includes('뒤 블록'));
+
+      // Alt+click — a click that never moves steps down the stack.
+      fire(front(), 'pointerdown', { button: 0, pointerId: 7, altKey: true, clientX: point.x, clientY: point.y });
+      await settle(4);
+      fire(front(), 'pointerup', { button: 0, pointerId: 7 });
+      await settle(4);
+      got.altSelectedBack = $('.block.is-selected')?.textContent?.includes('뒤 블록');
+
+      // Right-click on the top block lists the object underneath.
+      fire(front(), 'contextmenu', { button: 2, clientX: point.x, clientY: point.y });
+      await settle(3);
+      const menuText = $('.ctxmenu')?.textContent ?? '';
+      got.menuBehind = menuText.includes('뒤에 있는 요소') && menuText.includes('뒤 블록');
+      fire(window.document.body, 'mousedown', { button: 0 });
+      await settle(3);
+
+      // Dragging the front block far right of the canvas edge is allowed now.
+      fire(front(), 'pointerdown', { button: 0, pointerId: 8, clientX: point.x, clientY: point.y });
+      await settle(4);
+      fire(front(), 'pointermove', { button: 0, pointerId: 8, clientX: point.x + 600, clientY: point.y + 60 });
+      await settle(4);
+      fire(front(), 'pointerup', { button: 0, pointerId: 8 });
+      await settle(5);
+      const moved = $$('.canvas .block').find((b) => b.textContent.includes('앞 블록'));
+      const box = moved ? { x: parseFloat(moved.style.left), w: parseFloat(moved.style.width) } : null;
+      got.beyondCanvas = !!box && box.x + box.w > 960;
+
+      // The edit box wears the block's type style, not a fixed small mono font.
+      dblclick(back());
+      await settle(4);
+      const ed = $('.block__editor');
+      got.editorFont = ed?.style?.fontSize;
+      got.editorWeight = ed?.style?.fontWeight;
+      got.editorAlign = ed?.style?.textAlign;
+
+      // The right panel closes from its own ✕ and reopens from the titlebar.
+      const closeBtn = $('.panel__close');
+      got.hasCloseBtn = !!closeBtn;
+      if (closeBtn) {
+        click(closeBtn);
+        await settle(4);
+        got.panelClosed = !$('.panel--right');
+      }
+      const toggle = $$('.tbtn').find((b) => b.textContent.includes('저장 포맷'));
+      if (toggle) {
+        click(toggle);
+        await settle(4);
+        got.panelReopened = !!$('.panel--right');
+      }
+    },
+  });
+
+  check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('Alt+클릭이 겹친 아래 요소를 선택', got.altSelectedBack === true);
+  check('우클릭 메뉴에 뒤에 있는 요소가 나옴', got.menuBehind === true);
+  check('블록이 캔버스 밖으로 이동할 수 있음', got.beyondCanvas === true);
+  check('편집 상자가 블록 글꼴 크기를 따름', got.editorFont === '40px', `fontSize = ${got.editorFont}`);
+  check('편집 상자가 굵기를 따름', got.editorWeight === '700', `fontWeight = ${got.editorWeight}`);
+  check('편집 상자가 정렬을 따름', got.editorAlign === 'left', `textAlign = ${got.editorAlign}`);
+  check('패널에 닫기 단추가 있음', got.hasCloseBtn === true);
+  check('✕로 패널이 닫힘', got.panelClosed === true);
+  check('제목줄 단추로 패널이 다시 열림', got.panelReopened === true);
 }
 
 console.log('\n■ 이미지 삽입 (Doc)');

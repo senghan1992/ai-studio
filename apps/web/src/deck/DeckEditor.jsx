@@ -98,6 +98,8 @@ const LAYOUT_LABELS = {
   blank: '빈 슬라이드',
 };
 
+const KIND_LABELS = { text: '텍스트', shape: '도형', table: '표', chart: '차트', image: '이미지' };
+
 /**
  * The slide sizes PowerPoint offers, plus whatever this deck actually is.
  *
@@ -694,7 +696,14 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
 
   /* --------------------------------------------------------- context menu */
 
-  const blockMenu = (block) => [
+  const blockMenu = (block, e, stackedIds = []) => {
+    /* The objects stacked under the right-clicked one, bottom to top — the
+       menu lists them so a covered element can be picked without moving the
+       one on top (Alt+클릭 does the same one at a time). */
+    const behind = (stackedIds ?? [])
+      .map((id) => (slide?.blocks ?? []).find((b) => b.id === id))
+      .filter((b) => b && b.id !== block.id && (b.z ?? 0) < (block.z ?? 0));
+    return [
     { label: '잘라내기', shortcut: 'Ctrl+X', onClick: () => copyBlock(block.id, true) },
     { label: '복사', shortcut: 'Ctrl+C', onClick: () => copyBlock(block.id, false) },
     { label: '붙여넣기', shortcut: 'Ctrl+V', disabled: !clipboard, onClick: pasteBlock },
@@ -704,6 +713,19 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
     ...(block.kind === 'chart' || block.kind === 'image'
       ? [{ label: block.kind === 'chart' ? '차트 편집' : '이미지 편집', onClick: () => openBlock(block) }]
       : [{ label: '텍스트 편집', shortcut: 'Enter', onClick: () => setEditingId(block.id) }]),
+    ...(behind.length > 0
+      ? [
+          '-',
+          { label: '뒤에 있는 요소', head: true },
+          ...behind
+            .slice(0, 6)
+            .map((b) => ({
+              label: `${KIND_LABELS[b.kind] ?? b.kind} — ${firstLine(b.md, b.kind)}`,
+              title: '클릭하면 그 요소를 선택합니다 (Alt+클릭으로도 하나씩 내려갈 수 있습니다)',
+              onClick: () => setSelectedId(b.id),
+            })),
+        ]
+      : []),
     '-',
     { label: '맨 앞으로 가져오기', onClick: () => patchBlock(block.id, { z: maxZ(slide) + 1 }) },
     { label: '앞으로 가져오기', onClick: () => bumpZ(block.id, 1) },
@@ -713,6 +735,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
     '-',
     { label: '삭제', shortcut: 'Delete', danger: true, onClick: () => deleteBlock(block.id) },
   ];
+  };
 
   const canvasMenu = () => [
     { label: '텍스트 상자 추가', onClick: () => addBlock({ md: '새 텍스트' }) },
@@ -1638,7 +1661,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
           onActiveCellChange={setActiveCell}
           onChangeTable={(blockId, md, table) => patchBlock(blockId, { md, table })}
           onOpenBlock={openBlock}
-          onContextMenu={(e, block) => ctx.open(e, block ? blockMenu(block) : canvasMenu())}
+          onContextMenu={(e, block, stacked) => ctx.open(e, block ? blockMenu(block, e, stacked) : canvasMenu())}
         />
         <div className="notes">
           <div className="notes__label">발표자 노트 — AI.md에 함께 저장됩니다</div>
@@ -1650,7 +1673,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
         </div>
       </div>
 
-      {inspectorOpen && <FileInspector project={project} activeIndex={slideIndex} />}
+      {inspectorOpen && <FileInspector project={project} activeIndex={slideIndex} onClose={() => setInspectorOpen(false)} />}
 
       {ctx.menu && <ContextMenu {...ctx.menu} onClose={ctx.close} />}
 

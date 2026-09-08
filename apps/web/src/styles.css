@@ -363,13 +363,17 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .thumb-block--chart { background: #dcfce7; }
 
 .canvas-scroll {
-  min-height: 100%; display: grid; place-items: center;
-  padding: 28px; overflow: auto;
+  min-height: 100%; display: flex;
+  /* Room to scroll to objects placed past the canvas edge. */
+  padding: 72px; overflow: auto;
 }
 
 .canvas {
   position: relative; background: #fff; box-shadow: var(--shadow-2);
-  flex: none; transform-origin: center center;
+  /* `margin: auto` centres the slide like the old grid did, but when the
+     canvas is larger than the viewport (or an object hangs off its edge)
+     every side stays reachable by scrolling. */
+  flex: none; margin: auto; transform-origin: center center;
   font-family: var(--doc-font);
 }
 
@@ -382,9 +386,14 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .block.is-editing { cursor: text; border-color: var(--focus); }
 .block__content { width: 100%; height: 100%; overflow: hidden; padding: 4px 6px; }
 .block__editor {
-  width: 100%; height: 100%; border: 0; resize: none; background: rgba(15, 108, 189, .04);
-  font-family: var(--mono); font-size: 13px; line-height: 1.5; padding: 4px 6px;
-  color: var(--ink); outline: none;
+  width: 100%; height: 100%; border: 0; resize: none;
+  background: rgba(15, 108, 189, .06);
+  /* The block's own type style lands here as inline styles (font size,
+     weight, colour, alignment…), so editing looks like the rendered block
+     instead of shrinking to a fixed small mono box. */
+  font-family: var(--doc-font); font-size: 20px; line-height: 1.45;
+  padding: 4px 6px; color: var(--ink); outline: none;
+  white-space: pre-wrap; word-break: break-word; overflow: auto;
 }
 .block__placeholder { color: var(--ink-3); font-style: italic; }
 
@@ -756,6 +765,18 @@ td.is-spill { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, 
 .center-note { display: grid; place-items: center; gap: 12px; height: 100%; color: var(--ink-3); }
 
 /* =========================================================== context menu */
+
+.ctxmenu__head {
+  padding: 5px 10px 2px; font-size: 10.5px; font-weight: 700;
+  color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em;
+  pointer-events: none; white-space: nowrap;
+}
+
+.panel__close {
+  border: 0; background: none; cursor: pointer; color: var(--ink-3);
+  font-size: 12px; line-height: 1; padding: 4px 6px; border-radius: 4px;
+}
+.panel__close:hover { background: var(--hover); color: var(--ink); }
 
 .ctxmenu {
   position: fixed; z-index: 300; min-width: 196px;

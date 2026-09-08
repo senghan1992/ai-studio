@@ -30,7 +30,7 @@ const HINTS = {
  * byte-identical to what lands on disk — the point being that the storage format
  * is not hidden behind the editor, it *is* the product.
  */
-export default function FileInspector({ project, activeIndex }) {
+export default function FileInspector({ project, activeIndex, onClose }) {
   const [tab, setTab] = useState('md');
 
   const files = useMemo(() => buildFiles(project, activeIndex), [project, activeIndex]);
@@ -40,6 +40,11 @@ export default function FileInspector({ project, activeIndex }) {
     <aside className="panel panel--right panel--wide">
       <div className="panel__head">
         <span>AI 저장 포맷</span>
+        {onClose && (
+          <button className="panel__close" onClick={onClose} title="패널 닫기" aria-label="패널 닫기">
+            ✕
+          </button>
+        )}
       </div>
       <div className="inspector__tabs" role="tablist" aria-label="파일">
         {files.map((f) => (

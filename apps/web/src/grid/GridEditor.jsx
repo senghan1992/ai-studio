@@ -1287,7 +1287,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         </div>
       </div>
 
-      {inspectorOpen && <FileInspector project={project} activeIndex={index} />}
+      {inspectorOpen && <FileInspector project={project} activeIndex={index} onClose={() => setInspectorOpen(false)} />}
 
       {ctx.menu && <ContextMenu {...ctx.menu} onClose={ctx.close} />}
 
