@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   makeSheet, usedRange, newBlockId, toRef, parseRef, editValue, applyNumFmt, FUNCTION_NAMES, LIMITS,
 } from '../core/index.js';
@@ -120,6 +120,11 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   const [headerChoice, setHeaderChoice] = useState(null);
   const [tabDragFrom, setTabDragFrom] = useState(null);
   const [tabDragOver, setTabDragOver] = useState(null);
+  /** Excel-style sheet-tab group selection: length > 1 puts the workbook in
+   *  group mode, where every edit lands on all the selected sheets. */
+  const [selectedTabs, setSelectedTabs] = useState([0]);
+  /** The tab Shift+click extends from — the last tab a plain click landed on. */
+  const tabAnchorRef = useRef(0);
   const [find, setFind] = useState(null);
   const [chartDialog, setChartDialog] = useState(null);
   const [selectedChartId, setSelectedChartId] = useState(null);
@@ -128,6 +133,8 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const index = Math.min(sheetIndex, Math.max(0, sheets.length - 1));
   const sheet = sheets[index];
+  /** The tab group being edited together — `null` unless 2+ tabs are selected. */
+  const group = selectedTabs.length > 1 ? selectedTabs : null;
   const range = normalizeRange(sel);
   // Declared up here because Ctrl+End and the 데이터 tab both read it, and the
   // keyboard effect is defined before the render body.
@@ -152,6 +159,27 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         options
       ),
     [setItems, index]
+  );
+
+  /**
+   * Apply an edit to every sheet in the tab group — Excel's group mode.
+   *
+   * With a single tab selected this is exactly `patchSheet`; with several, the
+   * same cell coordinates are edited on each, and each is recalculated against
+   * the rest of the workbook.
+   */
+  const patchSheets = useCallback(
+    (updater, options) => {
+      const targets = group ?? [index];
+      setItems(
+        (list) =>
+          list.map((s, i) =>
+            targets.includes(i) ? withRecalc(updater(s), list.filter((_, j) => j !== i)) : s
+          ),
+        options
+      );
+    },
+    [setItems, group, index]
   );
 
   /* ---------------------------------------------------------- cell editing */
@@ -201,11 +229,11 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const commitCell = useCallback(
     (value, direction) => {
-      patchSheet((s) => setCellInput(s, sel.row, sel.col, value), { mergeKey: `cell:${activeRef}` });
+      patchSheets((s) => setCellInput(s, sel.row, sel.col, value), { mergeKey: `cell:${activeRef}` });
       setEditing(null);
       if (direction) move(direction, false);
     },
-    [patchSheet, sel.row, sel.col, activeRef, move]
+    [patchSheets, sel.row, sel.col, activeRef, move]
   );
 
   /* -------------------------------------------------------------- commands */
@@ -226,31 +254,31 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const cutSelection = useCallback(async () => {
     await copySelection(false);
-    patchSheet((s) => clearRange(s, rangeRefs(range), { keepStyle: true }));
-  }, [copySelection, patchSheet, range]);
+    patchSheets((s) => clearRange(s, rangeRefs(range), { keepStyle: true }));
+  }, [copySelection, patchSheets, range]);
 
   const pasteFromClipboard = useCallback(async () => {
     try {
       const text = await navigator.clipboard.readText();
       if (!text) return;
-      patchSheet((s) => pasteTsv(s, text, sel.row, sel.col));
+      patchSheets((s) => pasteTsv(s, text, sel.row, sel.col));
       notify('붙여넣었습니다');
     } catch {
       notify('붙여넣기는 Ctrl+V를 눌러 주세요 (브라우저 권한)');
     }
-  }, [patchSheet, sel.row, sel.col, notify]);
+  }, [patchSheets, sel.row, sel.col, notify]);
 
   const toggleStyle = useCallback(
     (key) => {
       const refs = rangeRefs(range);
       const allOn = refs.every((ref) => sheet.cells[ref]?.style?.[key]);
-      patchSheet((s) => patchCells(s, refs, { style: { [key]: allOn ? null : true } }));
+      patchSheets((s) => patchCells(s, refs, { style: { [key]: allOn ? null : true } }));
     },
-    [range, sheet, patchSheet]
+    [range, sheet, patchSheets]
   );
 
-  const applyFormat = useCallback((fmt) => patchSheet((s) => patchCells(s, rangeRefs(range), { fmt })), [patchSheet, range]);
-  const applyStyle = useCallback((style) => patchSheet((s) => patchCells(s, rangeRefs(range), { style })), [patchSheet, range]);
+  const applyFormat = useCallback((fmt) => patchSheets((s) => patchCells(s, rangeRefs(range), { fmt })), [patchSheets, range]);
+  const applyStyle = useCallback((style) => patchSheets((s) => patchCells(s, rangeRefs(range), { style })), [patchSheets, range]);
 
   /**
    * 텍스트 줄바꿈, and the row height that has to come with it.
@@ -260,33 +288,33 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
    */
   const toggleWrapText = useCallback(() => {
     const on = !activeCell?.style?.wrap;
-    patchSheet((s) => {
+    patchSheets((s) => {
       let next = patchCells(s, rangeRefs(range), { style: { wrap: on ? true : null } });
       for (let r = range.r1; r <= range.r2; r++) {
         next = setRowHeight(next, r, on ? autoFitRow(next, r, used?.maxCol ?? 12) : 0);
       }
       return next;
     });
-  }, [activeCell, patchSheet, range, used]);
-  const setBorders = useCallback((preset) => patchSheet((s) => applyBorders(s, range, preset)), [patchSheet, range]);
+  }, [activeCell, patchSheets, range, used]);
+  const setBorders = useCallback((preset) => patchSheets((s) => applyBorders(s, range, preset)), [patchSheets, range]);
 
   const merged = sheet ? mergeCovering(sheet, sel.row, sel.col) : null;
   const toggleMerge = useCallback(() => {
-    if (merged) patchSheet((s) => unmergeSelection(s, range));
-    else patchSheet((s) => mergeSelection(s, range));
-  }, [merged, patchSheet, range]);
+    if (merged) patchSheets((s) => unmergeSelection(s, range));
+    else patchSheets((s) => mergeSelection(s, range));
+  }, [merged, patchSheets, range]);
 
   const insertFormula = useCallback(
     (build) => {
       const target = suggestRange(sheet, sel.row, sel.col);
       const formula = build(target);
-      patchSheet((s) => setCellInput(s, sel.row, sel.col, formula));
+      patchSheets((s) => setCellInput(s, sel.row, sel.col, formula));
       notify(`${activeRef}에 ${formula} 입력`);
     },
-    [sheet, sel.row, sel.col, patchSheet, activeRef, notify]
+    [sheet, sel.row, sel.col, patchSheets, activeRef, notify]
   );
 
-  const doFill = useCallback((source, target) => patchSheet((s) => fillRange(s, source, target)), [patchSheet]);
+  const doFill = useCallback((source, target) => patchSheets((s) => fillRange(s, source, target)), [patchSheets]);
 
   /* -------------------------------------------------------- format painter */
 
@@ -310,10 +338,10 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const paintSelection = useCallback(() => {
     if (!painter) return;
-    patchSheet((s) => paintFormat(s, rangeRefs(range), painter));
+    patchSheets((s) => paintFormat(s, rangeRefs(range), painter));
     setPainter(null);
     notify(`${rangeLabel(range)}에 서식을 붙였습니다`);
-  }, [painter, patchSheet, range, notify]);
+  }, [painter, patchSheets, range, notify]);
 
   /* ---------------------------------------------------------------- charts */
 
@@ -492,9 +520,13 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         e.preventDefault();
         // Ctrl+PageDown is the next sheet — the tab bar without the mouse.
         if (mod) {
-          setSheetIndex((i) =>
-            Math.min(sheets.length - 1, Math.max(0, i + (e.key === 'PageDown' ? 1 : -1)))
+          const next = Math.min(
+            sheets.length - 1,
+            Math.max(0, i + (e.key === 'PageDown' ? 1 : -1))
           );
+          setSheetIndex(next);
+          tabAnchorRef.current = next;
+          setSelectedTabs([next]);
           return;
         }
         const step = e.key === 'PageDown' ? PAGE_ROWS : -PAGE_ROWS;
@@ -506,7 +538,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        patchSheet((s) => clearRange(s, rangeRefs(range), { keepStyle: true }));
+        patchSheets((s) => clearRange(s, rangeRefs(range), { keepStyle: true }));
         return;
       }
       if (e.key === 'Home') {
@@ -562,7 +594,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       if (mod && e.key === 'Enter') {
         e.preventDefault();
         const source = editValue(activeCell);
-        patchSheet((s) => {
+        patchSheets((s) => {
           let next = s;
           for (const ref of rangeRefs(range)) {
             const p = parseRef(ref);
@@ -575,7 +607,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       // Ctrl+D / Ctrl+R — 아래로 채우기 · 오른쪽으로 채우기.
       if (mod && (e.key.toLowerCase() === 'd' || e.key.toLowerCase() === 'r')) {
         e.preventDefault();
-        patchSheet((s) => fillWithin(s, range, e.key.toLowerCase() === 'd' ? 'down' : 'right'));
+        patchSheets((s) => fillWithin(s, range, e.key.toLowerCase() === 'd' ? 'down' : 'right'));
         return;
       }
       // Ctrl+; 오늘 날짜, Ctrl+Shift+; 지금 시각 — Excel's own pair.
@@ -585,7 +617,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
         const stamp = e.shiftKey
           ? `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
           : `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
-        patchSheet((s) => setCellInput(s, sel.row, sel.col, stamp));
+        patchSheets((s) => setCellInput(s, sel.row, sel.col, stamp));
         return;
       }
       // Ctrl+1 — 셀 서식.
@@ -630,7 +662,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, activeCell, range, sel.row, sel.col, move, jumpTo, patchSheet, copySelection, cutSelection, toggleStyle, find, sheet, used, sheets.length, applyFormat]);
+  }, [editing, activeCell, range, sel.row, sel.col, move, jumpTo, patchSheets, copySelection, cutSelection, toggleStyle, find, sheet, used, sheets.length, applyFormat]);
 
   // Native paste so Ctrl+V from Excel or a markdown table works.
   useEffect(() => {
@@ -641,27 +673,36 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       const text = e.clipboardData?.getData('text/plain');
       if (!text) return;
       e.preventDefault();
-      patchSheet((s) => pasteTsv(s, text, sel.row, sel.col));
+      patchSheets((s) => pasteTsv(s, text, sel.row, sel.col));
       notify('붙여넣었습니다');
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [editing, patchSheet, sel.row, sel.col, notify]);
+  }, [editing, patchSheets, sel.row, sel.col, notify]);
 
   /* --------------------------------------------------------------- sheets */
 
   const addSheet = () => {
     setItems((list) => [...list, makeSheet({ name: uniqueSheetName(list) })]);
-    setSheetIndex(sheets.length);
+    const newIdx = sheets.length;
+    setSheetIndex(newIdx);
+    tabAnchorRef.current = newIdx;
+    setSelectedTabs([newIdx]);
   };
 
+  /**
+   * Delete sheet tabs. In group mode the whole selection goes, as in Excel;
+   * the workbook is never left without a sheet.
+   */
   const deleteSheet = (at = index) => {
-    if (sheets.length <= 1) {
-      notify('마지막 시트는 삭제할 수 없습니다');
-      return;
-    }
-    setItems((list) => list.filter((_, i) => i !== at));
-    setSheetIndex(Math.max(0, at - 1));
+    const doomed = group?.includes(at) ? [...group] : [at];
+    if (sheets.length - doomed.length < 1) doomed.pop();
+    const keep = sheets.map((_, i) => i).filter((i) => !doomed.includes(i));
+    setItems((list) => list.filter((_, i) => !doomed.includes(i)));
+    const newIdx = keep.includes(index) ? index : Math.max(0, keep.length - 1);
+    setSheetIndex(newIdx);
+    tabAnchorRef.current = newIdx;
+    setSelectedTabs([newIdx]);
   };
 
   const duplicateSheet = (at = index) => {
@@ -670,17 +711,72 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       return [...list.slice(0, at + 1), copy, ...list.slice(at + 1)];
     });
     setSheetIndex(at + 1);
+    tabAnchorRef.current = at + 1;
+    setSelectedTabs([at + 1]);
   };
 
-  const moveSheet = (from, to) => {
-    if (to < 0 || to >= sheets.length || from === to) return;
-    setItems((list) => {
-      const next = [...list];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-    setSheetIndex(to);
+  /**
+   * Reorder sheet tabs. When the dragged tab is part of a group, the whole
+   * group moves together and the selection follows it — Excel's rule.
+   */
+  const moveSheets = (from, to) => {
+    const froms = (group?.includes(from) ? [...group] : [from]).sort((a, b) => a - b);
+    if (froms.includes(to)) return;
+    const moved = froms.map((k) => sheets[k]);
+    const rest = sheets.filter((_, k) => !froms.includes(k));
+    const at = Math.max(0, Math.min(to, rest.length));
+    const next = [...rest.slice(0, at), ...moved, ...rest.slice(at)];
+    setItems(() => next);
+    const inMoved = froms.indexOf(index);
+    if (inMoved >= 0) {
+      const newIdx = at + inMoved;
+      setSheetIndex(newIdx);
+      tabAnchorRef.current = newIdx;
+      setSelectedTabs(Array.from({ length: froms.length }, (_, k) => at + k));
+    } else {
+      const pos = rest.indexOf(sheets[index]);
+      setSheetIndex(pos);
+      tabAnchorRef.current = pos;
+      setSelectedTabs([pos]);
+    }
+  };
+
+  /**
+   * The tab-click grammar Excel teaches: a plain click picks one sheet,
+   * Ctrl/Cmd+click toggles it into the group, Shift+click selects everything
+   * from the anchor tab through the one clicked.
+   */
+  const selectTab = (i, e) => {
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+click adds the tab to the group; clicking it again removes it, and
+      // if that was the active sheet, the first remaining member takes over —
+      // a group always has an active sheet, as in Excel.
+      const adding = !selectedTabs.includes(i);
+      if (adding) {
+        setSelectedTabs((cur) => (cur.includes(i) ? cur : [...cur, i].sort((a, b) => a - b)));
+        setSheetIndex(i);
+      } else {
+        const rest = selectedTabs.filter((x) => x !== i);
+        if (rest.length) {
+          setSelectedTabs(rest);
+          if (i === index) setSheetIndex(rest[0]);
+        }
+      }
+      return;
+    }
+    if (e.shiftKey) {
+      const anchor = tabAnchorRef.current;
+      const lo = Math.min(anchor, i);
+      const hi = Math.max(anchor, i);
+      const next = [];
+      for (let k = lo; k <= hi; k++) next.push(k);
+      setSelectedTabs(next);
+      setSheetIndex(i);
+      return;
+    }
+    tabAnchorRef.current = i;
+    setSelectedTabs([i]);
+    setSheetIndex(i);
   };
 
   const stats = useMemo(() => (sheet ? selectionStats(sheet, range) : null), [sheet, range]);
@@ -699,10 +795,10 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     '-',
     // Excel inserts as many rows as are selected, which is the only way to make
     // room for a block of data without repeating the command.
-    { label: selectedRows > 1 ? `${selectedRows}행 삽입` : '행 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'row', range.r1, selectedRows)) },
-    { label: selectedCols > 1 ? `${selectedCols}열 삽입` : '열 삽입', onClick: () => patchSheet((s) => structuralEdit(s, 'col', range.c1, selectedCols)) },
-    { label: selectedRows > 1 ? `${selectedRows}행 삭제` : '행 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'row', range.r1, -selectedRows)) },
-    { label: selectedCols > 1 ? `${selectedCols}열 삭제` : '열 삭제', onClick: () => patchSheet((s) => structuralEdit(s, 'col', range.c1, -selectedCols)) },
+    { label: selectedRows > 1 ? `${selectedRows}행 삽입` : '행 삽입', onClick: () => patchSheets((s) => structuralEdit(s, 'row', range.r1, selectedRows)) },
+    { label: selectedCols > 1 ? `${selectedCols}열 삽입` : '열 삽입', onClick: () => patchSheets((s) => structuralEdit(s, 'col', range.c1, selectedCols)) },
+    { label: selectedRows > 1 ? `${selectedRows}행 삭제` : '행 삭제', onClick: () => patchSheets((s) => structuralEdit(s, 'row', range.r1, -selectedRows)) },
+    { label: selectedCols > 1 ? `${selectedCols}열 삭제` : '열 삭제', onClick: () => patchSheets((s) => structuralEdit(s, 'col', range.c1, -selectedCols)) },
     '-',
     { label: '이 범위로 차트 만들기', onClick: () => setChartDialog({ mode: 'insert', rangeHint: rangeLabel(range) }), disabled: singleCell },
     '-',
@@ -713,23 +809,23 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     {
       label: '내용 지우기',
       shortcut: 'Delete',
-      onClick: () => patchSheet((s) => clearRange(s, rangeRefs(range), { keepStyle: true })),
+      onClick: () => patchSheets((s) => clearRange(s, rangeRefs(range), { keepStyle: true })),
     },
     {
       label: '서식까지 지우기',
       danger: true,
-      onClick: () => patchSheet((s) => clearRange(s, rangeRefs(range), { keepStyle: false })),
+      onClick: () => patchSheets((s) => clearRange(s, rangeRefs(range), { keepStyle: false })),
     },
   ];
 
   const colMenu = (c) => [
     {
       label: selectedCols > 1 ? `왼쪽에 ${selectedCols}열 삽입` : '왼쪽에 열 삽입',
-      onClick: () => patchSheet((s) => structuralEdit(s, 'col', c, selectedCols)),
+      onClick: () => patchSheets((s) => structuralEdit(s, 'col', c, selectedCols)),
     },
     {
       label: selectedCols > 1 ? `${selectedCols}열 삭제` : '열 삭제',
-      onClick: () => patchSheet((s) => structuralEdit(s, 'col', c, -selectedCols)),
+      onClick: () => patchSheets((s) => structuralEdit(s, 'col', c, -selectedCols)),
     },
     '-',
     { label: '너비 자동 맞춤', onClick: () => patchSheet((s) => setColWidth(s, c, autoFitColumn(s, c, used?.maxRow ?? 20))) },
@@ -743,11 +839,11 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   const rowMenu = (r) => [
     {
       label: selectedRows > 1 ? `위에 ${selectedRows}행 삽입` : '위에 행 삽입',
-      onClick: () => patchSheet((s) => structuralEdit(s, 'row', r, selectedRows)),
+      onClick: () => patchSheets((s) => structuralEdit(s, 'row', r, selectedRows)),
     },
     {
       label: selectedRows > 1 ? `${selectedRows}행 삭제` : '행 삭제',
-      onClick: () => patchSheet((s) => structuralEdit(s, 'row', r, -selectedRows)),
+      onClick: () => patchSheets((s) => structuralEdit(s, 'row', r, -selectedRows)),
     },
     '-',
     { label: '높이 자동 맞춤', onClick: () => patchSheet((s) => setRowHeight(s, r, autoFitRow(s, r, used?.maxCol ?? 12))) },
@@ -764,10 +860,15 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     },
     { label: '복제', onClick: () => duplicateSheet(at) },
     '-',
-    { label: '왼쪽으로 이동', onClick: () => moveSheet(at, at - 1), disabled: at === 0 },
-    { label: '오른쪽으로 이동', onClick: () => moveSheet(at, at + 1), disabled: at === sheets.length - 1 },
+    { label: '왼쪽으로 이동', onClick: () => moveSheets(at, at - 1), disabled: at === 0 },
+    { label: '오른쪽으로 이동', onClick: () => moveSheets(at, at + 1), disabled: at === sheets.length - 1 },
     '-',
-    { label: '삭제', danger: true, disabled: sheets.length <= 1, onClick: () => deleteSheet(at) },
+    {
+      label: group?.includes(at) ? `선택한 시트 ${group.length}개 삭제` : '삭제',
+      danger: true,
+      disabled: sheets.length <= 1 && !group,
+      onClick: () => deleteSheet(at),
+    },
   ];
 
   /* --------------------------------------------------------------- ribbon */
@@ -931,12 +1032,12 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           <Group label="셀">
             <div className="rcol">
               <div className="rrow">
-                <Btn small icon="+" label="행" title="행 삽입" onClick={() => patchSheet((s) => structuralEdit(s, 'row', sel.row, 1))} />
-                <Btn small icon="−" label="행" title="행 삭제" onClick={() => patchSheet((s) => structuralEdit(s, 'row', sel.row, -1))} />
+                <Btn small icon="+" label="행" title="행 삽입" onClick={() => patchSheets((s) => structuralEdit(s, 'row', sel.row, 1))} />
+                <Btn small icon="−" label="행" title="행 삭제" onClick={() => patchSheets((s) => structuralEdit(s, 'row', sel.row, -1))} />
               </div>
               <div className="rrow">
-                <Btn small icon="+" label="열" title="열 삽입" onClick={() => patchSheet((s) => structuralEdit(s, 'col', sel.col, 1))} />
-                <Btn small icon="−" label="열" title="열 삭제" onClick={() => patchSheet((s) => structuralEdit(s, 'col', sel.col, -1))} />
+                <Btn small icon="+" label="열" title="열 삽입" onClick={() => patchSheets((s) => structuralEdit(s, 'col', sel.col, 1))} />
+                <Btn small icon="−" label="열" title="열 삭제" onClick={() => patchSheets((s) => structuralEdit(s, 'col', sel.col, -1))} />
               </div>
             </div>
           </Group>
@@ -963,7 +1064,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
               icon="⌦"
               label="지우기"
               title="Delete"
-              onClick={() => patchSheet((s) => clearRange(s, rangeRefs(range), { keepStyle: true }))}
+              onClick={() => patchSheets((s) => clearRange(s, rangeRefs(range), { keepStyle: true }))}
             />
           </Group>
         </>
@@ -1151,6 +1252,11 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           )}
           {showFormulas && <span>수식 보기</span>}
           {(sheet.charts?.length ?? 0) > 0 && <span>차트 {sheet.charts.length}개</span>}
+          {group && (
+            <span>
+              그룹 {group.length}개 시트 — 편집이 모두에 적용됩니다
+            </span>
+          )}
           <span className="statusbar__spacer" />
           <ZoomSlider value={zoom} onChange={setZoom} min={0.5} max={2} />
         </>
@@ -1249,16 +1355,20 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           {sheets.map((s, i) => (
             <button
               key={s.id ?? i}
-              className={`sheettab${tabDragOver === i && tabDragFrom !== i ? ' is-drop' : ''}`}
+              className={[
+                'sheettab',
+                tabDragOver === i && tabDragFrom !== i ? 'is-drop' : '',
+                group?.includes(i) ? 'is-multi' : '',
+              ].filter(Boolean).join(' ')}
               aria-current={i === index}
-              onClick={() => setSheetIndex(i)}
+              onClick={(e) => selectTab(i, e)}
               onDoubleClick={() => {
                 setSheetIndex(i);
                 setRenameDialog({ name: s.name });
               }}
               onContextMenu={(e) => ctx.open(e, sheetTabMenu(i))}
               /* Dragging a sheet tab is how a workbook gets reordered in Excel;
-                 the right-click menu is the fallback, not the way. */
+                 with several tabs selected, the whole group moves together. */
               draggable
               onDragStart={() => setTabDragFrom(i)}
               onDragOver={(e) => {
@@ -1268,7 +1378,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
               onDragLeave={() => setTabDragOver((v) => (v === i ? null : v))}
               onDrop={(e) => {
                 e.preventDefault();
-                if (tabDragFrom !== null && tabDragFrom !== i) moveSheet(tabDragFrom, i);
+                if (tabDragFrom !== null && tabDragFrom !== i) moveSheets(tabDragFrom, i);
                 setTabDragFrom(null);
                 setTabDragOver(null);
               }}
@@ -1276,7 +1386,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
                 setTabDragFrom(null);
                 setTabDragOver(null);
               }}
-              title={`${s.name} — 두 번 누르면 이름 변경, 끌어서 순서 변경, 우클릭으로 메뉴`}
+              title={`${s.name} — 두 번 누르면 이름 변경, Ctrl+클릭으로 여러 탭 선택, Shift+클릭으로 구간 선택, 끌어서 순서 변경, 우클릭으로 메뉴`}
             >
               {s.name}
             </button>

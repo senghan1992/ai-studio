@@ -129,7 +129,9 @@ export const api = {
 
   listProjects: () => call('list_projects', {}, { path: '/projects' }),
 
-  createProject: (type, title, sample = true) =>
+  /** Create a blank document. `sample` is kept for the tests and the seed
+   *  script, but the UI always passes `false` — a new document must be empty. */
+  createProject: (type, title, sample = false) =>
     call(
       'create_project',
       { request: { type, title, sample } },

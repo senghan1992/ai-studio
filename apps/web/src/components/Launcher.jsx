@@ -66,7 +66,8 @@ export default function Launcher({ onOpen, onError, notify }) {
     if (!creating) return;
     setBusy(true);
     try {
-      const project = await api.createProject(creating.type, title.trim() || undefined);
+      // 새 문서는 항상 빈 문서로 시작합니다 — 견본 데이터는 넣지 않습니다.
+      const project = await api.createProject(creating.type, title.trim() || undefined, false);
       setCreating(null);
       setTitle('');
       onOpen(project.folder, project.type);
