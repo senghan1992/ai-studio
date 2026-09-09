@@ -236,6 +236,45 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
     [patchSheets, sel.row, sel.col, activeRef, move]
   );
 
+  /**
+   * Live keystrokes inside the cell editor — lifted up so a click-and-drag can
+   * insert a reference exactly where the caret is.
+   */
+  const handleEditChange = useCallback((value, caret) => {
+    setEditing((ed) => (ed ? { ...ed, value, caret } : ed));
+  }, []);
+
+  /**
+   * Excel's click-and-drag reference feed, the heart of building a formula
+   * with the mouse: while a formula is being edited, pressing on a cell
+   * inserts its reference at the caret, and dragging grows the same fragment
+   * in place — the mousedown inserts the anchor cell, each move replaces that
+   * fragment with the live range (`=SUM(B2` → `=SUM(B2:D5`). Mouse-up closes
+   * the fragment so the next press starts a fresh reference, and typing can
+   * carry on right after the inserted text.
+   */
+  const handleRefDrag = useCallback((rect) => {
+    setEditing((ed) => {
+      if (!ed) return ed;
+      const single = rect.r1 === rect.r2 && rect.c1 === rect.c2;
+      const ref = single
+        ? toRef(rect.c1, rect.r1)
+        : `${toRef(rect.c1, rect.r1)}:${toRef(rect.c2, rect.r2)}`;
+      if (ed.dragRef) {
+        const { start } = ed.dragRef;
+        const value = ed.value.slice(0, start) + ref + ed.value.slice(start + ed.dragRef.len);
+        return { ...ed, value, caret: start + ref.length, dragRef: { start, len: ref.length } };
+      }
+      const at = ed.caret ?? ed.value.length;
+      const value = ed.value.slice(0, at) + ref + ed.value.slice(at);
+      return { ...ed, value, caret: at + ref.length, dragRef: { start: at, len: ref.length } };
+    });
+  }, []);
+
+  const handleRefDragEnd = useCallback(() => {
+    setEditing((ed) => (ed?.dragRef ? { ...ed, dragRef: null } : ed));
+  }, []);
+
   /* -------------------------------------------------------------- commands */
 
   const copySelection = useCallback(
@@ -512,7 +551,8 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       // command further down, so it must not be swallowed here.
       if ((e.key === 'Enter' && !mod) || e.key === 'F2') {
         e.preventDefault();
-        setEditing({ value: editValue(activeCell) });
+        const v = editValue(activeCell);
+        setEditing({ value: v, caret: v.length });
         return;
       }
       // PageDown / PageUp move a screenful, as they do in Excel.
@@ -656,7 +696,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       // A printable character starts an edit and replaces the cell, like Excel.
       if (!mod && !e.altKey && e.key.length === 1) {
         e.preventDefault();
-        setEditing({ value: e.key });
+        setEditing({ value: e.key, caret: 1 });
       }
     };
     window.addEventListener('keydown', onKey);
@@ -1120,7 +1160,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
             <Group key={group.label} label={group.label}>
               <Select
                 value=""
-                onChange={(name) => name && setEditing({ value: `=${name}(` })}
+                onChange={(name) => name && setEditing({ value: `=${name}(`, caret: name.length + 2 })}
                 options={[{ value: '', label: '선택…' }, ...group.names.map((n) => ({ value: n, label: n }))]}
                 title={`${group.label} 함수`}
                 width={104}
@@ -1329,10 +1369,14 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           currentHit={findHits?.[find?.at ?? -1]?.ref}
           onEditStart={(row, col) => {
             setSel({ row, col, row2: row, col2: col });
-            setEditing({ value: editValue(sheet.cells[toRef(col, row)]) });
+            const v = editValue(sheet.cells[toRef(col, row)]);
+            setEditing({ value: v, caret: v.length });
           }}
           onCommit={commitCell}
           onEditCancel={() => setEditing(null)}
+          onEditChange={handleEditChange}
+          onRefDrag={handleRefDrag}
+          onRefDragEnd={handleRefDragEnd}
           onFill={doFill}
           onResizeCol={(c, width) => patchSheet((s) => setColWidth(s, c, width))}
           onResizeRow={(r, height) => patchSheet((s) => setRowHeight(s, r, height))}

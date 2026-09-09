@@ -24,6 +24,7 @@ const ROW_HEAD_W = 44;
 export default function Sheet({
   sheet, sel, onSelChange, editing, showFormulas, zoom = 1,
   onEditStart, onCommit, onEditCancel,
+  onEditChange, onRefDrag, onRefDragEnd,
   onFill, onResizeCol, onResizeRow, onAutoFitCol, onAutoFitRow, onContextMenu,
   findHits, currentHit,
   selectedChartId, onSelectChart, onMoveChart, onEditChart, onDeleteChart,
@@ -32,6 +33,10 @@ export default function Sheet({
   const [dragSelect, setDragSelect] = useState(false);
   /** `'row'` or `'col'` while a drag across the headers is selecting. */
   const [headerDrag, setHeaderDrag] = useState(null);
+  /** The range being fed into a formula by click-and-drag (Excel's blue frame). */
+  const [refDrag, setRefDrag] = useState(null);
+  /** The anchor cell of a live formula reference-drag; `null` when idle. */
+  const refDragAnchor = useRef(null);
   const [fillTo, setFillTo] = useState(null);
   const [resizing, setResizing] = useState(null);
 
@@ -210,6 +215,17 @@ export default function Sheet({
   }, [range, z, sheet.colWidths, sheet.rowHeights]);
 
   const enterCell = (r, c) => {
+    // Excel: while a formula is being edited, dragging over cells feeds the
+    // growing range into the text instead of moving the selection.
+    if (refDragAnchor.current) {
+      const a = refDragAnchor.current;
+      if (a.r !== r || a.c !== c) {
+        const next = normalizeRange({ row: a.r, col: a.c, row2: r, col2: c });
+        setRefDrag({ r1: next.r1, c1: next.c1, r2: next.r2, c2: next.c2 });
+        onRefDrag?.(next);
+      }
+      return;
+    }
     const current = fillRef.current;
     if (current) {
       const target = fillTarget(current.source, r, c);
@@ -220,6 +236,22 @@ export default function Sheet({
     if (dragSelect) onSelChange({ ...sel, row2: r, col2: c });
   };
 
+  /** The reference-drag never outlives the edit that armed it. */
+  useEffect(() => {
+    if (!editing) {
+      refDragAnchor.current = null;
+      setRefDrag(null);
+    }
+  }, [editing]);
+
+  const closeRefDrag = () => {
+    if (refDragAnchor.current) {
+      refDragAnchor.current = null;
+      setRefDrag(null);
+      onRefDragEnd?.();
+    }
+  };
+
   return (
     <div
       className="sheet"
@@ -227,10 +259,12 @@ export default function Sheet({
       onMouseUp={() => {
         setDragSelect(false);
         setHeaderDrag(null);
+        closeRefDrag();
       }}
       onMouseLeave={() => {
         setDragSelect(false);
         setHeaderDrag(null);
+        closeRefDrag();
       }}
     >
       <div style={{ position: 'relative', width: totalWidth }}>
@@ -264,6 +298,10 @@ export default function Sheet({
                   style={frozen ? { left: colOffset[c], zIndex: 5 } : undefined}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
+                    // An edit in progress is committed before the selection
+                    // moves — otherwise the click removes the editor and the
+                    // blur never reaches React, losing the text.
+                    if (editing) onCommit(editing.value, null);
                     if (e.shiftKey) onSelChange({ ...sel, row2: visibleRows - 1, col2: c });
                     else onSelChange({ row: 0, col: c, row2: visibleRows - 1, col2: c });
                     setHeaderDrag('col');
@@ -309,6 +347,10 @@ export default function Sheet({
                   style={{ left: 0, ...(frozenRow ? { top: rowOffset[r], zIndex: 4 } : {}) }}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
+                    // An edit in progress is committed before the selection
+                    // moves — otherwise the click removes the editor and the
+                    // blur never reaches React, losing the text.
+                    if (editing) onCommit(editing.value, null);
                     // Shift extends from the anchor row, and a plain press
                     // starts a drag across the row headers — both of which are
                     // how a block of rows gets selected before an insert.
@@ -359,6 +401,8 @@ export default function Sheet({
                   const isEditing = editing && isSelected;
                   const frozenCol = c < frozenCols;
                   const isFillCorner = !editing && r === range.r2 && c === range.c2;
+                  const inRefDrag =
+                    refDrag && r >= refDrag.r1 && r <= refDrag.r2 && c >= refDrag.c1 && c <= refDrag.c2;
 
                   return (
                     <td
@@ -374,6 +418,7 @@ export default function Sheet({
                         spillRefs.has(ref) && !isSelected ? 'is-spill' : '',
                         inFillPreview(r, c) ? 'is-fillpreview' : '',
                         frozenCol || frozenRow ? 'is-frozen' : '',
+                        inRefDrag ? 'is-refdrag' : '',
                       ].filter(Boolean).join(' ')}
                       style={{
                         ...cellVisualStyle(cell),
@@ -384,6 +429,28 @@ export default function Sheet({
                       }}
                       onMouseDown={(e) => {
                         if (e.button !== 0) return;
+                        const buildingFormula =
+                          editing && String(editing.value).trimStart().startsWith('=');
+                        if (editing) {
+                          // Excel: a press while editing never loses the text.
+                          // A formula keeps the editor focused and feeds a
+                          // reference into it; a plain value is committed
+                          // first, then the press becomes a normal selection
+                          // drag. preventDefault keeps the blur from racing
+                          // the selection change — a blur on a detached
+                          // editor never reaches React and silently drops
+                          // the cell.
+                          e.preventDefault();
+                          if (r === sel.row && c === sel.col) return;
+                          if (buildingFormula) {
+                            refDragAnchor.current = { r, c };
+                            const rect = { r1: r, c1: c, r2: r, c2: c };
+                            setRefDrag(rect);
+                            onRefDrag?.(rect);
+                            return;
+                          }
+                          onCommit(editing.value, null);
+                        }
                         setDragSelect(true);
                         onSelChange(
                           e.shiftKey
@@ -395,13 +462,20 @@ export default function Sheet({
                       onDoubleClick={() => onEditStart(r, c)}
                       onContextMenu={(e) => {
                         if (!(r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2)) {
+                          if (editing) onCommit(editing.value, null);
                           onSelChange({ row: r, col: c, row2: r, col2: c });
                         }
                         onContextMenu?.(e, { kind: 'cell', row: r, col: c });
                       }}
                     >
                       {isEditing ? (
-                        <CellEditor initial={editing.value} onCommit={onCommit} onCancel={onEditCancel} />
+                        <CellEditor
+                          value={editing.value}
+                          caret={editing.caret}
+                          onChange={onEditChange}
+                          onCommit={onCommit}
+                          onCancel={onEditCancel}
+                        />
                       ) : (
                         <CellView
                           cell={cell}
@@ -539,16 +613,21 @@ function cellVisualStyle(cell) {
  * in the cell — the way every two-line column heading in every workbook is
  * made. Enter still commits, so it behaves like a single-line box until asked
  * not to.
+ *
+ * Fully controlled from the GridEditor (`value`/`caret` lifted on every
+ * keystroke) so that a click-and-drag over the grid can splice a reference
+ * into the text exactly where the caret is — the Excel formula-building
+ * gesture. The caret is re-applied after an external splice; typing keeps the
+ * native caret untouched because the value prop only differs on splices.
  */
-function CellEditor({ initial, onCommit, onCancel }) {
+function CellEditor({ value, caret, onChange, onCommit, onCancel }) {
   const ref = useRef(null);
-  const [value, setValue] = useState(initial ?? '');
 
   useLayoutEffect(() => {
     const el = ref.current;
     el?.focus();
-    el?.setSelectionRange(el.value.length, el.value.length);
-  }, []);
+    el?.setSelectionRange(caret ?? el.value.length, caret ?? el.value.length);
+  }, [caret]);
 
   return (
     <textarea
@@ -556,7 +635,8 @@ function CellEditor({ initial, onCommit, onCancel }) {
       className="cell__editor"
       rows={1}
       value={value}
-      onChange={(e) => setValue(e.target.value)}
+      onChange={(e) => onChange?.(e.target.value, e.target.selectionStart)}
+      onSelect={(e) => onChange?.(e.target.value, e.target.selectionStart)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' && e.altKey) {
           // 셀 안에서 줄 바꾸기.
@@ -564,7 +644,7 @@ function CellEditor({ initial, onCommit, onCancel }) {
           const el = e.currentTarget;
           const at = el.selectionStart;
           const next = `${value.slice(0, at)}\n${value.slice(el.selectionEnd)}`;
-          setValue(next);
+          onChange?.(next, at + 1);
           requestAnimationFrame(() => ref.current?.setSelectionRange(at + 1, at + 1));
           return;
         }
@@ -588,7 +668,7 @@ function CellEditor({ initial, onCommit, onCancel }) {
           const next = cycleRefLocks(value, e.currentTarget.selectionStart);
           if (!next) return;
           e.preventDefault();
-          setValue(next.value);
+          onChange?.(next.value, next.caret);
           requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
         }
       }}

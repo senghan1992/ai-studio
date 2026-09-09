@@ -860,6 +860,12 @@ td.is-spill { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, 
 }
 
 td.is-fillpreview { background: rgba(16, 124, 65, .14); outline: 1px dashed var(--grid); }
+/* The range being fed into a formula by click-and-drag — Excel's blue build
+   frame while the reference is live in the text. */
+td.is-refdrag {
+  background: rgba(68, 114, 196, .13);
+  box-shadow: inset 0 0 0 1.5px #4472c4;
+}
 
 .sheet th.is-frozen, .sheet td.is-frozen { z-index: 2; }
 .sheet td.is-frozen { background: var(--surface); }
