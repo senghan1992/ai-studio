@@ -14,6 +14,7 @@ import {
 } from '../components/ui.jsx';
 import SheetView from './Sheet.jsx';
 import PrintSheet from './PrintSheet.jsx';
+import { functionSuggestFor, default as FunctionSuggestList } from './FunctionSuggest.jsx';
 import {
   setCellInput, patchCells, paintFormat, clearRange, structuralEdit,
   rangeToTsv, rangeToFormulaTsv, pasteTsv,
@@ -1557,29 +1558,68 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
 function FormulaInput({ value, onCommit, ghost = false }) {
   const [draft, setDraft] = useState(value ?? '');
-  const [hint, setHint] = useState(null);
+  const [caret, setCaret] = useState(0);
+  /** Excel's autocomplete — same code the cell editor uses. */
+  const [sugIndex, setSugIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const inputRef = useRef(null);
 
   useEffect(() => setDraft(value ?? ''), [value]);
+
+  const sug = useMemo(() => functionSuggestFor(draft, caret), [draft, caret]);
+  const open = sug && !dismissed;
+  useEffect(() => setSugIndex(0), [open]);
+
+  const pick = (name) => {
+    if (!sug) return;
+    const next = `${draft.slice(0, sug.start)}${name}(${draft.slice(caret)}`;
+    setDraft(next);
+    setCaret(sug.start + name.length + 1);
+    setDismissed(false);
+    requestAnimationFrame(() => inputRef.current?.setSelectionRange(sug.start + name.length + 1, sug.start + name.length + 1));
+  };
 
   return (
     <div style={{ flex: 1, position: 'relative' }}>
       <input
+        ref={inputRef}
         className={`formulabar__input${ghost ? ' formulabar__input--ghost' : ''}`}
         title={ghost ? '스필된 값 — 수식은 앵커 셀의 것입니다' : undefined}
         value={draft}
         onChange={(e) => {
           setDraft(e.target.value);
-          setHint(suggestFunction(e.target.value));
+          setCaret(e.target.selectionStart);
+          setDismissed(false);
+        }}
+        onSelect={(e) => {
+          setCaret(e.target.selectionStart);
+          setDismissed(false);
         }}
         onKeyDown={(e) => {
+          if (open) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault();
+              const len = sug.matches.length;
+              setSugIndex((i) => (e.key === 'ArrowDown' ? (i + 1) % len : (i - 1 + len) % len));
+              return;
+            }
+            if (e.key === 'Enter' || e.key === 'Tab') {
+              e.preventDefault();
+              pick(sug.matches[sugIndex]);
+              return;
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              setDismissed(true);
+              return;
+            }
+          }
           if (e.key === 'Enter') {
             e.preventDefault();
             onCommit(draft);
-            setHint(null);
           } else if (e.key === 'Escape') {
             e.preventDefault();
             setDraft(value ?? '');
-            setHint(null);
             e.currentTarget.blur();
           } else if (e.key === 'F4') {
             // Same $ cycle as in the cell, because half of formula writing
@@ -1588,26 +1628,27 @@ function FormulaInput({ value, onCommit, ghost = false }) {
             if (!next) return;
             e.preventDefault();
             setDraft(next.value);
+            setCaret(next.caret);
             const el = e.currentTarget;
             requestAnimationFrame(() => el.setSelectionRange(next.caret, next.caret));
           }
         }}
-        onBlur={() => setHint(null)}
         placeholder="값 또는 =수식"
         aria-label="수식 입력"
         spellCheck={false}
+        onBlur={() => setDismissed(true)}
       />
-      {hint && <div className="fxhint">{hint}</div>}
+      {open && (
+        <FunctionSuggestList
+          anchorRef={inputRef}
+          sug={sug}
+          index={sugIndex}
+          onHover={setSugIndex}
+          onPick={pick}
+        />
+      )}
     </div>
   );
-}
-
-function suggestFunction(text) {
-  const m = String(text).match(/([A-Za-z]{2,})$/);
-  if (!m || !text.startsWith('=')) return null;
-  const prefix = m[1].toUpperCase();
-  const matches = FUNCTION_NAMES.filter((n) => n.startsWith(prefix)).slice(0, 6);
-  return matches.length ? matches.join('  ') : null;
 }
 
 /* ------------------------------------------------------------------ utils */

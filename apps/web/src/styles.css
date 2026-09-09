@@ -984,6 +984,45 @@ mark.findhit.is-current { background: #b45309; color: #fff; }
   z-index: 10; color: var(--ink-2);
 }
 
+/* Excel's formula autocomplete — the dropdown pinned under the caret's cell
+   while a function name is being typed. Fixed to the viewport so it floats
+   over headers and frozen panes; one highlight follows arrows/hover. */
+.fnsuggest {
+  position: fixed;
+  min-width: 200px;
+  max-width: 280px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: var(--shadow-2);
+  padding: 3px;
+  z-index: 200;
+  font-size: 11.5px;
+  font-family: var(--mono);
+}
+.fnsuggest__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fnsuggest__item.is-active,
+.fnsuggest__item:hover {
+  background: rgba(68, 114, 196, .12);
+  color: #2f5795;
+}
+
 /* ================================================================ images */
 
 .imgdrop {

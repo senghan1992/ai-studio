@@ -3,6 +3,7 @@ import { indexToCol, toRef, parseRange, displayValue, dependencies, LIMITS } fro
 import { normalizeRange, mergeCovering, fillTarget, cycleRefLocks } from './gridOps.js';
 import SheetCharts from './SheetCharts.jsx';
 import { borderStyles } from '../lib/borderStyle.js';
+import { functionSuggestFor, default as FunctionSuggestList } from './FunctionSuggest.jsx';
 
 const ROW_BUFFER = 24;
 const MIN_VISIBLE_ROWS = 32;
@@ -619,9 +620,29 @@ function cellVisualStyle(cell) {
  * into the text exactly where the caret is — the Excel formula-building
  * gesture. The caret is re-applied after an external splice; typing keeps the
  * native caret untouched because the value prop only differs on splices.
+ *
+ * While a function name is being typed after `=`, the Excel autocomplete
+ * dropdown offers the library; arrows move the highlight, Enter/Tab insert
+ * `NAME(`, Escape closes the list (once) or the edit (twice). Tab only
+ * commits the cell when no list is showing.
  */
 function CellEditor({ value, caret, onChange, onCommit, onCancel }) {
   const ref = useRef(null);
+  const [sugIndex, setSugIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+
+  const sug = useMemo(() => functionSuggestFor(value, caret), [value, caret]);
+  const open = sug && !dismissed;
+
+  // The highlight starts at the top every time the list opens.
+  useEffect(() => setSugIndex(0), [open]);
+
+  const pick = (name) => {
+    if (!sug) return;
+    const next = `${value.slice(0, sug.start)}${name}(${value.slice(caret)}`;
+    onChange?.(next, sug.start + name.length + 1);
+    setDismissed(false);
+  };
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -630,52 +651,91 @@ function CellEditor({ value, caret, onChange, onCommit, onCancel }) {
   }, [caret]);
 
   return (
-    <textarea
-      ref={ref}
-      className="cell__editor"
-      rows={1}
-      value={value}
-      onChange={(e) => onChange?.(e.target.value, e.target.selectionStart)}
-      onSelect={(e) => onChange?.(e.target.value, e.target.selectionStart)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && e.altKey) {
-          // 셀 안에서 줄 바꾸기.
-          e.preventDefault();
-          const el = e.currentTarget;
-          const at = el.selectionStart;
-          const next = `${value.slice(0, at)}\n${value.slice(el.selectionEnd)}`;
-          onChange?.(next, at + 1);
-          requestAnimationFrame(() => ref.current?.setSelectionRange(at + 1, at + 1));
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          onCommit(value, e.shiftKey ? 'up' : 'down');
-          return;
-        }
-        if (e.key === 'Tab') {
-          e.preventDefault();
-          onCommit(value, e.shiftKey ? 'left' : 'right');
-          return;
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          onCancel();
-          return;
-        }
-        // F4 cycles the $ locks on the reference under the caret, as in Excel.
-        if (e.key === 'F4') {
-          const next = cycleRefLocks(value, e.currentTarget.selectionStart);
-          if (!next) return;
-          e.preventDefault();
-          onChange?.(next.value, next.caret);
-          requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
-        }
-      }}
-      onBlur={() => onCommit(value, null)}
-      spellCheck={false}
-      wrap="off"
-    />
+    <>
+      <textarea
+        ref={ref}
+        className="cell__editor"
+        rows={1}
+        value={value}
+        onChange={(e) => {
+          setDismissed(false);
+          onChange?.(e.target.value, e.target.selectionStart);
+        }}
+        onSelect={(e) => {
+          setDismissed(false);
+          onChange?.(e.target.value, e.target.selectionStart);
+        }}
+        onKeyDown={(e) => {
+          if (open) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault();
+              const len = sug.matches.length;
+              setSugIndex((i) =>
+                e.key === 'ArrowDown' ? (i + 1) % len : (i - 1 + len) % len
+              );
+              return;
+            }
+            // With the list showing, Enter/Tab take the highlighted function
+            // instead of committing the cell — exactly Excel's trade.
+            if (e.key === 'Enter' || e.key === 'Tab') {
+              e.preventDefault();
+              pick(sug.matches[sugIndex]);
+              return;
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              setDismissed(true);
+              return;
+            }
+          }
+          if (e.key === 'Enter' && e.altKey) {
+            // 셀 안에서 줄 바꾸기.
+            e.preventDefault();
+            const el = e.currentTarget;
+            const at = el.selectionStart;
+            const next = `${value.slice(0, at)}\n${value.slice(el.selectionEnd)}`;
+            onChange?.(next, at + 1);
+            requestAnimationFrame(() => ref.current?.setSelectionRange(at + 1, at + 1));
+            return;
+          }
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            onCommit(value, e.shiftKey ? 'up' : 'down');
+            return;
+          }
+          if (e.key === 'Tab') {
+            e.preventDefault();
+            onCommit(value, e.shiftKey ? 'left' : 'right');
+            return;
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+            return;
+          }
+          // F4 cycles the $ locks on the reference under the caret, as in Excel.
+          if (e.key === 'F4') {
+            const next = cycleRefLocks(value, e.currentTarget.selectionStart);
+            if (!next) return;
+            e.preventDefault();
+            onChange?.(next.value, next.caret);
+            requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
+          }
+        }}
+        onBlur={() => onCommit(value, null)}
+        spellCheck={false}
+        wrap="off"
+      />
+      {open && (
+        <FunctionSuggestList
+          anchorRef={ref}
+          sug={sug}
+          index={sugIndex}
+          onHover={setSugIndex}
+          onPick={pick}
+        />
+      )}
+    </>
   );
 }
 
