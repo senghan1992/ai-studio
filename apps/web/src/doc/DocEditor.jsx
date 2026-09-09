@@ -555,6 +555,28 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
     [section]
   );
 
+  /*
+   * 메모장처럼 문서를 열자마자 마지막 글 문단 끝에 캐럿을 놓는다.
+   *
+   * "문단을 추가하고 나서야 칠 수 있다"는 느낌을 없애는 핵심 — 파일을 열면
+   * 바로 입력 상태다. 표·그림 같은 고정 블록은 건너뛰고, 위치는 스크롤을
+   * 움직이지 않게 그대로 둔다.
+   */
+  const openedOnce = useRef(false);
+  useEffect(() => {
+    if (openedOnce.current || !section) return;
+    const blocks = section.blocks ?? [];
+    const target = [...blocks]
+      .reverse()
+      .find((b) => !(TEXTLESS_TYPES.has(b.type) || isPageBreak(b)));
+    if (!target) return;
+    openedOnce.current = true;
+    setSelectedId(target.id);
+    setEditingId(target.id);
+    setFocusRequest({ id: target.id, caret: textOffsetForMd(target.md ?? '', String(target.md ?? '').length) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section]);
+
   /* ------------------------------------------------------------------ keys */
 
   useEffect(() => {
@@ -1463,10 +1485,7 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
               onMouseDown={(e) => e.target === e.currentTarget && setSelectedId(null)}
               onContextMenu={(e) => {
                 if (e.target !== e.currentTarget) return;
-                ctx.open(e, [
-                  { label: '문단 추가', onClick: () => insertBlock(section.blocks[section.blocks.length - 1]?.id, '') },
-                  { label: '인쇄', shortcut: 'Ctrl+P', onClick: () => window.print() },
-                ]);
+                ctx.open(e, [{ label: '인쇄', shortcut: 'Ctrl+P', onClick: () => window.print() }]);
               }}
             >
               <div
@@ -1538,23 +1557,13 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
                       setSelectedId(block.id);
                       ctx.open(e, blockMenu(block));
                     } else {
-                      ctx.open(e, [
-                        { label: '문단 추가', onClick: () => insertBlock(section.blocks[section.blocks.length - 1]?.id, '') },
-                        { label: '인쇄', shortcut: 'Ctrl+P', onClick: () => window.print() },
-                      ]);
+                      ctx.open(e, [{ label: '인쇄', shortcut: 'Ctrl+P', onClick: () => window.print() }]);
                     }
                   }}
                 />
 
-                {pageNumber === pages.length - 1 && (
-                  <button
-                    className="outline-item"
-                    style={{ marginTop: 12, color: 'var(--ink-3)' }}
-                    onClick={() => insertBlock(section.blocks[section.blocks.length - 1]?.id, '')}
-                  >
-                    + 문단 추가
-                  </button>
-                )}
+                {/* 문단은 Enter로 스스로 생긴다 — 끝에 추가 버튼을 두지 않는다.
+                    종이의 빈 곳을 두 번 누르면 그 자리에 새 문단이 열린다. */}
               </div>
               {/* Real running heads: they print, and their page tokens resolve
                   per page the way Word's fields do. */}
