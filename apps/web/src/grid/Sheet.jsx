@@ -326,9 +326,10 @@ export default function Sheet({
 
                   const ref = toRef(c, r);
                   const cell = sheet.cells[ref];
+                  const inSel =
+                    r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2;
                   const isSelected = r === sel.row && c === sel.col;
-                  const inRange =
-                    r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2 && !isSelected;
+                  const inRange = inSel && !isSelected;
                   const isEditing = editing && isSelected;
                   const frozenCol = c < frozenCols;
                   const isFillCorner = !editing && r === range.r2 && c === range.c2;
@@ -348,6 +349,10 @@ export default function Sheet({
                       ].filter(Boolean).join(' ')}
                       style={{
                         ...cellVisualStyle(cell),
+                        // The Excel selection frame — a dark rectangle around the
+                        // whole range, drawn from the cells on its four edges, so
+                        // a drag shows the block being framed as it grows.
+                        ...(inSel ? selectionFrame(r, c, range) : null),
                         ...(frozenCol ? { left: colOffset[c] } : {}),
                         ...(frozenRow ? { top: rowOffset[r] } : {}),
                         ...(frozenCol || frozenRow ? { position: 'sticky' } : {}),
@@ -492,6 +497,25 @@ function cellVisualStyle(cell) {
   const out = { ...borderStyles(style.border) };
   if (style.bg) out.background = style.bg;
   return out;
+}
+
+/**
+ * The Excel selection frame: one dark rectangle around the whole range.
+ *
+ * Each cell inside the range draws only the edges it sits on — the cells on
+ * the top/bottom rows and left/right columns — which keeps the frame a single
+ * outline around the block instead of a box per cell. A single-cell selection
+ * is simply all four edges, the classic active-cell box. The dark colour is
+ * what makes a drag read as "this block is selected" rather than text
+ * highlighting.
+ */
+function selectionFrame(r, c, range) {
+  const shadows = [];
+  if (r === range.r1) shadows.push('inset 0 2px 0 0 var(--ink)');
+  if (r === range.r2) shadows.push('inset 0 -2px 0 0 var(--ink)');
+  if (c === range.c1) shadows.push('inset 2px 0 0 0 var(--ink)');
+  if (c === range.c2) shadows.push('inset -2px 0 0 0 var(--ink)');
+  return shadows.length ? { boxShadow: shadows.join(', ') } : null;
 }
 
 /**
