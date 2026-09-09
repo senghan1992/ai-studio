@@ -58,6 +58,13 @@ export default function MarkdownEditor({
   const lastHtml = useRef(null);
   /** Caret offset to restore after the next re-render. */
   const pendingCaret = useRef(null);
+  /**
+   * An IME composition (한글 등) is in flight: the composed DOM must not be
+   * re-rendered or re-selected until it ends, or the browser re-anchors the
+   * composition at the block's start and every keystroke overwrites the first
+   * character. Edits are still read and committed — only the DOM waits.
+   */
+  const composing = useRef(false);
 
   const renderHtml = useCallback(
     (md) => {
@@ -81,6 +88,7 @@ export default function MarkdownEditor({
    * typing swaps its placeholder for a real caret).
    */
   useLayoutEffect(() => {
+    if (composing.current) return; // 조합이 살아있는 DOM은 브라우저 손에 맡긴다
     const next = renderHtml(value);
     if (String(value ?? '') === lastMd.current && next === lastHtml.current) return;
     lastMd.current = String(value ?? '');
@@ -91,7 +99,7 @@ export default function MarkdownEditor({
   /* Restore the caret after a structural re-render (typing `# ` + space, …). */
   useLayoutEffect(() => {
     const el = root.current;
-    if (pendingCaret.current == null || !el) return;
+    if (composing.current || pendingCaret.current == null || !el) return;
     const offset = pendingCaret.current;
     pendingCaret.current = null;
     if (el === document.activeElement) setCaretAtTextOffset(el, offset);
@@ -135,7 +143,7 @@ export default function MarkdownEditor({
     (el) => {
       const md = domToMd(el);
       // 문단 중간에서 완성된 제목(`# `)은 자기 블록으로 — 개요와 앵커의 경계를 지킨다.
-      if (mode === 'doc' && onAutoSplit) {
+      if (!composing.current && mode === 'doc' && onAutoSplit) {
         const at = mdMidHeadingOffset(md);
         if (at > 0) {
           onAutoSplit(md, at, caretMdOffset(el));
@@ -144,7 +152,9 @@ export default function MarkdownEditor({
       }
       const nextHtml = renderHtml(md);
       if (md === lastMd.current && nextHtml === lastHtml.current) return;
-      if (nextHtml !== lastHtml.current) {
+      // 조합 중에는 렌더링을 갈아끼우지 않는다 — 브라우저가 조합을 블록 첫머리에
+      // 다시 고정해 첫 글자만 계속 덮어쓰게 된다. 조합이 끝나면 다시 돌아온다.
+      if (!composing.current && nextHtml !== lastHtml.current) {
         pendingCaret.current = caretTextOffset(el);
         lastHtml.current = nextHtml;
         setHtml(nextHtml);
@@ -186,7 +196,7 @@ export default function MarkdownEditor({
     const el = root.current;
     if (!el || !(editable || alwaysEditable)) return;
     const mod = e.metaKey || e.ctrlKey;
-    const composing = e.nativeEvent?.isComposing;
+    const imeComposing = e.nativeEvent?.isComposing;
     // A window-level shortcut (Ctrl+U, Ctrl+L, heading style…) can rebuild the
     // paragraph from markdown; remember the caret so it can be put back. Plain
     // typing and arrows never capture — a stale capture would yank the caret
@@ -231,7 +241,7 @@ export default function MarkdownEditor({
       onIndent?.(e.shiftKey ? -1 : 1);
       return;
     }
-    if (e.key === 'Backspace' && !mod && !composing && mode === 'doc') {
+    if (e.key === 'Backspace' && !mod && !imeComposing && mode === 'doc') {
       const sel = window.getSelection();
       const collapsed = sel && sel.rangeCount > 0 && sel.getRangeAt(0).collapsed;
       if (collapsed && caretTextOffset(el) === 0) {
@@ -254,7 +264,7 @@ export default function MarkdownEditor({
       }
       return;
     }
-    if (e.key === 'Enter' && !composing) {
+    if (e.key === 'Enter' && !imeComposing) {
       if (mod) return; // Ctrl+Enter belongs to the window (page break)
       const md = lastMd.current;
       // Inside a code block Enter is just a newline, inserted literally so the
@@ -384,6 +394,15 @@ export default function MarkdownEditor({
       style={style}
       onInput={() => syncFromDom(root.current)}
       onKeyDown={onKeyDown}
+      onCompositionStart={() => {
+        composing.current = true;
+      }}
+      onCompositionEnd={() => {
+        composing.current = false;
+        // The composition committed its text; adopt it and heal the DOM now
+        // that re-rendering is safe again.
+        syncFromDom(root.current);
+      }}
       onPaste={onPaste}
       onBlur={() => editable && onExit?.()}
       onContextMenu={(e) => {

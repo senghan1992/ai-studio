@@ -53,6 +53,18 @@ export default function DocSurface({
   const lastCaretId = useRef(null);
   /** Caret (markdown offset in a block) to restore after a re-render. */
   const pending = useRef(null);
+  /**
+   * An IME composition (한글 등) is in flight.
+   *
+   * While it lives, the composed DOM must not be re-rendered by hand: the
+   * browser tracks the composition against the very nodes we would remove,
+   * and it silently re-anchors a broken composition at the paragraph's start
+   * — every keystroke then overwrites the first character until a space
+   * commits it. Text edits are still read and committed; only the DOM and the
+   * selection are left alone, and both are healed the moment the composition
+   * ends.
+   */
+  const composing = useRef(false);
   const [, setTick] = useState(0);
 
   const blocksById = useMemo(() => new Map(blocks.map((b) => [b.id, b])), [blocks]);
@@ -102,7 +114,7 @@ export default function DocSurface({
     const blockId = wrapper.dataset.blk;
     const body = wrapper.querySelector('.docblk__body') ?? wrapper;
     const md = domToMd(body);
-    if (autoSplit && onAutoSplit) {
+    if (!composing.current && autoSplit && onAutoSplit) {
       const at = mdMidHeadingOffset(md);
       if (at > 0) {
         onAutoSplit(blockId, md, at, caretMdOffset(body));
@@ -115,7 +127,7 @@ export default function DocSurface({
       onBlockChange?.(blockId, md);
     }
     const nextHtml = renderHtmlFor(md);
-    if (nextHtml !== body.innerHTML) {
+    if (!composing.current && nextHtml !== body.innerHTML) {
       const at = captureCaret(body);
       if (at !== null) {
         pending.current = { blockId, mdOffset: at };
@@ -264,7 +276,7 @@ export default function DocSurface({
     const rootEl = root.current;
     if (!rootEl) return;
     const mod = e.metaKey || e.ctrlKey;
-    const composing = e.nativeEvent?.isComposing;
+    const imeComposing = e.nativeEvent?.isComposing;
     const sel = window.getSelection();
     const node = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer : null;
     const wrapper = wrapperAt(node) ?? wrapperAt(e.target);
@@ -316,14 +328,14 @@ export default function DocSurface({
       onIndent?.(e.shiftKey ? -1 : 1);
       return;
     }
-    if (e.key === 'Backspace' && !mod && !composing) {
+    if (e.key === 'Backspace' && !mod && !imeComposing) {
       if (wrapper && body && sel && sel.rangeCount > 0 && sel.getRangeAt(0).collapsed && caretTextOffset(body) === 0) {
         e.preventDefault();
         onMergeBackward?.(wrapper.dataset.blk, caretMdOffset(body));
       }
       return;
     }
-    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !mod && !e.shiftKey) {
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !mod && !e.shiftKey && !imeComposing) {
       if (!wrapper || !body) return;
       const offset = caretTextOffset(body);
       if (e.key === 'ArrowUp' && offset === 0) {
@@ -338,7 +350,7 @@ export default function DocSurface({
       }
       return;
     }
-    if (e.key === 'Enter' && !composing) {
+    if (e.key === 'Enter' && !imeComposing) {
       if (mod) return; // Ctrl+Enter belongs to the window (page break)
       if (!wrapper || !block) return;
       const md = block.md;
@@ -466,12 +478,16 @@ export default function DocSurface({
       if (isTextless(block)) continue;
       const html = renderHtmlFor(block.md ?? '');
       if (html !== el.innerHTML) {
+        // 조합이 살아있는 동안에는 브라우저가 만든 DOM을 손대지 않는다.
+        // innerHTML 교체는 조합 앵커를 부수고, 다음 키 입력이 문단 첫머리부터
+        // 덮어쓰는 결과를 낳는다 — 조합이 끝나면 (onCompositionEnd) 정리된다.
+        if (composing.current) continue;
         const at = captureCaret(el);
         if (at !== null) pending.current = { blockId: block.id, mdOffset: at };
         el.innerHTML = html;
       }
     }
-    if (pending.current) {
+    if (!composing.current && pending.current) {
       const { blockId, mdOffset } = pending.current;
       pending.current = null;
       const el = elByBlock.current.get(blockId);
@@ -510,6 +526,16 @@ export default function DocSurface({
       spellCheck={false}
       onInput={onSurfaceInput}
       onKeyDown={onKeyDown}
+      onCompositionStart={() => {
+        composing.current = true;
+      }}
+      onCompositionEnd={() => {
+        composing.current = false;
+        // The composition committed its text; adopt it and heal the DOM now
+        // that re-rendering is safe again.
+        const wrapper = caretWrapper();
+        if (wrapper && root.current.contains(wrapper)) syncWrapper(wrapper);
+      }}
       onKeyUp={onKeyUp}
       onPaste={onPaste}
       onMouseDown={onMouseDown}
