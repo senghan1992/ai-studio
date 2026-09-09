@@ -188,6 +188,27 @@ export default function Sheet({
 
   const totalWidth = rowHeadW + Array.from({ length: visibleCols }, (_, c) => px(liveColWidth(c))).reduce((a, b) => a + b, 0);
 
+  /**
+   * The selection marquee's rectangle, in the table's own coordinates.
+   *
+   * Drawn as one overlay element instead of per-cell shadows: a single border
+   * keeps the four sides crisp and exactly as thick as Excel's, and rides
+   * above the cells' own grid lines, which would otherwise wash the frame out.
+   * Summing real column/row sizes keeps it glued to the cells at any zoom.
+   */
+  const selBox = useMemo(() => {
+    let left = rowHeadW;
+    let top = headerH;
+    let width = 0;
+    let height = 0;
+    for (let c = 0; c < range.c1; c++) left += px(colWidth(c));
+    for (let r = 0; r < range.r1; r++) top += px(rowHeight(r));
+    for (let c = range.c1; c <= range.c2; c++) width += px(colWidth(c));
+    for (let r = range.r1; r <= range.r2; r++) height += px(rowHeight(r));
+    return { left, top, width, height };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, z, sheet.colWidths, sheet.rowHeights]);
+
   const enterCell = (r, c) => {
     const current = fillRef.current;
     if (current) {
@@ -349,10 +370,6 @@ export default function Sheet({
                       ].filter(Boolean).join(' ')}
                       style={{
                         ...cellVisualStyle(cell),
-                        // The Excel selection frame — a dark rectangle around the
-                        // whole range, drawn from the cells on its four edges, so
-                        // a drag shows the block being framed as it grows.
-                        ...(inSel ? selectionFrame(r, c, range) : null),
                         ...(frozenCol ? { left: colOffset[c] } : {}),
                         ...(frozenRow ? { top: rowOffset[r] } : {}),
                         ...(frozenCol || frozenRow ? { position: 'sticky' } : {}),
@@ -406,6 +423,14 @@ export default function Sheet({
           })}
         </tbody>
       </table>
+
+      {/* Excel's selection frame: one dark rectangle around the whole range,
+          above the cells so its sides never lose to their grid lines. */}
+      <div
+        className="selframe"
+        aria-hidden="true"
+        style={{ left: selBox.left, top: selBox.top, width: selBox.width, height: selBox.height }}
+      />
 
       <SheetCharts
         sheet={sheet}
@@ -497,25 +522,6 @@ function cellVisualStyle(cell) {
   const out = { ...borderStyles(style.border) };
   if (style.bg) out.background = style.bg;
   return out;
-}
-
-/**
- * The Excel selection frame: one dark rectangle around the whole range.
- *
- * Each cell inside the range draws only the edges it sits on — the cells on
- * the top/bottom rows and left/right columns — which keeps the frame a single
- * outline around the block instead of a box per cell. A single-cell selection
- * is simply all four edges, the classic active-cell box. The dark colour is
- * what makes a drag read as "this block is selected" rather than text
- * highlighting.
- */
-function selectionFrame(r, c, range) {
-  const shadows = [];
-  if (r === range.r1) shadows.push('inset 0 2px 0 0 var(--ink)');
-  if (r === range.r2) shadows.push('inset 0 -2px 0 0 var(--ink)');
-  if (c === range.c1) shadows.push('inset 2px 0 0 0 var(--ink)');
-  if (c === range.c2) shadows.push('inset -2px 0 0 0 var(--ink)');
-  return shadows.length ? { boxShadow: shadows.join(', ') } : null;
 }
 
 /**

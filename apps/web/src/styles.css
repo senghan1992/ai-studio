@@ -492,6 +492,14 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 }
 
 .sheet { flex: 1; overflow: auto; background: var(--surface); position: relative; }
+/* The grid is a spreadsheet, not a text document: native text selection (and
+   the drag of a leftover selection it enables) must never start here, or a
+   second drag-select would turn into a browser drag and the mouse events that
+   grow the selection would stop arriving. Cells keep their own editing box. */
+.sheet, .sheet td, .sheet th {
+  -webkit-user-select: none;
+  user-select: none;
+}
 
 .sheet table { border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 
@@ -501,7 +509,7 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 }
 
 .sheet thead th {
-  position: sticky; top: 0; z-index: 3; background: var(--surface-3);
+  position: sticky; top: 0; z-index: 4; background: var(--surface-3);
   font-size: 11.5px; color: var(--ink-2); text-align: center;
   border-bottom: 1px solid var(--line);
 }
@@ -515,7 +523,7 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .sheet thead th:first-child { left: 0; z-index: 4; }
 
 .sheet tbody th {
-  position: sticky; left: 0; z-index: 2; background: var(--surface-3);
+  position: sticky; left: 0; z-index: 4; background: var(--surface-3);
   font-size: 11.5px; color: var(--ink-2); text-align: center;
   border-right: 1px solid var(--line); width: 44px; min-width: 44px;
 }
@@ -536,14 +544,27 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
    neighbour, which is what makes a narrow header column readable. */
 .cell--wrap { white-space: pre-wrap; word-break: break-word; align-items: flex-start; padding-top: 3px; }
 
-/* The selection frame itself is drawn inline by `selectionFrame` (a dark
-   rectangle around the range's outer edges); the in-range tint is what fills
-   the block the way Excel fills it. The active cell stays white. */
+/* The in-range tint fills the block the way Excel fills it (its light green
+   ≈ Excel's #E2EFDA over white); the active cell stays white. The dark frame
+   around the whole range is drawn by the `.selframe` overlay, not per cell. */
 td.is-inrange { background: rgba(16, 124, 65, .12); }
 td.is-dep { box-shadow: inset 0 0 0 1px #8764b8; }
 /* The dynamic-array frame: landing on an anchor or a spilled cell outlines the
    whole range the formula filled, as Excel frames a spill. */
 td.is-spill { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* Excel's selection marquee — one dark rectangle around the selected range.
+   Painted above the body cells (including the frozen strip, whose opaque
+   white background would otherwise swallow the frame) but under the headers
+   and the floating charts, so its sides stay crisp on top of grid lines. The
+   dark green is the selection green Excel draws; the active cell stays white
+   inside it. */
+.selframe {
+  position: absolute;
+  border: 2px solid color-mix(in srgb, var(--grid) 70%, #000);
+  pointer-events: none;
+  z-index: 3;
+}
 
 /* A textarea so Alt+Enter can put a newline in the cell, styled to look and
    behave like the single-line box it replaces. */
