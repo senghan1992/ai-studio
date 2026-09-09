@@ -548,6 +548,12 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
    ≈ Excel's #E2EFDA over white); the active cell stays white. The dark frame
    around the whole range is drawn by the `.selframe` overlay, not per cell. */
 td.is-inrange { background: rgba(16, 124, 65, .12); }
+/* Grid lines inside a selected range stay faintly visible, as in Excel — the
+   fill alone reads as one blob and the cell count is lost. Only the lines
+   between two selected cells are darkened; the range's outer edges keep the
+   normal light line beside the selection frame. */
+td.is-rightin { border-right-color: #c9c9c9; }
+td.is-belowin { border-bottom-color: #c9c9c9; }
 td.is-dep { box-shadow: inset 0 0 0 1px #8764b8; }
 /* The dynamic-array frame: landing on an anchor or a spilled cell outlines the
    whole range the formula filled, as Excel frames a spill. */

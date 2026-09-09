@@ -351,6 +351,11 @@ export default function Sheet({
                     r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2;
                   const isSelected = r === sel.row && c === sel.col;
                   const inRange = inSel && !isSelected;
+                  // The line toward the next column/row is an interior line of
+                  // the selection only when that neighbour is selected too —
+                  // darkened so the cell count stays readable inside the fill.
+                  const rightIn = inSel && c + 1 <= range.c2;
+                  const belowIn = inSel && r + 1 <= range.r2;
                   const isEditing = editing && isSelected;
                   const frozenCol = c < frozenCols;
                   const isFillCorner = !editing && r === range.r2 && c === range.c2;
@@ -363,6 +368,8 @@ export default function Sheet({
                       className={[
                         isSelected ? 'is-selected' : '',
                         inRange ? 'is-inrange' : '',
+                        rightIn ? 'is-rightin' : '',
+                        belowIn ? 'is-belowin' : '',
                         depRefs.has(ref) ? 'is-dep' : '',
                         spillRefs.has(ref) && !isSelected ? 'is-spill' : '',
                         inFillPreview(r, c) ? 'is-fillpreview' : '',
