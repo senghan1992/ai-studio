@@ -3,7 +3,7 @@ name: release
 # Builds the downloadable desktop app plus the headless server and attaches
 # them to a draft GitHub release.
 #
-#   git tag v0.1.0 && git push origin v0.1.0     → Windows build, draft release
+#   git tag v0.2.0 && git push origin v0.2.0     → Windows build, published release
 #   Actions → release → Run workflow              → pick platforms; give a tag to
 #                                                    publish, leave it empty to
 #                                                    only build artifacts
@@ -23,7 +23,7 @@ on:
         default: windows
         options: [windows, all]
       tag:
-        description: 'Release tag to create/attach to (e.g. v0.1.0). Empty = build only.'
+        description: 'Release tag to create/attach to (e.g. v0.2.0). Empty = build only.'
         type: string
         default: ''
 
@@ -127,7 +127,7 @@ jobs:
 
             서버로 쓰려면 `ai-studio-serve-*` 바이너리를 내려받아
             `ai-studio-serve --workspace ./documents --open` 을 실행하세요.
-          releaseDraft: true
+          releaseDraft: false
           includeUpdaterJson: false
 
       # Without a tag, tauri-action builds but uploads nowhere — keep the

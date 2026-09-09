@@ -174,9 +174,9 @@ Office처럼 잠깁니다 — 눌러도 아무 일이 없는 단추보다 잠긴
 
 | OS | 파일 | 실행 |
 |---|---|---|
-| Windows 10+ | `AI.Studio_0.1.0_x64-setup.exe` 또는 `.msi` | 설치 후 시작 메뉴에서 |
-| macOS 12+ | `AI.Studio_0.1.0_aarch64.dmg` (Intel은 `x64`) | 드래그해 설치 |
-| Linux | `ai-studio_0.1.0_amd64.AppImage` | `chmod +x` 후 실행. `.deb` · `.rpm`도 있습니다 |
+| Windows 10+ | `AI.Studio_0.2.0_x64-setup.exe` 또는 `.msi` | 설치 후 시작 메뉴에서 |
+| macOS 12+ | `AI.Studio_0.2.0_aarch64.dmg` (Intel은 `x64`) | 드래그해 설치 |
+| Linux | `ai-studio_0.2.0_amd64.AppImage` | `chmod +x` 후 실행. `.deb` · `.rpm`도 있습니다 |
 
 문서는 기본적으로 `~/Documents/AI Studio` 에 저장됩니다. 다른 위치를 쓰려면
 `AI_STUDIO_WORKSPACE=/경로` 를 지정하세요.
@@ -443,9 +443,8 @@ md/json과 `AI.md`가 다시 쓰입니다. 제목을 바꾸면 폴더 이름도 
 문단 맨 앞에서 치면 그 순간 제목이 되고, `-`+공백은 목록, `>`+공백은 인용, `---`은 구분선이
 됩니다 — Word의 자동 서식과 같은 방식입니다. 선택 문단은 왼쪽에 가는 색 막대만, 편집 중인
 문단만 아주 연한 배경입니다. 페이지의 빈 곳을 두 번 누르면 그 페이지 끝에 새 문단이 생기고
-바로 입력할 수 있습니다. `Enter`는 **같은 문단 안의 줄바꿈**이고(Word의 줄바꿈과 같아 긴
-문단을 자유롭게 이어 쓸 수 있습니다), **빈 줄에서 `Enter`를 누르면 새 문단**이 시작됩니다 —
-문단을 나누려면 엔터를 두 번 누르면 됩니다. 목록 안에서는 `Enter`가 다음 항목을 만들고, 빈
+바로 입력할 수 있습니다. 문단을 나누려면 `Enter`, 같은 문단 안에서 줄을 바꾸려면
+`Shift+Enter` — Word와 같습니다. 목록 안에서는 `Enter`가 다음 항목을 만들고, 빈
 항목에서 한 번 더 누르면 목록을 나가 새 문단이 됩니다. 문단 맨 앞에서 `Backspace`는 이전
 문단과 합칩니다(제목 맨 앞에서는 제목 서식만 벗겨서 합칩니다). **`↑`/`↓`는 문단 경계를
 넘어갑니다** — 눌러 두면 문서 전체를 훑을 수 있습니다. `Tab`/`Shift+Tab`은 들여쓰기이고,
@@ -686,14 +685,12 @@ npm run desktop:build
 ### ④ 만들어진 설치 파일 위치
 
 빌드가 끝나면 마지막 줄에 파일 경로가 출력됩니다. 위치는 OS별로 아래와 같습니다
-(`AI Studio_0.1.0_...` 부분의 숫자는 버전에 따라 다를 수 있습니다).
-
+(`AI Studio_0.2.0_...` 부분의 숫자는 버전에 따라 다를 수 있습니다).
 | OS | 만들어지는 파일 | 위치 |
 |---|---|---|
-| Windows | `AI Studio_0.1.0_x64-setup.exe`, `.msi` | `target/release/bundle/nsis/` · `target/release/bundle/msi/` |
-| macOS | `AI Studio_0.1.0_aarch64.dmg` | `target/release/bundle/dmg/` |
+| Windows | `AI Studio_0.2.0_x64-setup.exe`, `.msi` | `target/release/bundle/nsis/` · `target/release/bundle/msi/` |
+| macOS | `AI Studio_0.2.0_aarch64.dmg` | `target/release/bundle/dmg/` |
 | Linux | `.AppImage` · `.deb` · `.rpm` | `target/release/bundle/appimage/` 등 |
-
 이 파일을 두 번 눌러 설치하면 일반 프로그램처럼 시작 메뉴·런치패드·앱 목록에 들어갑니다.
 **사내에 나눠 줄 때는 이 파일 하나만 전달하면 됩니다** — 받는 사람은 Rust도 Node도 설치할
 필요가 없습니다.

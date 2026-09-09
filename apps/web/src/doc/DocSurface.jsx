@@ -351,6 +351,12 @@ export default function DocSurface({
         return;
       }
       e.preventDefault();
+      // Word-style soft return: Shift+Enter breaks the line inside the same
+      // paragraph instead of starting a new one.
+      if (e.shiftKey) {
+        insertLineBreak(wrapper);
+        return;
+      }
       const offset = caretMdOffset(body);
       // A heading is one line — Enter always opens the next paragraph.
       if (atNode?.closest?.('h1,h2,h3,h4,h5,h6')) {
@@ -376,8 +382,8 @@ export default function DocSurface({
         onSplit?.(wrapper.dataset.blk, offset);
         return;
       }
-      // Any other Enter is a line break inside the same paragraph.
-      insertLineBreak(wrapper);
+      // Any other Enter starts a new paragraph, like Word.
+      onSplit?.(wrapper.dataset.blk, offset);
     }
   };
 

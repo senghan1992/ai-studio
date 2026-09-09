@@ -1096,7 +1096,7 @@ console.log('\n■ Doc 자유로운 문단 편집 UX');
   check('새 문단이 바로 편집 모드로 열림', got.newParagraphEditing === true);
 }
 
-console.log('\n■ Doc Enter (같은 문단 줄바꿈 · 빈 줄에서 새 문단)');
+console.log('\n■ Doc Enter (새 문단 · Shift+Enter 줄바꿈)');
 {
   const got = {};
   const { errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`, {
@@ -1123,50 +1123,70 @@ console.log('\n■ Doc Enter (같은 문단 줄바꿈 · 빈 줄에서 새 문�
       const wrappers = () => $$('.doc-surface [data-blk]');
       const textWrapper = () =>
         wrappers().find((el) => !el.classList.contains('docblk--static'));
-      const block = textWrapper();
-      click(block);
-      await settle(6);
-      const body = block.querySelector('.docblk__body');
-      if (!body) return;
-
-      // Enter in the middle of a sentence: a line break in the SAME block.
-      const type = (html) => {
+      const type = (body, html) => {
         body.innerHTML = html;
         fire(body, 'input', {});
       };
-      type('<p>한 문장</p>');
+
+      // Shift+Enter in the middle of a sentence: a line break in the SAME block.
+      let body = textWrapper();
+      click(body);
+      await settle(6);
+      body = body.querySelector('.docblk__body');
+      type(body, '<p>한 문장</p>');
       await settle(6);
       got.blocksBefore = wrappers().length;
       got.oneSurface = $$('.doc-surface').length;
       caretToEnd(body);
-      fire(body, 'keydown', { key: 'Enter' });
+      fire(body, 'keydown', { key: 'Enter', shiftKey: true });
       await settle(8);
       got.softBreakHtml = body.innerHTML;
       got.blocksAfterSoft = wrappers().length;
       got.mdAfterSoft = await readMd();
 
-      // Enter again — the caret now sits on the empty line: a NEW paragraph.
+      // Plain Enter in the middle of a sentence: an immediate NEW paragraph.
+      body = textWrapper().querySelector('.docblk__body');
+      caretToEnd(body);
+      type(body, '<p>한 문장</p>');
+      await settle(6);
+      got.blocksBeforeSplit = wrappers().length;
       caretToEnd(body);
       fire(body, 'keydown', { key: 'Enter' });
       await settle(8);
       got.blocksAfterSplit = wrappers().length;
-      got.firstAfterSplit = wrappers().find((el) => !el.classList.contains('docblk--static'))?.querySelector('.docblk__body')?.innerHTML;
+      got.firstAfterSplit = wrappers()
+        .find((el) => !el.classList.contains('docblk--static'))
+        ?.querySelector('.docblk__body')?.innerHTML;
+
+      // The caret sits in the new empty paragraph: Enter again, still a new one.
+      const lastBody = wrappers()[wrappers().length - 1].querySelector('.docblk__body');
+      caretToEnd(lastBody);
+      fire(lastBody, 'keydown', { key: 'Enter' });
+      await settle(8);
+      got.blocksAfterEmpty = wrappers().length;
+
+      // Soft return inside a list item survives the round trip to markdown.
+      const listBody = textWrapper().querySelector('.docblk__body');
+      caretToEnd(listBody);
+      type(listBody, '<ul><li>항목<br>이어짐</li></ul>');
+      await settle(6);
+      got.blocksAfterListSoft = wrappers().length;
+      got.listSoftMd = await readMd();
 
       // Exit a list the Word way: Enter on an empty bullet closes the list.
-      const first = wrappers().find((el) => !el.classList.contains('docblk--static'));
+      const first = textWrapper();
+      caretToEnd(first);
       click(first);
       await settle(6);
-      const ta3 = first;
-      ta3.querySelector('.docblk__body').innerHTML = '<ul><li>항목</li></ul>';
-      fire(ta3, 'input', {});
-      await settle(6);
+      caretToEnd(first);
+      type(first.querySelector('.docblk__body'), '<ul><li>항목</li></ul>');
       got.blocksBeforeList = wrappers().length;
-      caretToEnd(ta3);
-      fire(ta3, 'keydown', { key: 'Enter' });
+      caretToEnd(first);
+      fire(first, 'keydown', { key: 'Enter' });
       await settle(8);
-      got.after1Html = ta3.querySelector('.docblk__body')?.innerHTML ?? '(no body)';
-      caretToEnd(ta3);
-      fire(ta3, 'keydown', { key: 'Enter' });
+      got.after1Html = first.querySelector('.docblk__body')?.innerHTML ?? '(no body)';
+      caretToEnd(first);
+      fire(first, 'keydown', { key: 'Enter' });
       await settle(8);
       got.listMds = wrappers().map((b) => b.textContent.trim());
 
@@ -1175,17 +1195,24 @@ console.log('\n■ Doc Enter (같은 문단 줄바꿈 · 빈 줄에서 새 문�
 
   check('상호작용 중 런타임 오류 없음', errors.length === 0, errors.join('\n      '));
   check('문서가 한 장의 편집면으로 열림', got.oneSurface === 1, `surfaces = ${got.oneSurface}`);
-  check('문장 중간 Enter는 같은 문단 안 줄바꿈',
+  check('Shift+Enter는 같은 문단 안 줄바꿈',
     got.blocksAfterSoft === got.blocksBefore && /<br>/.test(got.softBreakHtml ?? ''),
     `blocks ${got.blocksBefore} → ${got.blocksAfterSoft}, html ${JSON.stringify(got.softBreakHtml)}`);
   check('줄바꿈이 마크다운 \n으로 저장됨', got.mdAfterSoft?.includes('한 문장\n'), JSON.stringify(got.mdAfterSoft));
-  check('빈 줄에서 Enter는 새 문단을 만듦', got.blocksAfterSplit === got.blocksBefore + 1,
-    `blocks ${got.blocksAfterSplit}`);
-  check('분할 후 앞 문단은 줄바꿈을 되돌려 저장됨',
+  check('문장 중간 Enter는 새 문단을 만듦', got.blocksAfterSplit === got.blocksBeforeSplit + 1,
+    `blocks ${got.blocksBeforeSplit} → ${got.blocksAfterSplit}`);
+  check('분할 후 앞 문단은 줄바꿈 없이 저장됨',
     (got.firstAfterSplit ?? '').startsWith('<p>한 문장</p>') && !got.firstAfterSplit.includes('<br>'),
     JSON.stringify(got.firstAfterSplit));
+  check('빈 줄에서 Enter도 새 문단을 만듦', got.blocksAfterEmpty === got.blocksBeforeSplit + 2,
+    `blocks ${got.blocksBeforeSplit} → ${got.blocksAfterEmpty}`);
+  check('목록 안 Shift+Enter가 md 왕복에서 살아남음',
+    got.listSoftMd?.includes('- 항목\n이어짐'),
+    `md ${JSON.stringify(got.listSoftMd)}`);
   check('빈 항목에서 Enter는 목록을 나가 새 문단을 만듦',
-    got.listMds?.[0] === '항목' && got.listMds[1] === '' && got.listMds.length === got.blocksBeforeList + 1,
+    got.listMds?.[0]?.replace(/\u200B/g, '').startsWith('항목') &&
+      got.listMds[1] === '' &&
+      got.listMds.length === got.blocksBeforeList + 1,
     `blocks ${got.blocksBeforeList} → ${got.listMds?.length}, ${JSON.stringify(got.listMds)}`);
 }
 

@@ -91,7 +91,10 @@ function serializeBlock(node) {
   if (tag === 'blockquote') {
     return serializeChildren(node)
       .split('\n')
-      .map((line) => `> ${line}`)
+      // A `>` line that serialized empty (`\n\u200B\n` from a soft-return
+      // chain) would read as a bare marker and end the quote; keep its
+      // invisible occupant through the `> ` prefix.
+      .map((line) => (line.trim() === '' ? '> \u200B' : `> ${line}`))
       .join('\n');
   }
   if (tag === 'hr') return '---';
@@ -194,10 +197,13 @@ function serializeListItem(li, forcedMarker = null) {
     return Math.max(0, d);
   })();
 
+  const children = [...li.childNodes];
   let text = '';
   let checked = null;
   let nested = null;
-  for (const child of li.childNodes) {
+  let i = 0;
+  for (; i < children.length; i++) {
+    const child = children[i];
     if (child.nodeType === 3) {
       if (child.data.trim() === '') continue;
       text += child.data;
@@ -211,6 +217,20 @@ function serializeListItem(li, forcedMarker = null) {
     }
     if (tag === 'ul' || tag === 'ol') {
       nested = child;
+      continue;
+    }
+    if (tag === 'br') {
+      // Consume the whole run of soft returns before any text follows: one br
+      // is a line break, two or more are empty lines (Shift+Enter twice), and
+      // a real blank would end the list — keep it as an invisible occupant
+      // the renderer (normalizeMd) redraws as a break inside the item.
+      let count = 1;
+      while (i + 1 < children.length && children[i + 1].nodeType === 1 &&
+             children[i + 1].tagName.toLowerCase() === 'br') {
+        count++;
+        i++;
+      }
+      text += count === 1 ? '\n' : '\n\u200B\n';
       continue;
     }
     if (BLOCK_TAGS.has(tag)) {

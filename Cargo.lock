@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-export",
  "ai-format",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "ai-export"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-format",
  "ai-formula",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "ai-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-formula",
  "chrono",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "ai-formula"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "indexmap 2.14.1",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "ai-import"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-export",
  "ai-format",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "ai-studio-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-core",
  "ai-format",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "ai-studio-serve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-core",
  "ai-format",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "ai-studio-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-format",
  "ai-formula",

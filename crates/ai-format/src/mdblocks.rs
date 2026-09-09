@@ -10,7 +10,6 @@ static LIST_LINE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+").unwrap());
 static QUOTE_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[ \t]*>").unwrap());
 static TABLE_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[ \t]*\|").unwrap());
-static LIST_CONTINUATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[ \t]{2,}\S").unwrap());
 
 /// The block types a Doc paragraph can be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,8 +159,11 @@ pub fn split_markdown_blocks(md: &str) -> Vec<MdBlock> {
             continue;
         }
 
-        // Indented continuation of a list item belongs to the list.
-        if run == Some(BlockType::List) && LIST_CONTINUATION.is_match(line) {
+        // A soft return (Shift+Enter) inside a list item or a quote writes an
+        // unmarked continuation line; it stays with the open run instead of
+        // splitting the block. Blank lines, headings and new runs were already
+        // handled above, so any line reaching here continues List/Quote.
+        if run == Some(BlockType::List) || run == Some(BlockType::Quote) {
             buf.push(line);
             continue;
         }
@@ -386,6 +388,22 @@ mod tests {
         let blocks = split_markdown_blocks("- a\n  이어지는 줄\n- b\n");
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].md.contains("이어지는 줄"));
+    }
+
+    #[test]
+    fn an_unindented_continuation_stays_with_its_list_item() {
+        let blocks = split_markdown_blocks("- 항목\n이어지는 줄\n");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type, BlockType::List);
+        assert_eq!(blocks[0].md, "- 항목\n이어지는 줄");
+    }
+
+    #[test]
+    fn an_unmarked_continuation_stays_with_its_quote() {
+        let blocks = split_markdown_blocks("> 인용\n계속\n");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type, BlockType::Quote);
+        assert_eq!(blocks[0].md, "> 인용\n계속");
     }
 
     #[test]

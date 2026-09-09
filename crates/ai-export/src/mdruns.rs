@@ -807,11 +807,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unindented_line_after_a_list_is_its_own_paragraph() {
+    fn an_unindented_continuation_stays_with_its_list_item() {
         let blocks = parse_markdown("- 첫 항목\n계속되는 줄");
-        assert_eq!(blocks.len(), 2);
-        assert!(matches!(blocks[0], Block::List { .. }));
-        assert!(matches!(blocks[1], Block::Paragraph { .. }));
+        assert_eq!(blocks.len(), 1);
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        // The continuation is a line break inside the item (Shift+Enter),
+        // never a second paragraph.
+        assert_eq!(runs_to_text(&items[0].runs), "첫 항목\n계속되는 줄");
     }
 
     #[test]

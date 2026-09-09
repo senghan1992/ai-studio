@@ -16,6 +16,12 @@ export function normalizeMd(md) {
     /^[ \t]*((?:[-+*]|\d+[.)])[ \t]+|>[ \t]*)[\u200B\uFFFF]*$/gm,
     (m) => `${m}\u200B`
   );
+  // Blank lines inside a list item or a quote (Shift+Enter twice — the empty
+  // line between two soft returns) would end the list/quote in markdown.
+  // Give such an interior empty line an invisible occupant so marked keeps
+  // drawing the soft-return chain inside the item. The markdown itself stays
+  // clean; this filler is render-only.
+  s = s.replace(/^([ \t]*((?:[-+*]|\d+[.)])[ \t]+[^\n]*|[ \t]*>[ \t]*[^\n]*))\n\n(?=[^\n]*$)/gm, '$1\n\u200B\n');
   if (/^\n/.test(s) && !/^\n\n/.test(s)) s = `\u200B${s}`;
   if (/\n$/.test(s) && !/\n\n$/.test(s)) s = `${s}\u200B`;
   return s;
