@@ -761,7 +761,7 @@ static TOTAL_LABEL: Lazy<Regex> =
 /// Detected two ways: by its label, and structurally by a cell whose formula
 /// aggregates a range inside its own column — the latter catches unlabelled
 /// total rows in any language.
-fn is_aggregate_row(cells: &IndexMap<String, Cell>, row: usize, max_col: usize) -> bool {
+pub(crate) fn is_aggregate_row(cells: &IndexMap<String, Cell>, row: usize, max_col: usize) -> bool {
     let label = cells
         .get(&to_ref(0, row))
         .map(display_value)
@@ -942,7 +942,7 @@ pub fn summary_scope(sheet: &Sheet) -> Option<SummaryScope> {
     })
 }
 
-fn format_stat(n: f64, fmt: Option<&str>) -> String {
+pub fn format_stat(n: f64, fmt: Option<&str>) -> String {
     if fmt.is_some_and(|f| f.contains('%')) {
         let pct = crate::geometry::js_round(n * 1000.0) / 10.0;
         return format!(

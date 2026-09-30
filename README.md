@@ -283,6 +283,56 @@ notes: 전년 동기 대비라는 점을 반드시 짚는다.
 
 LLM은 `x=96 y=64 w=1088` 보다 `상단 중앙, 전체 폭` 을 훨씬 잘 이해합니다.
 
+### `AI.md`만으로는 부족합니다 — RLM(재귀 탐색)
+
+`AI.md`는 문서 전체를 한 파일로 **평탄화**합니다. RAG 청커에는 맞지만, 재귀 언어 모델(RLM)에는
+반대 모양이 필요합니다. 문맥 창보다 큰 문서는 아예 읽을 수 없고, 다 읽었더라도 "무엇을 읽지
+않아도 되는지"를 판단할 근거가 없기 때문입니다.
+
+그래서 문서는 **주소를 가진 트리**로도 저장됩니다. 저장할 때마다 `AI.md` 맨 앞에 **문서 지도**가
+붙고, 모든 노드에 안정적인 주소와 한 줄 요약이 생깁니다. 주소는 저장을 반복해도 바뀌지 않습니다.
+
+```markdown
+## 문서 지도 (RLM)
+
+- `project` — 프레젠테이션 · 슬라이드 3장 · 요소 11개
+  - `slide/s_9k2mx` — 1 — 표지 · 텍스트 2
+    - `slide/s_9k2mx/block/b_3fh2a` — 상단 중앙, 전체 폭 · 2026 3분기 사업 리뷰
+  - `sheet/sh_4ab` — 예산 · `A1:F51` · 데이터 영역 1개
+    - `sheet/sh_4ab/region/A1:F51` — 6행 × 6열 — 항목 | 10월 | 11월 | …
+    - `sheet/sh_4ab/region/A1:F51/col/B` — 10월 — 숫자, 값 5개 (합계 964,000,000)
+```
+
+그다음 필요한 가지만 내려받습니다.
+
+```bash
+GET /api/projects/예산.aigrid/node?path=sheet/sh_4ab/region/A1:F51&depth=1
+```
+
+`read_node(path, depth)`는 그 노드의 **내용 + 자식 요약**만 돌려줍니다. 문맥은 문서 크기와
+무관하게 한계가 있고, 답은 항상 실제 주소에 묶입니다. 문서마다 재귀의 단위가 다릅니다.
+
+| 앱 | 트리의 단위 | 예 |
+|---|---|---|
+| Deck | 슬라이드 → **그룹** → 도형 | `slide/s_9k2mx/group/1` — 카드 하나 |
+| Doc | 섹션 → **제목** → 문단 | `section/sec_1/block/핵심-성과` |
+| Grid | 시트 → **데이터 영역** → 열 | `sheet/sh_4ab/region/A1:F51/col/B`, `.../cell/B4` |
+
+* **Deck** — 가져올 때 PowerPoint의 **그룹**을 `style.group` 경로로 보존합니다. 카드 하나(아이콘+
+  제목+선)가 흩어진 도형이 아니라 한 노드로 남고, 지도에도 그룹으로 보입니다.
+* **Doc** — **제목**이 분기점입니다. `section/…`을 depth 1로 읽으면 장 목록, 제목 하나를 풀면 그
+  장입니다. 제목의 주소는 블록 id가 아니라 **제목 글자**에서 나옵니다 — 서식 없는 문단은 열 때마다
+  새 id를 받으므로, id를 주소로 쓰면 저장마다 주소가 바뀝니다.
+* **Grid** — 빈 행을 기준으로 표를 분리해 **데이터 영역**마다 주소를 줍니다. **열 요약**이 자식
+  노드라 "B열 요약"을 표 전체를 읽지 않고 얻고, `.../cell/B4`는 그 셀 하나만 돌려줍니다.
+
+### 저장할 때마다 스스로 검증합니다
+
+RLM은 읽고 쓰는 것만이 아니라 **확인**하는 것입니다. 저장할 때 같은 주소로 문서를 다시 훑어 구조와
+어긋나는 것을 `AI.md` 끝의 `## 검증`에 적습니다 — 캔버스를 벗어난 도형, 표를 벗어난 병합, 건너뛴
+제목 단계, `#REF!`·`#NAME?`, 해석할 수 없는 이름 범위. 모두 주소와 함께 나오므로 그 주소를 그대로
+고치면 됩니다. 같은 목록이 `GET /api/projects/:folder/verify`로도 옵니다.
+
 ### 스프레드시트가 특히 다릅니다
 
 `.cells.json`이 계산의 원천이고, `.md`는 AI가 읽는 투영입니다. 표에는 **계산된 값**이 열 문자(A·B·C)와
@@ -530,7 +580,7 @@ Deck의 **디자인** 탭에는 PowerPoint와 같은 와이드스크린(16:9)·�
 | Doc | `.docx` | 용지·여백·제목 스타일·목록·표·인용·코드·이미지·문단 서식 |
 | Grid | `.xlsx` | **수식이 살아 있는 채로**, 표시 형식·셀 스타일·병합·틀 고정·이름 범위 |
 | Grid | `.csv` | 현재 시트의 값 (Excel 한글용 BOM 포함) |
-| 전부 | `AI.md` | RAG에 그대로 넣는 다이제스트 |
+| 전부 | `AI.md` | RAG에 그대로 넣는 다이제스트 + 재귀 탐색용 문서 지도 |
 
 OOXML을 직접 씁니다 — 내보내기에 외부 라이브러리가 없습니다.
 
@@ -586,6 +636,9 @@ docs/ARCHITECTURE.md   왜 이렇게 나누었는가
 | `POST` | `/api/projects/:folder/restore` | 버전 복원 `{ snapshot }` — 지금 상태를 먼저 보관합니다 |
 | `GET` | `/api/projects/:folder/file?path=` | 파일 내용 |
 | `GET` | `/api/projects/:folder/digest` | `AI.md` |
+| `GET` | `/api/projects/:folder/outline` | RLM 문서 지도 (주소+요약, 내용 없음) |
+| `GET` | `/api/projects/:folder/node?path=&depth=` | 주소 하나를 내용+자식 요약으로 |
+| `GET` | `/api/projects/:folder/verify` | 구조와 어긋나는 부분 (주소 포함) |
 | `POST` | `/api/projects/:folder/preview` | 저장하지 않고 쓰일 md/json 확인 |
 | `POST` | `/api/import` | Office 파일 가져오기 `{ name, data }` (base64) |
 | `GET` | `/api/projects/:folder/export/:ext` | `pptx` · `docx` · `xlsx` · `csv` |
@@ -686,8 +739,10 @@ cd ai-studio
 
 # 2) 빌드에 필요한 부품 준비 (처음 한 번, 몇 분 걸림)
 rustup target add wasm32-unknown-unknown     # 브라우저용 코어 빌드 대상
-cargo install wasm-bindgen-cli tauri-cli     # 빌드 도구 두 개
+cargo install wasm-bindgen-cli --version 0.2.127   # Cargo.lock의 wasm-bindgen과 같은 버전
+cargo install tauri-cli                     # 데스크톱 앱 빌드 도구
 npm install                                  # 웹 UI 의존성
+npm run build:wasm                           # 편집기가 쓰는 wasm 코어 생성
 
 # 3) 설치 파일 만들기 (여기서 실제 .exe / .dmg / .AppImage 가 나옵니다)
 npm run desktop:build
@@ -695,6 +750,11 @@ npm run desktop:build
 
 `git clone`의 `<이-저장소-주소>`는 이 프로젝트의 실제 주소로 바꿔 넣습니다. zip으로 받았다면
 압축을 풀고 그 폴더에서 `cd` 만 하면 됩니다.
+
+`wasm-bindgen-cli`는 **Cargo.lock의 `wasm-bindgen`(0.2.127)과 같은 버전**이어야 합니다. 다르면
+CLI가 "rust crate version mismatch"로 거부합니다. `apps/web/src/core/pkg/`는 커밋되지 않으므로
+(코어가 바뀌면 낡기 때문) 빌드든 개발 모드든 **`npm run build:wasm`을 한 번은 실행**해야 합니다.
+`crates/`를 고쳤다면 다시 실행하세요.
 
 ### ④ 만들어진 설치 파일 위치
 
@@ -714,6 +774,7 @@ npm run desktop:build
 설치 파일을 만들기 전에 앱이 뜨는지 바로 보고 싶으면, 개발 모드로 실행합니다. 창이 그대로 뜹니다.
 
 ```bash
+npm run build:wasm  # 편집기가 쓰는 wasm 코어 (처음 한 번, 코어 수정 후 다시)
 npm run seed        # 샘플 문서 3개 넣기 (선택)
 npm run desktop     # 데스크톱 앱을 개발 모드로 실행
 ```
@@ -724,6 +785,7 @@ npm run desktop     # 데스크톱 앱을 개발 모드로 실행
 
 ```bash
 # 개발 모드 (코드 고치면 바로 반영)
+npm run build:wasm  # 처음 한 번(또는 코어 수정 후)
 npm run dev         # 서버(5177) + 웹(5178) 동시 실행 → http://localhost:5178
 
 # 프로덕션처럼 한 포트에서
@@ -738,7 +800,9 @@ npm run serve       # http://localhost:5177 에서 API와 화면을 함께 제�
 | `link.exe not found` / `linker not found` (Windows) | ② 단계의 **Visual Studio Build Tools**가 없거나 설치 중 "C++ 데스크톱 개발"을 체크 안 함. 다시 설치하세요. |
 | `WebView2 ... not found` / 창이 안 뜸 (Windows) | **WebView2 런타임** 설치 (②의 링크). |
 | `cargo: command not found` / `rustc ...` | Rust 설치 후 **터미널을 새로 열지 않음**. 창을 닫고 다시 여세요. |
-| `wasm-bindgen` / `cargo tauri` 를 못 찾음 | ③의 `cargo install wasm-bindgen-cli tauri-cli` 를 건너뜀. 다시 실행하세요. |
+| `wasm-bindgen` / `cargo tauri` 를 못 찾음 | ③의 `cargo install ...` 을 건너뜀. 다시 실행하세요. |
+| `rust crate version mismatch` (`wasm-bindgen`) | CLI 버전이 Cargo.lock과 다름. `cargo install wasm-bindgen-cli --version 0.2.127 --force` |
+| 편집기가 빈 화면 / `core/pkg` import 실패 | `npm run build:wasm` 을 안 함. `apps/web/src/core/pkg/`는 커밋되지 않습니다 |
 | `npm: command not found` | Node.js가 설치 안 됨(①). LTS를 다시 설치하고 터미널을 새로 여세요. |
 | Linux에서 `webkit2gtk` 관련 오류 | ②의 `apt-get install ...` 줄을 실행하지 않음. |
 | 그 외 | `npm test` 로 코어가 정상인지 먼저 확인하면 문제 범위를 좁힐 수 있습니다(아래 [검증](#검증)). |

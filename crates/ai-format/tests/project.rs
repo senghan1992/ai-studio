@@ -8,6 +8,7 @@ use ai_format::project::{
     create_project, delete_project, list_projects, load_project, project_files, read_project_file,
     rename_project, resolve_inside, save_project, Error,
 };
+use ai_format::rlm;
 
 struct Workspace(PathBuf);
 
@@ -267,6 +268,80 @@ fn deleting_removes_the_whole_folder() {
     delete_project(ws.path(), &folder).unwrap();
     assert!(!project.dir.exists());
     assert!(list_projects(ws.path()).unwrap().is_empty());
+}
+
+/* ------------------------------------------------------------------- rlm */
+
+#[test]
+fn rlm_addresses_survive_a_save_and_resolve_on_disk() {
+    let ws = Workspace::new("rlm");
+    let project = create_project(ws.path(), ProjectType::Deck, "RLM 검증", true).unwrap();
+    let outline = rlm::outline(&project);
+    assert_eq!(outline.path, "project");
+    let slide_path = outline.children[0].path.clone();
+
+    // The address printed in the map is the one that resolves.
+    let node = rlm::resolve(&project, &slide_path, 1).unwrap();
+    assert!(node.content.is_some());
+    assert!(!node.children.is_empty());
+
+    let digest = read(&project.dir, "AI.md");
+    assert!(digest.contains("## 문서 지도 (RLM)"), "{digest}");
+    assert!(digest.contains(&format!("`{slide_path}`")), "{digest}");
+
+    // A reload and re-save leaves the address unchanged.
+    let reloaded = load_project(&project.dir).unwrap();
+    let before = rlm::outline(&reloaded);
+    let saved = save_project(&reloaded).unwrap();
+    let after = rlm::outline(&saved);
+    assert_eq!(before.children[0].path, after.children[0].path);
+}
+
+#[test]
+fn rlm_reads_a_grid_by_region_and_cell() {
+    let ws = Workspace::new("rlmgrid");
+    let project = create_project(ws.path(), ProjectType::Grid, "RLM 격자", true).unwrap();
+    let outline = rlm::outline(&project);
+    let sheet = &outline.children[0];
+    let region = sheet
+        .children
+        .iter()
+        .find(|c| c.kind == "region")
+        .expect("the sample sheet has a data region");
+
+    let resolved = rlm::resolve(&project, &region.path, 1).unwrap();
+    assert!(resolved.content.as_deref().unwrap().contains('|'));
+    assert!(!resolved.children.is_empty(), "column summaries");
+
+    let cell = rlm::resolve(&project, &format!("{}/cell/B2", sheet.path), 0).unwrap();
+    assert!(cell.content.is_some());
+}
+
+#[test]
+fn rlm_addresses_a_doc_heading_by_its_text() {
+    let ws = Workspace::new("rlmdoc");
+    let project = create_project(ws.path(), ProjectType::Doc, "핵심 성과", true).unwrap();
+    let outline = rlm::outline(&project);
+    let section = &outline.children[0];
+    let heading = section
+        .children
+        .iter()
+        .find(|c| c.kind == "block/heading")
+        .expect("the sample doc has a heading");
+    // The anchor comes from the heading text, not the ephemeral block id.
+    assert!(
+        heading.path.ends_with("/block/핵심-성과"),
+        "{}",
+        heading.path
+    );
+
+    let resolved = rlm::resolve(&project, &heading.path, 0).unwrap();
+    assert!(resolved.content.is_some());
+
+    // A paragraph's id changes on load, so its address must not depend on it.
+    let reloaded = save_project(&load_project(&project.dir).unwrap()).unwrap();
+    let again = rlm::outline(&reloaded);
+    assert_eq!(heading.path, again.children[0].children[0].path);
 }
 
 /* ------------------------------------------------------- path containment */

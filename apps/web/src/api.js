@@ -190,6 +190,27 @@ export const api = {
   digest: (folder) =>
     call('digest', { folder }, { path: `/projects/${enc(folder)}/digest` }),
 
+  /** The RLM map: an address and a bounded summary for every node. */
+  outline: (folder) =>
+    call('outline', { folder }, { path: `/projects/${enc(folder)}/outline` }),
+
+  /**
+   * One RLM address, resolved to content plus its children's summaries.
+   *
+   * `depth` is how many levels below the target to expand. The same addresses
+   * the outline prints are the ones the editor and `AI.md` use.
+   */
+  readNode: (folder, path, depth = 0) =>
+    call(
+      'read_node',
+      { folder, path, depth },
+      { path: `/projects/${enc(folder)}/node?path=${enc(path)}&depth=${depth}` }
+    ),
+
+  /** What contradicts the document's own structure, addressed for repair. */
+  verify: (folder) =>
+    call('verify', { folder }, { path: `/projects/${enc(folder)}/verify` }),
+
   listAssets: (folder) =>
     call('list_assets', { folder }, { path: `/projects/${enc(folder)}/assets` }),
 

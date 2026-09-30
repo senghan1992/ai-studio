@@ -129,6 +129,9 @@ pub fn routes() -> Router<Shared> {
         .route("/projects/{folder}/restore", post(restore))
         .route("/projects/{folder}/file", get(read_file))
         .route("/projects/{folder}/digest", get(digest))
+        .route("/projects/{folder}/outline", get(outline))
+        .route("/projects/{folder}/node", get(read_node))
+        .route("/projects/{folder}/verify", get(verify))
         .route("/projects/{folder}/preview", post(preview))
         .route("/projects/{folder}/export/{ext}", get(export))
         .route(
@@ -240,6 +243,42 @@ async fn digest(
         HeaderValue::from_static("text/markdown; charset=utf-8"),
     );
     Ok((headers, text))
+}
+
+/// The RLM map: summaries and addresses only. Bounded for any document size.
+async fn outline(
+    State(studio): State<Shared>,
+    Path(folder): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(studio.outline(&folder)?))
+}
+
+#[derive(Deserialize)]
+pub struct NodeQuery {
+    pub path: String,
+    #[serde(default)]
+    pub depth: Option<usize>,
+}
+
+/// One address, resolved to content plus its children's summaries.
+async fn read_node(
+    State(studio): State<Shared>,
+    Path(folder): Path<String>,
+    Query(query): Query<NodeQuery>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(studio.read_node(
+        &folder,
+        &query.path,
+        query.depth.unwrap_or(0),
+    )?))
+}
+
+/// What contradicts the document's own structure, addressed for repair.
+async fn verify(
+    State(studio): State<Shared>,
+    Path(folder): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(studio.verify(&folder)?))
 }
 
 async fn preview(

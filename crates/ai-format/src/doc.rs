@@ -362,7 +362,7 @@ pub fn build_outline(blocks: &[DocBlock]) -> Vec<OutlineItem> {
 /// ASCII letters lowercase, and characters that would need escaping in a URL
 /// fragment or a filename are dropped. Two headings with the same text get
 /// `-2`, `-3`, … suffixes so every anchor still names exactly one heading.
-fn anchor_slug(text: &str) -> String {
+pub fn anchor_slug(text: &str) -> String {
     let mut out = String::new();
     let mut pending_dash = false;
     for c in text.trim().chars() {

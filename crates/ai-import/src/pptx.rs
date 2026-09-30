@@ -668,6 +668,7 @@ pub fn read(package: &Package, warnings: &mut Warnings) -> Result<Deck> {
             decoration: false,
             number: slides.len() + 1,
             running: HashMap::new(),
+            group: Vec::new(),
             header_footer: design.header_footer(),
         };
 
@@ -1097,6 +1098,24 @@ fn image_style(geometry: &Geometry, blip_fill: Option<&Node>) -> IndexMap<String
     style
 }
 
+/// A readable, unique name for a group shape.
+///
+/// Office writes `cNvPr/@name` ("Group 5", or the author's own name) and a
+/// numeric id that is unique within the slide. The name is what a person
+/// recognises; the id is what keeps two same-named groups apart.
+fn group_key(group: &Node) -> String {
+    let cnv = group.path(&["nvGrpSpPr", "cNvPr"]);
+    let name = cnv.and_then(|c| c.attr("name")).unwrap_or("").trim();
+    let id = cnv.and_then(|c| c.attr("id")).unwrap_or("").trim();
+    let generic = name.is_empty() || name.eq_ignore_ascii_case("group");
+    match (generic, id.is_empty()) {
+        (false, false) => format!("{name} #{id}"),
+        (false, true) => name.to_string(),
+        (true, false) => format!("그룹 {id}"),
+        (true, true) => "그룹".to_string(),
+    }
+}
+
 /// A group's coordinate mapping, so nested shapes land where they are drawn.
 ///
 /// PowerPoint groups declare a child coordinate space (`chOff`/`chExt`) that is
@@ -1205,6 +1224,11 @@ struct SlideCtx<'a> {
     /// placeholder type. The layout's version replaces the master's, the way
     /// PowerPoint resolves them.
     running: HashMap<String, usize>,
+    /// The group a shape sits in, outermost first. A group is how the author
+    /// said "these belong together" — a card's icon, label and rule, a flow
+    /// chart node and its text. Flattening it loses that, so it is recorded on
+    /// every block the group contains as an ordered path.
+    group: Vec<String>,
 }
 
 impl SlideCtx<'_> {
@@ -1217,7 +1241,20 @@ impl SlideCtx<'_> {
                 "graphicFrame" => self.read_graphic_frame(child, transform),
                 "grpSp" => {
                     let nested = transform.nest(child);
+                    let key = group_key(child);
+                    self.group.push(key);
+                    let before = self.blocks.len();
                     self.walk_tree(child, nested);
+                    let path = self.group.clone();
+                    self.group.pop();
+                    // Tag only blocks this group introduced. A nested group has
+                    // already tagged its own children with the full path, and
+                    // overwriting it here would collapse the nesting.
+                    for block in &mut self.blocks[before..] {
+                        if !block.style.contains_key("group") {
+                            block.style.insert("group".to_string(), json!(path));
+                        }
+                    }
                 }
                 _ => {}
             }

@@ -13,5 +13,6 @@ pub mod json;
 pub mod mdblocks;
 pub mod model;
 pub mod project;
+pub mod rlm;
 pub mod shape;
 pub mod table;

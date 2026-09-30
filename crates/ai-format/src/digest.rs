@@ -22,11 +22,57 @@ use crate::model::{Items, Project, Section, Sheet, Slide};
 
 /// Build `AI.md` for a project.
 pub fn build_digest(project: &Project) -> String {
-    match &project.items {
+    let mut text = match &project.items {
         Items::Slides(slides) => deck_digest(project, slides),
         Items::Sections(sections) => doc_digest(project, sections),
         Items::Sheets(sheets) => grid_digest(project, sheets),
+    };
+    // Verification is appended to every digest: after a model edits by address,
+    // the same addresses are checked, and a wrong change is named rather than
+    // silently saved. The same findings come back from `rlm::verify`.
+    let findings = crate::rlm::verify(project);
+    if !findings.is_empty() {
+        text.push_str(&verify_section(&findings));
     }
+    text
+}
+
+/// The RLM map, inserted after the header of every digest.
+fn push_map(lines: &mut Vec<String>, project: &Project) {
+    let map = crate::rlm::map_markdown(&crate::rlm::outline(project));
+    if !map.trim().is_empty() {
+        lines.push(map);
+        lines.push(String::new());
+        lines.push("---".into());
+        lines.push(String::new());
+    }
+}
+
+/// A compact report of what `rlm::verify` found, capped so a huge sheet cannot
+/// bury the digest itself.
+fn verify_section(findings: &[crate::rlm::Finding]) -> String {
+    const SHOWN: usize = 50;
+    let mut lines = vec!["## 검증".to_string(), String::new()];
+    lines.push(
+        "아래는 문서 자체의 구조와 어긋나는 부분입니다. 주소를 그대로 고치면 됩니다.".to_string(),
+    );
+    lines.push(String::new());
+    for finding in findings.iter().take(SHOWN) {
+        let mark = if finding.level == "error" {
+            "오류"
+        } else {
+            "주의"
+        };
+        lines.push(format!(
+            "- **{mark}** `{}` — {}",
+            finding.path, finding.message
+        ));
+    }
+    if findings.len() > SHOWN {
+        lines.push(format!("- _… {}개 더 있습니다_", findings.len() - SHOWN));
+    }
+    lines.push(String::new());
+    format!("{}\n", lines.join("\n"))
 }
 
 fn header(project: &Project, subtitle: &str) -> Vec<String> {
@@ -66,6 +112,7 @@ fn deck_digest(project: &Project, slides: &[Slide]) -> String {
         project,
         &format!("AI Studio 프레젠테이션 · 슬라이드 {}장", slides.len()),
     );
+    push_map(&mut lines, project);
 
     lines.push("## 목차".into());
     lines.push(String::new());
@@ -166,6 +213,7 @@ fn doc_digest(project: &Project, sections: &[Section]) -> String {
         project,
         &format!("AI Studio 문서 · 섹션 {}개", sections.len()),
     );
+    push_map(&mut lines, project);
 
     let outline: Vec<(usize, String)> = sections
         .iter()
@@ -301,6 +349,7 @@ fn grid_digest(project: &Project, sheets: &[Sheet]) -> String {
         project,
         &format!("AI Studio 스프레드시트 · 시트 {}개", sheets.len()),
     );
+    push_map(&mut lines, project);
 
     lines.push("## 시트 목록".into());
     lines.push(String::new());

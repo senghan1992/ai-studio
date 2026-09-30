@@ -828,6 +828,44 @@ pub fn build_digest(project: JsValue) -> Result<String, JsValue> {
     Ok(ai_format::digest::build_digest(&project))
 }
 
+/* ---------------------------------------------------------------------- rlm */
+
+/// The RLM map: address and summary for every node, no content.
+#[wasm_bindgen(js_name = rlmOutline)]
+pub fn rlm_outline(project: JsValue) -> Result<JsValue, JsValue> {
+    let payload: Json = from_js(project)?;
+    let project = recalculated_project(project_from_json(&payload)?);
+    to_js(&ai_format::rlm::outline(&project))
+}
+
+/// One address resolved to content, or `null` when it names nothing.
+#[wasm_bindgen(js_name = rlmResolve)]
+pub fn rlm_resolve(project: JsValue, path: &str, depth: Option<usize>) -> Result<JsValue, JsValue> {
+    let payload: Json = from_js(project)?;
+    let project = recalculated_project(project_from_json(&payload)?);
+    match ai_format::rlm::resolve(&project, path, depth.unwrap_or(0)) {
+        Some(node) => to_js(&node),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// What contradicts the document's own structure, addressed for repair.
+#[wasm_bindgen(js_name = rlmVerify)]
+pub fn rlm_verify(project: JsValue) -> Result<JsValue, JsValue> {
+    let payload: Json = from_js(project)?;
+    let project = recalculated_project(project_from_json(&payload)?);
+    to_js(&ai_format::rlm::verify(&project))
+}
+
+/// A grid's formulas evaluated, so a resolved cell shows a value.
+fn recalculated_project(mut project: ai_format::model::Project) -> ai_format::model::Project {
+    use ai_format::model::Items;
+    if let Items::Sheets(sheets) = &project.items {
+        project.items = Items::Sheets(ai_format::grid::recalculated_all(sheets));
+    }
+    project
+}
+
 fn project_from_json(payload: &Json) -> Result<ai_format::model::Project, JsValue> {
     use ai_format::model::{Items, Manifest, Project, ProjectType, Theme};
 

@@ -351,6 +351,13 @@ fn grouped_shapes_land_where_they_are_drawn() {
     assert_eq!((block.x, block.y), (192.0, 144.0));
     assert_eq!((block.w, block.h), (48.0, 24.0));
     assert_eq!(block.shape.as_ref().unwrap().preset, "ellipse");
+    // The grouping is what makes the shapes a unit; flattening it loses the
+    // structure an agent needs to move the whole card at once.
+    assert_eq!(
+        block.style["group"],
+        serde_json::json!(["그룹 2"]),
+        "the group path is recorded on the block"
+    );
 }
 
 #[test]

@@ -119,6 +119,19 @@ console.log('\n■ Deck');
   check('the hand-added block got auto geometry', handBlock && handBlock.w > 0 && handBlock.h > 0,
     JSON.stringify(handBlock));
 
+  // RLM: the map's addresses resolve, and the digest carries the map.
+  check('AI.md carries the RLM map', digest.includes('## 문서 지도 (RLM)'));
+  const outline = await call(`/api/projects/${encodeURIComponent(folder)}/outline`);
+  check('outline is rooted at the project', outline.path === 'project' && outline.children.length > 0);
+  const slidePath = outline.children[0].path;
+  const rlmNode = await call(
+    `/api/projects/${encodeURIComponent(folder)}/node?path=${encodeURIComponent(slidePath)}&depth=1`
+  );
+  check('an outline address resolves to content', !!rlmNode.content && rlmNode.children.length > 0,
+    JSON.stringify(rlmNode).slice(0, 200));
+  const findings = await call(`/api/projects/${encodeURIComponent(folder)}/verify`);
+  check('verify returns an array', Array.isArray(findings), JSON.stringify(findings));
+
   await call(`/api/projects/${encodeURIComponent(folder)}`, { method: 'DELETE' });
 }
 

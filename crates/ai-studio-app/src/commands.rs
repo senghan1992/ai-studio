@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use tauri::State;
 
 use ai_core::{
-    AssetEntry, AssetList, CreateRequest, FileBody, FileList, Health, HistoryList, ImportRequest,
-    ImportResponse, ProjectList, ProjectPayload, RecalcRequest, RecalcResponse, Studio,
-    UploadAssetRequest,
+    AssetEntry, AssetList, CreateRequest, FileBody, FileList, Finding, Health, HistoryList,
+    ImportRequest, ImportResponse, Node, ProjectList, ProjectPayload, RecalcRequest,
+    RecalcResponse, Studio, UploadAssetRequest,
 };
 
 /// A command error, rendered as a plain message the UI already knows how to show.
@@ -103,6 +103,29 @@ pub fn restore_snapshot(
 #[tauri::command]
 pub fn digest(studio: State<'_, Studio>, folder: String) -> Result<String> {
     Ok(studio.digest(&folder)?)
+}
+
+/// The RLM map: address and summary for every node, no content.
+#[tauri::command]
+pub fn outline(studio: State<'_, Studio>, folder: String) -> Result<Node> {
+    Ok(studio.outline(&folder)?)
+}
+
+/// One address, resolved to content plus its children's summaries.
+#[tauri::command]
+pub fn read_node(
+    studio: State<'_, Studio>,
+    folder: String,
+    path: String,
+    depth: Option<usize>,
+) -> Result<Node> {
+    Ok(studio.read_node(&folder, &path, depth.unwrap_or(0))?)
+}
+
+/// What contradicts the document's own structure, addressed for repair.
+#[tauri::command]
+pub fn verify(studio: State<'_, Studio>, folder: String) -> Result<Vec<Finding>> {
+    Ok(studio.verify(&folder)?)
 }
 
 #[tauri::command]

@@ -16,6 +16,8 @@ use ai_format::model::{
     Items, Manifest, Project, ProjectSummary, ProjectType, Section, Sheet, Slide,
 };
 use ai_format::project as fsproj;
+use ai_format::rlm;
+pub use ai_format::rlm::{Finding, Node};
 use ai_formula::evaluate::{Cell, Names};
 
 pub mod preview;
@@ -507,6 +509,42 @@ impl Studio {
     pub fn digest(&self, folder: &str) -> Result<String> {
         let dir = self.dir_of(folder)?;
         Ok(fsproj::read_project_file(&dir, "AI.md")?)
+    }
+
+    /// The RLM map: address and summary for every node, no content.
+    ///
+    /// This is what an agent reads first. It is bounded no matter how large the
+    /// document is, and every line is an address [`Studio::read_node`] accepts.
+    pub fn outline(&self, folder: &str) -> Result<Node> {
+        let project = self.load_for_rlm(folder)?;
+        Ok(rlm::outline(&project))
+    }
+
+    /// One address, resolved to content plus its children's summaries.
+    ///
+    /// `depth` is how many levels below the target to expand. An address that
+    /// names nothing is a 404, not an empty node — a silent miss would let an
+    /// agent read "nothing" and conclude the document says nothing.
+    pub fn read_node(&self, folder: &str, path: &str, depth: usize) -> Result<Node> {
+        let project = self.load_for_rlm(folder)?;
+        rlm::resolve(&project, path, depth)
+            .ok_or_else(|| Error::NotFound(format!("주소를 찾을 수 없습니다: {path}")))
+    }
+
+    /// What contradicts the document's own structure, addressed for repair.
+    pub fn verify(&self, folder: &str) -> Result<Vec<Finding>> {
+        let project = self.load_for_rlm(folder)?;
+        Ok(rlm::verify(&project))
+    }
+
+    /// Load, with a grid's formulas evaluated so a resolved cell shows a value.
+    fn load_for_rlm(&self, folder: &str) -> Result<Project> {
+        let dir = self.dir_of(folder)?;
+        let mut project = fsproj::load_project(&dir)?;
+        if let Items::Sheets(sheets) = &project.items {
+            project.items = Items::Sheets(ai_format::grid::recalculated_all(sheets));
+        }
+        Ok(project)
     }
 
     pub fn export(&self, folder: &str, ext: &str) -> Result<ExportBody> {
