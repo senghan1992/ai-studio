@@ -384,7 +384,7 @@ PowerPoint는 크기를 바꿀 때 "최대화 / 맞춤 확인"을 묻는다. 이
 
 **검증했습니다**
 
-- Rust 503개 · 웹 92개 · e2e 104개 · UI 스모크 291개
+- Rust 503개 · 웹 92개 · e2e 104개 · UI 스모크 327개
 - 커밋된 샘플(`templates/`)을 읽어 다시 쓴 결과, **바뀌는 것은 `manifest.json` 의 `modified`
   타임스탬프뿐입니다** (`cargo run -p ai-format --example roundtrip -- templates /tmp/out`).
   이식 직후에는 JSON 쪽에 세 종류의 차이가 더 있었지만 — 저장마다 바뀌는 `outline[].anchor`,

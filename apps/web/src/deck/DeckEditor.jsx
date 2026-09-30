@@ -1644,6 +1644,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
       <SlideSorter
         slides={slides}
         current={slideIndex}
+        folder={project.folder}
         onSelect={setCurrent}
         onReorder={moveSlide}
         onAdd={() => addSlide()}

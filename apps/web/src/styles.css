@@ -353,14 +353,8 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .sorter-item[aria-current="true"] .sorter-item__no { color: var(--accent); font-weight: 700; }
 .sorter-item__thumb.is-drop { border-color: var(--focus); border-style: dashed; }
 
-.thumb-block {
-  position: absolute; overflow: hidden; font-size: 3px; line-height: 1.2;
-  color: var(--ink-2); padding: 1px;
-}
-.thumb-block--image { background: #dbeafe; }
-.thumb-block--shape { background: #e2e8f0; }
-.thumb-block--table { background: #f1f5f9; }
-.thumb-block--chart { background: #dcfce7; }
+/* The miniature is a real render; the row handles every pointer and key event. */
+.sorter-item__slide { pointer-events: none; user-select: none; }
 
 .canvas-scroll {
   min-height: 100%; display: flex;

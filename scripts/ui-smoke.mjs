@@ -507,6 +507,28 @@ console.log('\n■ Deck 에디터');
   check('AI.md 탭 존재', text.includes('AI.md'));
 }
 
+console.log('\n■ Deck 썸네일 (실제 슬라이드 미니어처)');
+{
+  const captured = {};
+  const { errors } = await mount(`#/deck/${encodeURIComponent(byType.deck)}`, {
+    interact: async ({ $$, settle }) => {
+      await settle(2);
+      const thumbs = $$('.sorter-item');
+      captured.count = thumbs.length;
+      // The miniature is the real renderer: a picture is a picture, a shape is
+      // its preset geometry, a table is its table — not an empty grey box.
+      captured.render = !!thumbs[0]?.querySelector('.sorter-item__slide');
+      const third = thumbs[2];
+      captured.shape = !!third?.querySelector('svg.shape');
+      captured.table = !!third?.querySelector('.tableblock');
+    },
+  });
+  check('썸네일 오류 없음', errors.length === 0, errors.join('\n      '));
+  check('모든 슬라이드에 미니어처가 그려짐', captured.render === true && captured.count >= 3);
+  check('썸네일이 도형을 실제 도형으로 그림', captured.shape === true);
+  check('썸네일이 표를 실제 표로 그림', captured.table === true);
+}
+
 console.log('\n■ Doc 에디터');
 {
   const { text, html, errors } = await mount(`#/doc/${encodeURIComponent(byType.doc)}`);
@@ -1620,7 +1642,7 @@ console.log('\n■ 상황별 탭 (표 도구 · 도형 도구)');
             captured.paletteSwatches = $$('.palette .swatch').length;
             captured.paletteLabels = $$('.palette__label').map((l) => l.textContent.trim());
             captured.hasCustom = !!$('.palette input[type="color"]');
-            const shapePath = () => $$('svg path').map((el) => el.getAttribute('fill')).find((f) => f);
+            const shapePath = () => $$('.canvas svg path').map((el) => el.getAttribute('fill')).find((f) => f);
             const before = shapePath();
             const noFill = $$('.palette__item').find((b) => b.textContent.includes('채우기 없음'));
             if (noFill) {
@@ -1635,30 +1657,31 @@ console.log('\n■ 상황별 탭 (표 도구 · 도형 도구)');
         }
       }
 
-      // Now the table: click a cell, then use the Layout tab.
-      const cell = $$('.tableblock td, .tableblock th')[0];
+      // Now the table: click a cell, then use the Layout tab. Scoped to the
+      // canvas — the sidebar thumbnails are real renders and contain tables too.
+      const cell = $$('.canvas .tableblock td, .canvas .tableblock th')[0];
       if (cell) {
         fire(cell, 'pointerdown', { button: 0, pointerId: 3 });
         await settle(4);
-        captured.cellActive = !!$('.tableblock .is-active');
+        captured.cellActive = !!$('.canvas .tableblock .is-active');
         captured.tableTabs = $$('.ribbon__tab--context').map((t) => t.textContent.trim());
 
         const layout = $$('.ribbon__tab').find((t) => t.textContent.trim() === '레이아웃');
         if (layout) {
           click(layout);
           await settle(4);
-          const rowsBefore = $$('.tableblock tr').length;
+          const rowsBefore = $$('.canvas .tableblock tr').length;
           const insertBelow = $$('button').find((b) => b.textContent.includes('아래에 삽입'));
           if (insertBelow) {
             click(insertBelow);
             await settle(6);
-            captured.rowAdded = $$('.tableblock tr').length === rowsBefore + 1;
+            captured.rowAdded = $$('.canvas .tableblock tr').length === rowsBefore + 1;
           }
           const mergeRight = $$('button').find((b) => b.textContent.includes('오른쪽과 병합'));
           if (mergeRight) {
             click(mergeRight);
             await settle(6);
-            captured.merged = !!$$('.tableblock td[colspan], .tableblock th[colspan]').length;
+            captured.merged = !!$$('.canvas .tableblock td[colspan], .canvas .tableblock th[colspan]').length;
           }
         }
       }
@@ -1695,7 +1718,8 @@ console.log('\n■ 표 셀 편집 (Office 방식)');
         click(thumbs[2]);
         await settle(6);
       }
-      const cells = $$('.tableblock td, .tableblock th');
+      // Scoped to the canvas: the sidebar thumbnails render real tables too.
+      const cells = $$('.canvas .tableblock td, .canvas .tableblock th');
       if (!cells.length) return;
 
       // Double-click opens the in-cell editor, as in Office.
@@ -1703,15 +1727,15 @@ console.log('\n■ 표 셀 편집 (Office 방식)');
       await settle(3);
       fire(cells[0], 'dblclick', {});
       await settle(6);
-      const editor = $('.tableblock__editor');
+      const editor = $('.canvas .tableblock__editor');
       captured.opened = !!editor;
       if (editor) {
         setValue(editor, '입력한 값');
         // Tab commits and moves to the next cell.
         fire(editor, 'keydown', { key: 'Tab' });
         await settle(8);
-        captured.committed = ($('.tableblock')?.textContent ?? '').includes('입력한 값');
-        captured.movedOn = !!$('.tableblock__editor');
+        captured.committed = ($('.canvas .tableblock')?.textContent ?? '').includes('입력한 값');
+        captured.movedOn = !!$('.canvas .tableblock__editor');
       }
       // Escape leaves editing without losing the committed text.
       fireWindow('keydown', { key: 'Escape' });
