@@ -257,6 +257,82 @@ fn a_themed_shape_is_not_imported_invisible() {
 }
 
 #[test]
+fn a_placeholder_with_a_theme_style_is_still_text() {
+    // Some exporters (Google Slides, LibreOffice) put the *autoshape* `p:style`
+    // on placeholders too. PowerPoint does not draw a border or fill for a
+    // placeholder from that style, and neither may we — doing so wrapped the
+    // whole slide in rectangles the author never saw.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/>
+                 <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="838200" y="365125"/>
+                   <a:ext cx="10515600" cy="1325563"/></a:xfrm></p:spPr>
+                 <p:style>
+                   <a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef>
+                   <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>
+                 </p:style>
+                 <p:txBody><a:bodyPr/><a:p><a:r><a:t>테마 스타일 제목</a:t></a:r></a:p></p:txBody>
+               </p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.kind, Kind::Text, "no themed box around a placeholder");
+    assert!(block.shape.is_none());
+    assert_eq!(block.md, "테마 스타일 제목");
+}
+
+#[test]
+fn a_bare_text_frame_with_a_theme_style_is_text() {
+    // Some exporters write a text frame as a `p:sp` with no `prstGeom` and no
+    // `txBox`, but still carry the autoshape `p:style`. PowerPoint treats it as
+    // a text frame and draws no box; so must we.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextFrame"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm></p:spPr>
+                 <p:style>
+                   <a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef>
+                   <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>
+                 </p:style>
+                 <p:txBody><a:bodyPr/><a:p><a:r><a:t>상자 없이 글자만</a:t></a:r></a:p></p:txBody>
+               </p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    assert_eq!(slides[0].blocks[0].kind, Kind::Text);
+    assert!(slides[0].blocks[0].shape.is_none());
+}
+
+#[test]
+fn a_fully_transparent_line_is_not_a_border() {
+    // A colour named with `alpha val="0"` draws nothing in Office; importing
+    // it as an opaque hairline adds a box that was never on the slide.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Frame"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                   <a:ln><a:solidFill><a:srgbClr val="000000"><a:alpha val="0"/></a:srgbClr></a:solidFill></a:ln>
+                 </p:spPr>
+                 <p:txBody><a:bodyPr/><a:p><a:r><a:t>투명 테두리</a:t></a:r></a:p></p:txBody>
+               </p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.kind, Kind::Text);
+    assert!(
+        block.shape.as_ref().is_none_or(|s| s.line.is_none()),
+        "an alpha-0 outline is no outline"
+    );
+}
+
+#[test]
 fn an_explicitly_transparent_shape_stays_transparent() {
     let deck = Builder::new()
         .slide(

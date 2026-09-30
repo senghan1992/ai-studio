@@ -379,6 +379,9 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .block.is-selected { border-color: var(--focus); border-style: solid; }
 .block.is-editing { cursor: text; border-color: var(--focus); }
 .block__content { width: 100%; height: 100%; overflow: hidden; padding: 4px 6px; }
+/* Never shrink the text to fit the box: the overflow is measured and the box is
+   grown instead, so the whole paragraph stays readable. */
+.block__content > .md { flex: none; }
 .block__editor {
   /* The rendered text is the edit surface — the block's own type style lands
      here as inline styles (size, weight, colour, alignment…), so editing a

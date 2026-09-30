@@ -59,6 +59,8 @@ export default function SlideCanvas({
   const [guides, setGuides] = useState([]);
   // The rubber band while drawing a new shape.
   const [draw, setDraw] = useState(null);
+  // Slides whose overflowing text has already been fitted once.
+  const fitted = useRef(null);
 
   const canvas = slide.canvas ?? { w: 1280, h: 720, bg: '#ffffff' };
   const blocks = [...slide.blocks].sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
@@ -348,6 +350,47 @@ export default function SlideCanvas({
   }, [drag]);
 
   /*
+   * Grow a text box that holds more words than it has room for.
+   *
+   * PowerPoint never hides overflowing text: a box set to autofit grows, and a
+   * box without it lets the text spill. The editor clips instead, so an imported
+   * box whose type came out wider in this app's single font showed only part of
+   * its words until the reader dragged the box bigger by hand. Measuring the
+   * rendered content and growing the box by the difference makes the rectangle
+   * wrap its text from the start. It only grows, and only once per slide visit —
+   * enough to fix what was clipped without fighting a deliberate resize.
+   */
+  useLayoutEffect(() => {
+    // Only a slide that came from an Office file: an authored slide's box is the
+    // size the author chose, and silently growing it would be a change nobody
+    // asked for.
+    if (drag || editingId || fitted.current === slide.id || !slide.layoutPart) {
+      return undefined;
+    }
+    const root = canvasRef.current;
+    if (!root) return undefined;
+    fitted.current = slide.id;
+    const frame = requestAnimationFrame(() => {
+      for (const block of blocks) {
+        // Text and shapes both hold words. A pure image/table/chart does not.
+        if ((block.kind !== 'text' && block.kind !== 'shape') || block.locked) continue;
+        const content = root.querySelector(`[data-blk="${block.id}"] .block__content`);
+        if (!content) continue;
+        // The markdown child can be shrunk by the flex column, so its own
+        // scrollHeight is measured too — otherwise a box that clips internally
+        // reports no overflow.
+        const inner = content.firstElementChild;
+        const need = Math.max(content.scrollHeight, inner?.scrollHeight ?? 0);
+        const overflow = need - content.clientHeight;
+        if (overflow <= 2) continue;
+        const grown = Math.min(block.h + overflow, canvas.h - block.y);
+        if (grown > block.h + 1) onChangeBlock(block.id, { h: Math.round(grown) });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [slide.id, blocks, drag, editingId, onChangeBlock, canvas.h]);
+
+  /*
    * Arrow-key nudging, Delete, Escape — only when not typing in a block.
    *
    * A table with the cursor in one of its cells is driven by the table's own
@@ -580,6 +623,7 @@ function Block({
     <div
       className={`block${selected ? ' is-selected' : ''}${editing ? ' is-editing' : ''}`}
       style={boxStyle}
+      data-blk={block.id}
       onPointerDown={onPointerDown}
       onDoubleClick={(e) => {
         e.stopPropagation();

@@ -521,12 +521,17 @@ console.log('\n■ Deck 썸네일 (실제 슬라이드 미니어처)');
       const third = thumbs[2];
       captured.shape = !!third?.querySelector('svg.shape');
       captured.table = !!third?.querySelector('.tableblock');
+      // The scale is one transform on the whole slide, so a table's columns and
+      // a chart's labels shrink with it instead of being clipped.
+      const layer = thumbs[2]?.querySelector('.sorter-item__slide > div');
+      captured.layer = layer?.style?.transform ?? '';
     },
   });
   check('썸네일 오류 없음', errors.length === 0, errors.join('\n      '));
   check('모든 슬라이드에 미니어처가 그려짐', captured.render === true && captured.count >= 3);
   check('썸네일이 도형을 실제 도형으로 그림', captured.shape === true);
   check('썸네일이 표를 실제 표로 그림', captured.table === true);
+  check('미니어처가 전체를 한 번에 축소해 잘리지 않음', /^scale\(/.test(captured.layer), captured.layer);
 }
 
 console.log('\n■ Doc 에디터');

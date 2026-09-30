@@ -401,6 +401,19 @@ fn apply_modifiers(base: &str, node: &Node) -> String {
     )
 }
 
+/// The first `alpha` under a colour node, as a 0–100 percentage.
+///
+/// A line or fill whose colour is named but is fully transparent draws nothing;
+/// reading the colour and ignoring the alpha is how an invisible shape became a
+/// visible rectangle on import.
+fn alpha_of(node: &Node) -> f64 {
+    node.descendants("alpha")
+        .first()
+        .and_then(|a| a.attr_i64("val"))
+        .map(|v| v as f64 / 1000.0)
+        .unwrap_or(100.0)
+}
+
 /// The average of a list of colours, for the fills this format draws as one.
 fn average_color(colors: &[String]) -> Option<String> {
     let parsed: Vec<(f64, f64, f64)> = colors.iter().filter_map(|c| rgb(c)).collect();
@@ -1489,7 +1502,19 @@ impl SlideCtx<'_> {
             .and_then(|g| g.attr("prst"))
             .unwrap_or(if sp.name == "cxnSp" { "line" } else { "rect" })
             .to_string();
-        let spec = self.shape_spec(sp, &preset, geometry);
+        // `p:style` is the theme's *autoshape* style. A placeholder, a text box
+        // and a bare text frame (a `p:sp` with no `prstGeom` at all — what some
+        // exporters write) take their fill and outline from the layout / from
+        // `spPr`, never from that style. Painting a themed border on them draws
+        // rectangles the author never saw, because PowerPoint shows neither.
+        // Most of the "useless boxes" an imported deck grew came from here.
+        let is_text_box = sp
+            .path(&["nvSpPr", "cNvSpPr"])
+            .and_then(|n| n.attr("txBox"))
+            .is_some_and(|v| v == "1" || v == "true");
+        let has_geometry = sp.path(&["spPr", "prstGeom"]).is_some();
+        let use_style = placeholder.is_none() && !is_text_box && has_geometry;
+        let spec = self.shape_spec(sp, &preset, geometry, use_style);
 
         // A shape filled with a picture: the picture is what the slide showed, and
         // this format draws images. The shape's own outline is lost, which is far
@@ -1544,7 +1569,13 @@ impl SlideCtx<'_> {
         self.blocks.push(block);
     }
 
-    fn shape_spec(&mut self, sp: &Node, preset: &str, geometry: Geometry) -> ShapeSpec {
+    fn shape_spec(
+        &mut self,
+        sp: &Node,
+        preset: &str,
+        geometry: Geometry,
+        use_style: bool,
+    ) -> ShapeSpec {
         let props = sp.child("spPr");
 
         // "Stated no fill" and "stated nothing" are different: only the second
@@ -1563,6 +1594,10 @@ impl SlideCtx<'_> {
                         .and_then(|a| a.attr_i64("val"))
                         .map(|v| v as f64 / 1000.0)
                         .unwrap_or(100.0);
+                    // Fully transparent is "no fill", not a fill we cannot see.
+                    if opacity <= 0.0 {
+                        return None;
+                    }
                     // Through the theme first: a `schemeClr tx1` with lumMod/
                     // lumOff is how PowerPoint writes most grey and tinted
                     // fills, and `solid_color` alone sees no colour in it. A
@@ -1613,14 +1648,16 @@ impl SlideCtx<'_> {
 
         // Nothing explicit: the shape is themed, which is how Office draws most
         // of them. `fillRef`/`lnRef` point into the theme's colour scheme.
-        let styled = sp.child("style");
+        // Only autoshapes use this; a placeholder or a text box must not.
+        let theme_style = if use_style { sp.child("style") } else { None };
         let fill = fill.or_else(|| {
             if states_no_fill {
                 return None;
             }
-            let reference = styled?.child("fillRef")?;
-            // `idx="0"` means no fill at all.
-            if reference.attr("idx") == Some("0") {
+            let reference = theme_style?.child("fillRef")?;
+            // `idx="0"` means no fill at all, and an alpha of zero is no fill
+            // either even when a colour is named.
+            if reference.attr("idx") == Some("0") || alpha_of(reference) <= 0.0 {
                 return None;
             }
             self.theme.color_of(reference).map(|color| Fill {
@@ -1631,7 +1668,10 @@ impl SlideCtx<'_> {
 
         let explicit_line = props.and_then(|p| p.child("ln"));
         let line = explicit_line.and_then(|ln| {
-            if ln.child("noFill").is_some() {
+            if ln.child("noFill").is_some() || ln.attr_i64("w") == Some(0) {
+                return None;
+            }
+            if alpha_of(ln) <= 0.0 {
                 return None;
             }
             let color = self.theme.color_of(ln).or_else(|| solid_color(ln))?;
@@ -1644,13 +1684,14 @@ impl SlideCtx<'_> {
             Some(Line { color, width, dash })
         });
         // A themed outline, unless the shape stated one and said "none".
-        let stated_none = explicit_line.is_some_and(|ln| ln.child("noFill").is_some());
+        let stated_none = explicit_line
+            .is_some_and(|ln| ln.child("noFill").is_some() || ln.attr_i64("w") == Some(0));
         let line = line.or_else(|| {
             if stated_none {
                 return None;
             }
-            let reference = styled?.child("lnRef")?;
-            if reference.attr("idx") == Some("0") {
+            let reference = theme_style?.child("lnRef")?;
+            if reference.attr("idx") == Some("0") || alpha_of(reference) <= 0.0 {
                 return None;
             }
             let width = explicit_line
