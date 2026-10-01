@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  makeSheet, usedRange, newBlockId, toRef, parseRef, editValue, applyNumFmt, FUNCTION_NAMES, LIMITS,
+  makeSheet, usedRange, newBlockId, newSheetId, toRef, parseRef, editValue, applyNumFmt, FUNCTION_NAMES, LIMITS,
 } from '../core/index.js';
 
 import Shell from '../components/Shell.jsx';
@@ -23,7 +23,7 @@ import {
   applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn, autoFitRow,
   resolveTarget, findCells, replaceInCells,
   edgeOf, currentRegion, fillWithin, cycleRefLocks,
-  sortRange, looksLikeHeader, stepDecimals,
+  sortRange, looksLikeHeader, stepDecimals, duplicateSheetAt,
 } from './gridOps.js';
 
 const TABS = ['파일', '홈', '삽입', '수식', '데이터', 'AI'];
@@ -747,10 +747,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
   };
 
   const duplicateSheet = (at = index) => {
-    setItems((list) => {
-      const copy = { ...list[at], id: undefined, name: `${list[at].name} 사본` };
-      return [...list.slice(0, at + 1), copy, ...list.slice(at + 1)];
-    });
+    setItems((list) => duplicateSheetAt(list, at, newSheetId));
     setSheetIndex(at + 1);
     tabAnchorRef.current = at + 1;
     setSelectedTabs([at + 1]);

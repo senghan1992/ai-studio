@@ -44,7 +44,7 @@ export function listVars(list) {
 }
 
 export default function SlideCanvas({
-  slide, scale, selectedId, editingId, folder,
+  slide, scale, selectedId, selectedIds, editingId, folder,
   onSelect, onEdit, onChangeBlock, onChangeBlockMd, onAddBlock, onDeleteBlock,
   onContextMenu, onOpenBlock,
   // A shape picked from the gallery: the next drag on the canvas draws it.
@@ -63,6 +63,10 @@ export default function SlideCanvas({
 
   const canvas = slide.canvas ?? { w: 1280, h: 720, bg: '#ffffff' };
   const blocks = [...slide.blocks].sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
+  // The ordered multi-selection; a caller that only knows one id passes just
+  // the primary and every selected check still works.
+  const selected = selectedIds ?? (selectedId ? [selectedId] : []);
+  const single = selected.length <= 1;
 
   /** Candidate snap positions from every other block plus the canvas. */
   const snapLines = useCallback(
@@ -170,11 +174,30 @@ export default function SlideCanvas({
     if (editingId === block.id) return;
     event.preventDefault();
     event.stopPropagation();
+    // Ctrl/Cmd+click on the body toggles the block in the selection, as in
+    // Office — it never starts a drag. (On a handle Ctrl/Cmd still means
+    // "from the centre", so the toggle applies to move mode only.)
+    if (mode === 'move' && (event.ctrlKey || event.metaKey)) {
+      onSelect(block.id, { toggle: true });
+      return;
+    }
     onSelect(block.id);
     if (block.locked) return;
 
     event.currentTarget.setPointerCapture?.(event.pointerId);
     const rect = canvasRef.current?.getBoundingClientRect();
+    // Moving a block that is already selected carries the whole selection —
+    // every other selected block's origin is captured for the live preview.
+    const fellows =
+      mode === 'move' && selected.includes(block.id)
+        ? selected
+            .filter((id) => id !== block.id)
+            .map((id) => {
+              const fellow = slide.blocks.find((b) => b.id === id);
+              return fellow && !fellow.locked ? { id, x: fellow.x, y: fellow.y } : null;
+            })
+            .filter(Boolean)
+        : [];
     setDrag({
       id: block.id,
       mode,
@@ -183,6 +206,7 @@ export default function SlideCanvas({
       startY: event.clientY,
       origin: { x: block.x, y: block.y, w: block.w, h: block.h },
       box: { x: block.x, y: block.y, w: block.w, h: block.h },
+      fellows,
       /*
        * Alt+click steps down through the objects stacked at that point.
        * A plain click never moves, so the first real movement turns it into
@@ -349,6 +373,12 @@ export default function SlideCanvas({
     setGuides([]);
     if (box.x !== origin.x || box.y !== origin.y || box.w !== origin.w || box.h !== origin.h) {
       onChangeBlock(id, box);
+      // The rest of the selection follows by the same delta.
+      const dx = box.x - origin.x;
+      const dy = box.y - origin.y;
+      for (const fellow of drag.fellows ?? []) {
+        onChangeBlock(fellow.id, { x: fellow.x + dx, y: fellow.y + dy });
+      }
     }
   };
 
@@ -418,14 +448,15 @@ export default function SlideCanvas({
       if (editingId) return;
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (!selectedId) return;
+      if (selected.length === 0) return;
       if (activeCell && activeCell.id === selectedId) return;
       const block = slide.blocks.find((b) => b.id === selectedId);
       if (!block) return;
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        onDeleteBlock(selectedId);
+        // The whole selection goes, not just the primary.
+        for (const id of selected) onDeleteBlock(id);
         return;
       }
       if (e.key === 'Escape') {
@@ -459,15 +490,20 @@ export default function SlideCanvas({
         );
         return;
       }
-      onChangeBlock(
-        selectedId,
-        clamp({ ...block, x: block.x + delta[0], y: block.y + delta[1] }),
-        { merge: true }
-      );
+      // Nudging moves the whole selection together.
+      for (const id of selected) {
+        const peer = slide.blocks.find((b) => b.id === id);
+        if (!peer || peer.locked) continue;
+        onChangeBlock(
+          id,
+          clamp({ ...peer, x: peer.x + delta[0], y: peer.y + delta[1] }),
+          { merge: true }
+        );
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedId, editingId, activeCell, slide.blocks, canvas, onChangeBlock, onDeleteBlock, onSelect, onEdit]);
+  }, [selectedId, selectedIds, editingId, activeCell, slide.blocks, canvas, onChangeBlock, onDeleteBlock, onSelect, onEdit]);
 
   return (
     <div className="canvas-scroll" onMouseDown={(e) => e.target === e.currentTarget && onSelect(null)}>
@@ -512,13 +548,14 @@ export default function SlideCanvas({
       >
         {blocks.map((block) => {
           const live = previewOf(block, drag);
-          const selected = selectedId === block.id;
+          const isSelected = selected.includes(block.id);
           const editing = editingId === block.id;
           return (
             <Block
               key={block.id}
               block={live}
-              selected={selected}
+              selected={isSelected}
+              single={single}
               editing={editing}
               scale={scale}
               onPointerDown={(e) => pointerStart(e, live, 'move')}
@@ -579,6 +616,15 @@ export default function SlideCanvas({
  * cannot be a plain spread of `drag.box` over the block.
  */
 function previewOf(block, drag) {
+  if (drag && drag.mode === 'move' && block.id !== drag.id) {
+    const fellow = (drag.fellows ?? []).find((f) => f.id === block.id);
+    if (fellow) {
+      const dx = drag.box.x - drag.origin.x;
+      const dy = drag.box.y - drag.origin.y;
+      return { ...block, x: fellow.x + dx, y: fellow.y + dy };
+    }
+    return block;
+  }
   if (drag?.id !== block.id) return block;
   if (drag.mode === 'rotate') {
     if (block.kind === 'shape') {
@@ -601,7 +647,7 @@ function previewOf(block, drag) {
 /* ------------------------------------------------------------------- block */
 
 function Block({
-  block, selected, editing, scale, folder,
+  block, selected, single, editing, scale, folder,
   onPointerDown, onHandleDown, onDoubleClick, onChangeMd, onExit, onContextMenu,
   onRotateDown, onAdjustDown,
   activeCell, onActiveCellChange, onChangeTable, onSelectForCell,
@@ -708,7 +754,11 @@ function Block({
         </div>
       )}
 
-      {selected && !editing && !block.locked && (
+      {/*
+        Resize/rotate/adjust handles act on one box, so they show for a single
+        selection only. A multi-selection still drag-moves together.
+      */}
+      {selected && single && !editing && !block.locked && (
         <>
           {HANDLES.map((h) => (
             <div

@@ -62,3 +62,26 @@ export function distributeBlocks(blocks, axis) {
     return vertical ? { ...block, y: value } : { ...block, x: value };
   });
 }
+
+/* -------------------------------------------------------------- duplicate */
+
+/**
+ * Copy one slide right after itself, with fresh ids throughout.
+ *
+ * The copy must carry a real string `id` — `JSON.stringify` drops
+ * `undefined`, and the saver rejects the payload with "missing field `id`".
+ * Block ids are renewed too, so the two slides never share an identity.
+ * `ids` supplies the generators (`{ slideId, blockId }`), which keeps this
+ * pure and testable; the editor passes the core's own.
+ */
+export function duplicateSlideAt(slides, at, ids) {
+  const source = slides[at];
+  if (!source) return slides;
+  const copy = {
+    ...source,
+    id: ids.slideId(),
+    title: `${source.title} 사본`,
+    blocks: (source.blocks ?? []).map((b) => ({ ...b, id: ids.blockId() })),
+  };
+  return [...slides.slice(0, at + 1), copy, ...slides.slice(at + 1)];
+}

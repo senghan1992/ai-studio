@@ -174,6 +174,8 @@ export const makeSheet = ({ name = '시트1', withSample = false } = {}) =>
   wasm.makeSheet(name, withSample);
 
 export const newBlockId = () => wasm.newBlockId();
+export const newSlideId = () => wasm.newSlideId();
+export const newSheetId = () => wasm.newSheetId();
 export const slugify = (title) => wasm.slugify(String(title ?? ''));
 export const usedRange = (cells) => wasm.usedRange(cells ?? {});
 

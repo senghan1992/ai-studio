@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  makeSlide, newBlockId, SLIDE_LAYOUTS, positionPhrase, autoLayout, clampBox,
+  makeSlide, newBlockId, newSlideId, SLIDE_LAYOUTS, positionPhrase, autoLayout, clampBox,
   serializeChartBlock, parseChartBlock, makeShape, makeTable, tableEdit, tableInfo,
   readingOrder,
 } from '../core/index.js';
@@ -21,7 +21,8 @@ import SlideSorter from './SlideSorter.jsx';
 import Slideshow from './Slideshow.jsx';
 import PrintDeck from './PrintDeck.jsx';
 import { toggleWrap, toggleLinePrefix } from '../lib/markdown.js';
-import { alignBlocks, distributeBlocks } from './blockOps.js';
+import { alignBlocks, distributeBlocks, duplicateSlideAt } from './blockOps.js';
+import { toggleInSelection } from './selection.js';
 
 const TABS = ['파일', '홈', '삽입', '디자인', '슬라이드 쇼', 'AI'];
 /** Tabs that exist only while something is selected. */
@@ -141,7 +142,10 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
   const { project, items: slides, setItems, setTitle, save, saving, dirty, savedAt, undo, redo, canUndo, canRedo } = ctl;
 
   const [current, setCurrent] = useState(0);
-  const [selectedId, setSelectedId] = useState(null);
+  // Multi-selection: an ordered list of block ids, last entry primary.
+  // Ctrl/Cmd+click toggles membership; a plain click replaces the list.
+  const [selectedIds, setSelectedIds] = useState([]);
+  const selectedId = selectedIds[selectedIds.length - 1] ?? null;
   const [editingId, setEditingId] = useState(null);
   const [tab, setTab] = useState('홈');
   const [zoomMode, setZoomMode] = useState('fit');
@@ -173,7 +177,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
   const slide = slides[slideIndex];
 
   useEffect(() => {
-    setSelectedId(null);
+    setSelectedIds([]);
     setEditingId(null);
   }, [slideIndex]);
 
@@ -229,7 +233,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
         ...partial,
       };
       patchSlide((s) => ({ ...s, blocks: [...s.blocks, block] }));
-      setSelectedId(id);
+      setSelectedIds([id]);
       if ((partial.kind ?? 'text') === 'text') setEditingId(id);
       return id;
     },
@@ -288,7 +292,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
       const h = Math.min(600, Math.max(80, rows * 34));
       const block = makeTable(columns, rows, insertionBox(w, h));
       patchSlide((s) => ({ ...s, blocks: [...s.blocks, block] }));
-      setSelectedId(block.id);
+      setSelectedIds([block.id]);
       setActiveCell({ id: block.id, col: 0, row: 0, editing: false });
       setTablePicker(false);
       setTab('표 디자인');
@@ -336,7 +340,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
   const deleteBlock = useCallback(
     (blockId) => {
       patchSlide((s) => ({ ...s, blocks: s.blocks.filter((b) => b.id !== blockId) }));
-      setSelectedId(null);
+      setSelectedIds([]);
       setEditingId(null);
     },
     [patchSlide]
@@ -352,7 +356,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
         ...s,
         blocks: [...s.blocks, { ...block, id, x: block.x + 16, y: block.y + 16, z: maxZ + 1 }],
       }));
-      setSelectedId(id);
+      setSelectedIds([id]);
     },
     [patchSlide, slide]
   );
@@ -413,7 +417,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
       ...s,
       blocks: [...s.blocks, { ...clipboard, id, x: clipboard.x + 24, y: clipboard.y + 24, z: maxZ + 1 }],
     }));
-    setSelectedId(id);
+    setSelectedIds([id]);
   }, [clipboard, patchSlide, slide]);
 
   /* -------------------------------------------------------- format painter */
@@ -475,15 +479,8 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
    * index would copy whichever slide happened to be open.
    */
   const duplicateSlide = (at = slideIndex) => {
-    const source = slides[at];
-    if (!source) return;
-    const copy = {
-      ...source,
-      id: undefined,
-      title: `${source.title} 사본`,
-      blocks: source.blocks.map((b) => ({ ...b, id: newBlockId() })),
-    };
-    setItems((list) => [...list.slice(0, at + 1), copy, ...list.slice(at + 1)]);
+    if (!slides[at]) return;
+    setItems((list) => duplicateSlideAt(list, at, { slideId: newSlideId, blockId: newBlockId }));
     setCurrent(at + 1);
   };
 
@@ -600,7 +597,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
         const step = e.shiftKey ? -1 : 1;
         const next = order[(at + step + order.length) % order.length];
         setEditingId(null);
-        setSelectedId(next);
+        setSelectedIds([next]);
         return;
       }
       if (mod && e.key.toLowerCase() === 'd' && selectedId) {
@@ -748,7 +745,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
             .map((b) => ({
               label: `${KIND_LABELS[b.kind] ?? b.kind} — ${firstLine(b.md, b.kind)}`,
               title: '클릭하면 그 요소를 선택합니다 (Alt+클릭으로도 하나씩 내려갈 수 있습니다)',
-              onClick: () => setSelectedId(b.id),
+              onClick: () => setSelectedIds([b.id]),
             })),
         ]
       : []),
@@ -1660,10 +1657,11 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
           slide={slide}
           scale={scale}
           selectedId={selectedId}
+          selectedIds={selectedIds}
           editingId={editingId}
           folder={project.folder}
-          onSelect={(id) => {
-            setSelectedId(id);
+          onSelect={(id, { toggle } = {}) => {
+            setSelectedIds((prev) => (toggle ? toggleInSelection(prev, id) : id ? [id] : []));
             if (id !== editingId) setEditingId(null);
             // The cursor belongs to one table; moving away lets go of it.
             if (id !== selectedId && activeCell?.id !== id) setActiveCell(null);
@@ -1680,7 +1678,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
             if (!pendingShape) return;
             const block = makeShape(pendingShape.name, { ...box, z: nextZ() });
             patchSlide((sl) => ({ ...sl, blocks: [...sl.blocks, block] }));
-            setSelectedId(block.id);
+            setSelectedIds([block.id]);
             setPendingShape(null);
             setTab('도형 서식');
           }}

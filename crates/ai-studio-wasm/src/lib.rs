@@ -784,6 +784,16 @@ pub fn new_block_id() -> String {
     ai_format::ids::new_block_id()
 }
 
+#[wasm_bindgen(js_name = newSlideId)]
+pub fn new_slide_id() -> String {
+    ai_format::ids::new_slide_id()
+}
+
+#[wasm_bindgen(js_name = newSheetId)]
+pub fn new_sheet_id() -> String {
+    ai_format::ids::new_sheet_id()
+}
+
 #[wasm_bindgen(js_name = slugify)]
 pub fn slugify(title: &str) -> String {
     ai_format::ids::slugify(title, "untitled")

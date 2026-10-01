@@ -889,3 +889,19 @@ export function stepDecimals(fmt, direction) {
   const next = Math.max(0, Math.min(9, decimals.length + direction));
   return `${head}${integer}${next > 0 ? `.${'0'.repeat(next)}` : ''}${tail}`;
 }
+
+/* -------------------------------------------------------------- duplicate */
+
+/**
+ * Copy one sheet right after itself under a fresh id.
+ *
+ * Like a slide copy, the duplicate must carry a real string `id`:
+ * `undefined` is dropped by `JSON.stringify` and the saver rejects the
+ * payload with "missing field `id`".
+ */
+export function duplicateSheetAt(sheets, at, sheetId) {
+  const source = sheets[at];
+  if (!source) return sheets;
+  const copy = { ...source, id: sheetId(), name: `${source.name} 사본` };
+  return [...sheets.slice(0, at + 1), copy, ...sheets.slice(at + 1)];
+}
