@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { indexToCol, toRef, parseRange, displayValue, dependencies, LIMITS } from '../core/index.js';
-import { normalizeRange, mergeCovering, fillTarget, cycleRefLocks } from './gridOps.js';
+import { normalizeRange, mergeCovering, fillTarget, dropTarget, cycleRefLocks } from './gridOps.js';
 import SheetCharts from './SheetCharts.jsx';
 import { borderStyles } from '../lib/borderStyle.js';
 import { functionSuggestFor, default as FunctionSuggestList } from './FunctionSuggest.jsx';
@@ -26,9 +26,9 @@ export default function Sheet({
   sheet, sel, onSelChange, editing, showFormulas, zoom = 1,
   onEditStart, onCommit, onEditCancel,
   onEditChange, onRefDrag, onRefDragEnd,
-  onFill, onResizeCol, onResizeRow, onAutoFitCol, onAutoFitRow, onContextMenu,
+  onFill, onMoveRange, onResizeCol, onResizeRow, onAutoFitCol, onAutoFitRow, onContextMenu,
   findHits, currentHit,
-  selectedChartId, onSelectChart, onMoveChart, onEditChart, onDeleteChart,
+  selectedChartId, onSelectChart, onMoveChart, onDuplicateChart, onEditChart, onDeleteChart,
 }) {
   const containerRef = useRef(null);
   const [dragSelect, setDragSelect] = useState(false);
@@ -40,6 +40,15 @@ export default function Sheet({
   const refDragAnchor = useRef(null);
   const [fillTo, setFillTo] = useState(null);
   const [resizing, setResizing] = useState(null);
+  /**
+   * Excel's selection-border drag: pressed inside the selection, moving drops
+   * the range there, Ctrl/Alt held copies instead. `{ source, anchor, hover,
+   * target, active, duplicating, copyArmed }` — `active` once the pointer left
+   * the press cell, `target` the same-size range under the pointer.
+   */
+  const [rangeDrag, setRangeDrag] = useState(null);
+  const rangeDragRef = useRef(null);
+  rangeDragRef.current = rangeDrag;
 
   /*
    * Live drag state is mirrored into refs.
@@ -190,9 +199,61 @@ export default function Sheet({
     r >= fillPreview.r1 && r <= fillPreview.r2 && c >= fillPreview.c1 && c <= fillPreview.c2 &&
     !(r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2);
 
+  /* --------------------------------------------- selection-border drag (move) */
+
+  // The fill-drag pattern: the drop commits on window mouse-up (the pointer
+  // may be between cells when it releases), reading the mirrored ref so the
+  // commit never runs inside a `setState` updater. An unmoved press is a
+  // click and collapses the selection to the press cell; Escape cancels.
+  useEffect(() => {
+    if (!rangeDrag) return undefined;
+    const onUp = (e) => {
+      const current = rangeDragRef.current;
+      setRangeDrag(null);
+      rangeDragRef.current = null;
+      if (!current) return;
+      const copy =
+        current.duplicating || current.copyArmed || e.altKey || e.ctrlKey || e.metaKey;
+      if (current.active && current.target) onMoveRange?.(current.source, current.target, { copy });
+      else if (!current.active) {
+        onSelChange({
+          row: current.anchor.r, col: current.anchor.c,
+          row2: current.anchor.r, col2: current.anchor.c,
+        });
+      }
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      setRangeDrag(null);
+      rangeDragRef.current = null;
+    };
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [rangeDrag, onMoveRange, onSelChange]);
+
   /* ---------------------------------------------------------------- cells */
 
   const totalWidth = rowHeadW + Array.from({ length: visibleCols }, (_, c) => px(liveColWidth(c))).reduce((a, b) => a + b, 0);
+
+  /**
+   * Any range's rectangle in the table's own coordinates, summing real
+   * column/row sizes so it stays glued to the cells at any zoom.
+   */
+  const boxFor = (rg) => {
+    let left = rowHeadW;
+    let top = headerH;
+    let width = 0;
+    let height = 0;
+    for (let c = 0; c < rg.c1; c++) left += px(colWidth(c));
+    for (let r = 0; r < rg.r1; r++) top += px(rowHeight(r));
+    for (let c = rg.c1; c <= rg.c2; c++) width += px(colWidth(c));
+    for (let r = rg.r1; r <= rg.r2; r++) height += px(rowHeight(r));
+    return { left, top, width, height };
+  };
 
   /**
    * The selection marquee's rectangle, in the table's own coordinates.
@@ -202,20 +263,32 @@ export default function Sheet({
    * above the cells' own grid lines, which would otherwise wash the frame out.
    * Summing real column/row sizes keeps it glued to the cells at any zoom.
    */
-  const selBox = useMemo(() => {
-    let left = rowHeadW;
-    let top = headerH;
-    let width = 0;
-    let height = 0;
-    for (let c = 0; c < range.c1; c++) left += px(colWidth(c));
-    for (let r = 0; r < range.r1; r++) top += px(rowHeight(r));
-    for (let c = range.c1; c <= range.c2; c++) width += px(colWidth(c));
-    for (let r = range.r1; r <= range.r2; r++) height += px(rowHeight(r));
-    return { left, top, width, height };
+  const selBox = useMemo(
+    () => boxFor(range),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, z, sheet.colWidths, sheet.rowHeights]);
+    [range, z, sheet.colWidths, sheet.rowHeights]
+  );
 
-  const enterCell = (r, c) => {
+  /** The drop frame while a selection-border drag is under way. */
+  const dropBox = useMemo(
+    () => (rangeDrag?.active && rangeDrag.target ? boxFor(rangeDrag.target) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rangeDrag, z, sheet.colWidths, sheet.rowHeights]
+  );
+
+  const enterCell = (r, c, e) => {
+    const moving = rangeDragRef.current;
+    if (moving) {
+      const active = r !== moving.anchor.r || c !== moving.anchor.c;
+      setRangeDrag({
+        ...moving,
+        hover: { r, c },
+        active,
+        target: active ? dropTarget(moving.source, moving.anchor, { r, c }) : null,
+        duplicating: moving.copyArmed || !!(e && (e.altKey || e.ctrlKey || e.metaKey)),
+      });
+      return;
+    }
     // Excel: while a formula is being edited, dragging over cells feeds the
     // growing range into the text instead of moving the selection.
     if (refDragAnchor.current) {
@@ -427,7 +500,19 @@ export default function Sheet({
                         ...(frozenRow ? { top: rowOffset[r] } : {}),
                         ...(frozenCol || frozenRow ? { position: 'sticky' } : {}),
                         ...(frozenCol && frozenRow ? { zIndex: 3 } : {}),
+                        // Excel grabs the selection by its border: the move
+                        // cursor says so before the press does.
+                        ...(rangeDrag
+                          ? { cursor: rangeDrag.duplicating ? 'copy' : 'move' }
+                          : inSel && !editing && !isFillCorner
+                            ? { cursor: 'move' }
+                            : {}),
                       }}
+                      title={
+                        inSel && !editing && !isFillCorner
+                          ? '끌어서 이동 · Ctrl/Alt+드래그는 복사'
+                          : undefined
+                      }
                       onMouseDown={(e) => {
                         if (e.button !== 0) return;
                         const buildingFormula =
@@ -452,6 +537,22 @@ export default function Sheet({
                           }
                           onCommit(editing.value, null);
                         }
+                        // Excel: a press inside the selection grabs its border —
+                        // drag to move, Ctrl/Alt+drag to copy. Shift still
+                        // extends, and the fill handle owns its own press.
+                        if (!e.shiftKey && inSel && !isFillCorner) {
+                          e.preventDefault();
+                          setRangeDrag({
+                            source: { ...range },
+                            anchor: { r, c },
+                            hover: { r, c },
+                            target: null,
+                            active: false,
+                            duplicating: e.altKey || e.ctrlKey || e.metaKey,
+                            copyArmed: e.altKey || e.ctrlKey || e.metaKey,
+                          });
+                          return;
+                        }
                         setDragSelect(true);
                         onSelChange(
                           e.shiftKey
@@ -459,7 +560,7 @@ export default function Sheet({
                             : { row: r, col: c, row2: r, col2: c }
                         );
                       }}
-                      onMouseEnter={() => enterCell(r, c)}
+                      onMouseEnter={(e) => enterCell(r, c, e)}
                       onDoubleClick={() => onEditStart(r, c)}
                       onContextMenu={(e) => {
                         if (!(r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2)) {
@@ -514,12 +615,52 @@ export default function Sheet({
         style={{ left: selBox.left, top: selBox.top, width: selBox.width, height: selBox.height }}
       />
 
+      {/* The drop frame while a selection-border drag is under way — dashed,
+          with a '+' badge when Ctrl/Alt turns it into a copy. */}
+      {dropBox && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: dropBox.left,
+            top: dropBox.top,
+            width: dropBox.width,
+            height: dropBox.height,
+            border: '2px dashed #217346',
+            background: rangeDrag.duplicating ? 'rgba(33, 115, 70, 0.08)' : 'transparent',
+            pointerEvents: 'none',
+            zIndex: 4,
+          }}
+        >
+          {rangeDrag.duplicating && (
+            <span
+              style={{
+                position: 'absolute',
+                right: -9,
+                bottom: -9,
+                width: 16,
+                height: 16,
+                borderRadius: 3,
+                background: '#217346',
+                color: '#fff',
+                fontSize: 12,
+                lineHeight: '16px',
+                textAlign: 'center',
+              }}
+            >
+              +
+            </span>
+          )}
+        </div>
+      )}
+
       <SheetCharts
         sheet={sheet}
         zoom={z}
         selectedId={selectedChartId}
         onSelect={onSelectChart}
         onMove={onMoveChart}
+        onDuplicate={onDuplicateChart}
         onEdit={onEditChart}
         onDelete={onDeleteChart}
       />

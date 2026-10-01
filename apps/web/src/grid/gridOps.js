@@ -229,6 +229,90 @@ export function pasteTsv(sheet, text, startRow, startCol) {
   return next;
 }
 
+/**
+ * Drag a range to a new home — Excel's selection-border drag.
+ *
+ * `source` and `target` are the same size; the caller anchors the target's
+ * top-left where the pointer is. Without `copy` the source is cleared (a move,
+ * values and style travelling together); with it the source stays and the
+ * target is overwritten. A no-op drop (target === source) returns the sheet
+ * untouched so it never dirties history.
+ *
+ * Merges fully inside the source travel with it (and are duplicated on copy);
+ * a merge the drag would only half-cover is left where it is rather than torn.
+ * Formulas ride along unadjusted — the same trade the clipboard copy makes —
+ * and one recalculation settles the whole sheet afterwards.
+ */
+export function moveRange(sheet, source, target, { copy = false } = {}) {
+  const rows = source.r2 - source.r1;
+  const cols = source.c2 - source.c1;
+  if (target.r1 === source.r1 && target.c1 === source.c1) return sheet;
+
+  const snapshot = [];
+  for (let r = 0; r <= rows; r++) {
+    for (let c = 0; c <= cols; c++) {
+      snapshot.push({ r, c, cell: sheet.cells[toRef(source.c1 + c, source.r1 + r)] });
+    }
+  }
+  const cells = { ...sheet.cells };
+  let dims = sheet.dims;
+  const dr = target.r1 - source.r1;
+  const dc = target.c1 - source.c1;
+  if (!copy) {
+    // The snapshot above already holds every source value, so clearing first
+    // is safe even when the ranges overlap — the write below restores what
+    // the target covers.
+    for (let r = 0; r <= rows; r++) {
+      for (let c = 0; c <= cols; c++) {
+        delete cells[toRef(source.c1 + c, source.r1 + r)];
+      }
+    }
+  }
+  for (const { r, c, cell } of snapshot) {
+    const ref = toRef(target.c1 + c, target.r1 + r);
+    if (cell === undefined) {
+      if (!copy) delete cells[ref];
+    } else {
+      cells[ref] = { ...cell, ...(cell.style ? { style: { ...cell.style } } : {}) };
+    }
+    dims = growDims(dims, target.r1 + r, target.c1 + c);
+  }
+
+  // Merges are stored as "A1:B2" strings. Ones fully inside the source travel
+  // with it (duplicated on copy); a merge the drag would only half-cover, or
+  // a copy landing on occupied ground, is left behind — merges may never
+  // intersect.
+  let merges = sheet.merges ?? [];
+  const parsed = merges
+    .map((spec) => ({ spec, r: parseRange(spec) }))
+    .filter((entry) => entry.r);
+  const insideSource = ({ r }) =>
+    r.start.row >= source.r1 && r.end.row <= source.r2 &&
+    r.start.col >= source.c1 && r.end.col <= source.c2;
+  const travelling = parsed.filter(insideSource);
+  if (travelling.length) {
+    const shiftedRange = ({ r }) => ({
+      r1: r.start.row + dr, c1: r.start.col + dc,
+      r2: r.end.row + dr, c2: r.end.col + dc,
+    });
+    const rest = copy ? parsed : parsed.filter((entry) => !insideSource(entry));
+    const clean = travelling
+      .map((entry) => ({ entry, at: shiftedRange(entry) }))
+      .filter(({ at }) => !rest.some(({ r: o }) => rectsOverlap(at, o)))
+      .map(({ at }) => `${toRef(at.c1, at.r1)}:${toRef(at.c2, at.r2)}`);
+    merges = copy
+      ? [...merges, ...clean]
+      : [...rest.map(({ spec }) => spec), ...clean];
+  }
+  return withRecalc({ ...sheet, cells, dims, merges });
+}
+
+function rectsOverlap(a, b) {
+  const r1 = a.start ?? { row: a.r1, col: a.c1 };
+  const r2 = a.end ?? { row: a.r2, col: a.c2 };
+  return !(r2.row < b.start.row || r1.row > b.end.row || r2.col < b.start.col || r1.col > b.end.col);
+}
+
 /* ---------------------------------------------------------------- ranges */
 
 export function normalizeRange(sel) {
@@ -426,6 +510,23 @@ export function fillTarget(source, row, col) {
   return rightBy >= leftBy
     ? { ...source, c2: col, dir: 'right' }
     : { ...source, c1: col, dir: 'left' };
+}
+
+/**
+ * Where a selection-border drag lands.
+ *
+ * Excel carries the whole range along: the target is the same size as the
+ * source, its top-left shifted by how far the pointer moved from the press
+ * cell, clamped at the sheet's edges. A drop back on the press cell is `null`
+ * — a click, not a drag — so the caller can collapse the selection instead.
+ */
+export function dropTarget(source, anchor, hover) {
+  if (hover.r === anchor.r && hover.c === anchor.c) return null;
+  const rows = source.r2 - source.r1;
+  const cols = source.c2 - source.c1;
+  const r1 = Math.max(0, source.r1 + (hover.r - anchor.r));
+  const c1 = Math.max(0, source.c1 + (hover.c - anchor.c));
+  return { r1, c1, r2: r1 + rows, c2: c1 + cols };
 }
 
 /**

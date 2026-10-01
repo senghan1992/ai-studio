@@ -362,6 +362,41 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
   );
 
   /**
+   * Ctrl+드래그 / Alt+드래그가 끝난 자리: Office처럼 끌어다 놓은 위치에 복사본을 남긴다.
+   *
+   * 드래그 중인 원본은 움직이지 않고, 놓은 위치(dx, dy)에 새 id의 복사본들이
+   * 들어가며 선택이 복사본으로 넘어간다 — 원본 자리에 그대로 두는 실수를 막기
+   * 위해 복사본이 선택된 상태가 된다. 여러 개가 함께 선택돼 있었다면 상대
+   * 위치를 유지한 채 통째로 복사된다.
+   */
+  const duplicateBlocksAtOffset = useCallback(
+    (blockIds, dx, dy) => {
+      const sources = (blockIds ?? [])
+        .map((id) => slide?.blocks.find((b) => b.id === id))
+        .filter(Boolean)
+        .sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
+      if (!sources.length) return;
+      const baseZ = Math.max(0, ...(slide?.blocks ?? []).map((b) => b.z ?? 0));
+      const copies = sources.map((b, i) => ({
+        ...b,
+        id: newBlockId(),
+        x: Math.round(b.x + dx),
+        y: Math.round(b.y + dy),
+        z: baseZ + 1 + i,
+      }));
+      patchSlide((s) => ({ ...s, blocks: [...s.blocks, ...copies] }));
+      setSelectedIds(copies.map((c) => c.id));
+      setEditingId(null);
+      notify(
+        copies.length > 1
+          ? `${copies.length}개 요소를 복사했습니다`
+          : '요소를 복사했습니다 (Ctrl+드래그 · Alt+드래그)'
+      );
+    },
+    [patchSlide, slide, notify]
+  );
+
+  /**
    * Move a block one step through the stack.
    *
    * Office's 앞으로 가져오기 swaps the block with its nearest neighbour rather
@@ -1673,6 +1708,7 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
           onChangeBlockMd={changeBlockMd}
           onAddBlock={addBlock}
           onDeleteBlock={deleteBlock}
+          onDuplicateDrag={duplicateBlocksAtOffset}
           pendingShape={pendingShape}
           onDrawShape={(box) => {
             if (!pendingShape) return;

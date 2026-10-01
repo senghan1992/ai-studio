@@ -46,6 +46,7 @@ export function listVars(list) {
 export default function SlideCanvas({
   slide, scale, selectedId, selectedIds, editingId, folder,
   onSelect, onEdit, onChangeBlock, onChangeBlockMd, onAddBlock, onDeleteBlock,
+  onDuplicateDrag,
   onContextMenu, onOpenBlock,
   // A shape picked from the gallery: the next drag on the canvas draws it.
   pendingShape, onDrawShape,
@@ -174,22 +175,44 @@ export default function SlideCanvas({
     if (editingId === block.id) return;
     event.preventDefault();
     event.stopPropagation();
-    // Ctrl/Cmd+click on the body toggles the block in the selection, as in
-    // Office — it never starts a drag. (On a handle Ctrl/Cmd still means
-    // "from the centre", so the toggle applies to move mode only.)
-    if (mode === 'move' && (event.ctrlKey || event.metaKey)) {
-      onSelect(block.id, { toggle: true });
+    const isCtrl = event.ctrlKey || event.metaKey;
+    const isAlt = event.altKey;
+    // Resize/rotate/adjust handles keep their own modifiers (Ctrl = from the
+    // centre, Shift = aspect) — copy-on-drag is a move-mode gesture only.
+    if (mode !== 'move') {
+      onSelect(block.id);
+      if (block.locked) return;
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      setDrag({
+        id: block.id,
+        mode,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        origin: { x: block.x, y: block.y, w: block.w, h: block.h },
+        box: { x: block.x, y: block.y, w: block.w, h: block.h },
+        fellows: [],
+        pendingToggle: null,
+        copyArmed: false,
+        duplicating: false,
+        altCycle: false,
+        at: null,
+      });
       return;
     }
-    onSelect(block.id);
-    if (block.locked) return;
-
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    const rect = canvasRef.current?.getBoundingClientRect();
-    // Moving a block that is already selected carries the whole selection —
-    // every other selected block's origin is captured for the live preview.
-    const fellows =
-      mode === 'move' && selected.includes(block.id)
+    /*
+     * Office/Figma copy-on-drag: Ctrl+드래그 (Windows PowerPoint) and
+     * Alt+드래그 (Mac PowerPoint, Figma) duplicate the selection.
+     *
+     * The click meanings have to survive alongside it: a Ctrl+click without
+     * movement toggles multi-selection, an Alt+click without movement steps
+     * down through the stack. So neither is applied on pointer-down — the
+     * toggle/cycle fires on pointer-up only when the pointer never moved, and
+     * any real movement with a modifier held latches into a duplicate drag.
+     */
+    if (isCtrl) {
+      const already = selected.includes(block.id);
+      const fellows = already
         ? selected
             .filter((id) => id !== block.id)
             .map((id) => {
@@ -198,6 +221,67 @@ export default function SlideCanvas({
             })
             .filter(Boolean)
         : [];
+      if (block.locked) {
+        // A locked block neither moves nor copies by drag; the click still
+        // toggles it in the selection.
+        setDrag({
+          id: block.id,
+          mode,
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          origin: { x: block.x, y: block.y, w: block.w, h: block.h },
+          box: { x: block.x, y: block.y, w: block.w, h: block.h },
+          fellows: [],
+          pendingToggle: { id: block.id },
+          copyArmed: false,
+          duplicating: false,
+          altCycle: false,
+          at: null,
+          lockedClick: true,
+        });
+        return;
+      }
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      setDrag({
+        id: block.id,
+        mode,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        origin: { x: block.x, y: block.y, w: block.w, h: block.h },
+        box: { x: block.x, y: block.y, w: block.w, h: block.h },
+        fellows,
+        pendingToggle: { id: block.id },
+        copyArmed: true,
+        duplicating: false,
+        altCycle: false,
+        at: null,
+      });
+      return;
+    }
+    // A press on an already-selected block must not collapse the group yet:
+    // Office keeps the selection until pointer-up proves it was a click, so
+    // an Alt+드래그 duplicates the whole group and a plain drag moves it.
+    // The single-select lands on release only when nothing moved.
+    const alreadySelected = selected.includes(block.id);
+    if (!alreadySelected || block.locked) onSelect(block.id);
+    if (block.locked) return;
+
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    // Moving a block that is already selected carries the whole selection —
+    // every other selected block's origin is captured for the live preview.
+    const fellows =
+      alreadySelected
+        ? selected
+            .filter((id) => id !== block.id)
+            .map((id) => {
+              const fellow = slide.blocks.find((b) => b.id === id);
+              return fellow && !fellow.locked ? { id, x: fellow.x, y: fellow.y } : null;
+            })
+            .filter(Boolean)
+        : [];
+    const rect = canvasRef.current?.getBoundingClientRect();
     setDrag({
       id: block.id,
       mode,
@@ -207,13 +291,19 @@ export default function SlideCanvas({
       origin: { x: block.x, y: block.y, w: block.w, h: block.h },
       box: { x: block.x, y: block.y, w: block.w, h: block.h },
       fellows,
+      pendingToggle: null,
+      // Collapses the group to this block on release, but only when the
+      // pointer never moved — a drag keeps (and moves or copies) the group.
+      pendingSingle: alreadySelected ? { id: block.id } : null,
       /*
        * Alt+click steps down through the objects stacked at that point.
        * A plain click never moves, so the first real movement turns it into
-       * an ordinary drag — which is also the existing Alt+drag = no snapping.
+       * a duplicate drag — which is also the existing Alt+drag = no snapping.
        * `at` is where the pointer went down, in canvas coordinates.
        */
-      altCycle: event.altKey,
+      copyArmed: isAlt,
+      duplicating: false,
+      altCycle: isAlt,
       at: rect
         ? {
             x: (event.clientX - rect.left) / scale,
@@ -263,13 +353,27 @@ export default function SlideCanvas({
   const pointerMove = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
 
-    // An Alt+click stops being a click the moment it moves 4px; from there it
-    // is the existing Alt+drag (move with snapping off).
-    if (drag.altCycle) {
-      if (Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) > 4) {
-        setDrag((d) => (d ? { ...d, altCycle: false } : d));
+    /*
+     * Click-vs-drag arbitration for the modifier gestures.
+     *
+     * A Ctrl+click toggles multi-selection and an Alt+click steps down the
+     * stack — but only when the pointer never really moves. Past ~4px the
+     * click is over: with Ctrl or Alt held (at press or mid-drag, as in
+     * Office) it latches into a duplicate drag instead. A locked Ctrl+click
+     * never drags at all.
+     */
+    if (drag.mode === 'move' && !drag.lockedClick) {
+      const dist = Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY);
+      if ((drag.altCycle || drag.pendingToggle || drag.pendingSingle) && dist <= 4 && !drag.duplicating) return;
+      const copyHeld = event.altKey || event.ctrlKey || event.metaKey;
+      if (!drag.duplicating && dist > 4 && (drag.copyArmed || copyHeld)) {
+        // A plain drag that picks up a modifier mid-gesture copies too, as in
+        // Office — but a modifier-free drag stays a move, and a handle drag
+        // never copies (Ctrl there means "from the centre").
+        setDrag((d) => (d && !d.duplicating ? { ...d, duplicating: true, altCycle: false, pendingToggle: null, pendingSingle: null } : d));
+      } else if ((drag.altCycle || drag.pendingToggle || drag.pendingSingle) && !drag.duplicating) {
+        setDrag((d) => (d ? { ...d, altCycle: false, pendingToggle: null, pendingSingle: null } : d));
       }
-      return;
     }
 
     if (drag.mode === 'rotate') {
@@ -358,6 +462,54 @@ export default function SlideCanvas({
       return;
     }
 
+    // A click that never moved resolves the deferred modifier meaning: an
+    // Alt+click steps down the stack, a Ctrl+click toggles multi-selection.
+    // A real movement with a modifier instead becomes copies at the drop point.
+    if (drag.mode === 'move' && !drag.lockedClick) {
+      const { origin } = drag;
+      const box = drag.box ?? origin;
+      const moved = box.x !== origin.x || box.y !== origin.y || box.w !== origin.w || box.h !== origin.h;
+      if (!moved) {
+        if (drag.altCycle) {
+          const { id, at } = drag;
+          setDrag(null);
+          setGuides([]);
+          onSelect(blockBelowAt(at, id));
+          return;
+        }
+        if (drag.pendingToggle) {
+          const { id } = drag.pendingToggle;
+          setDrag(null);
+          setGuides([]);
+          onSelect(id, { toggle: true });
+          return;
+        }
+        if (drag.pendingSingle) {
+          const { id } = drag.pendingSingle;
+          setDrag(null);
+          setGuides([]);
+          onSelect(id);
+          return;
+        }
+      } else if (drag.duplicating) {
+        const ids = [drag.id, ...(drag.fellows ?? []).map((f) => f.id)];
+        const dx = box.x - origin.x;
+        const dy = box.y - origin.y;
+        setDrag(null);
+        setGuides([]);
+        onDuplicateDrag?.(ids, dx, dy);
+        return;
+      }
+    }
+    if (drag.lockedClick) {
+      // A locked block never drags: a Ctrl+press is a toggle-click candidate.
+      const pending = drag.pendingToggle;
+      setDrag(null);
+      setGuides([]);
+      if (pending) onSelect(pending.id, { toggle: true });
+      return;
+    }
+
     // An Alt+click (never moved) selects the object below the pointer instead
     // of dragging anything.
     if (drag.altCycle) {
@@ -365,6 +517,20 @@ export default function SlideCanvas({
       setDrag(null);
       setGuides([]);
       onSelect(blockBelowAt(at, id));
+      return;
+    }
+    if (drag.pendingToggle) {
+      const { id } = drag.pendingToggle;
+      setDrag(null);
+      setGuides([]);
+      onSelect(id, { toggle: true });
+      return;
+    }
+    if (drag.pendingSingle) {
+      const { id } = drag.pendingSingle;
+      setDrag(null);
+      setGuides([]);
+      onSelect(id);
       return;
     }
 
@@ -515,7 +681,9 @@ export default function SlideCanvas({
           height: canvas.h,
           background: canvas.bg ?? '#fff',
           transform: `scale(${scale})`,
-          cursor: pendingShape ? 'crosshair' : undefined,
+          // While a duplicate drag is latched the cursor carries the Office
+          // copy badge, so Alt+드래그/Ctrl+드래그 reads as "놓으면 복사된다".
+          cursor: drag?.duplicating ? 'copy' : pendingShape ? 'crosshair' : undefined,
         }}
         onPointerDown={drawStart}
         onPointerMove={(event) => {
@@ -528,8 +696,8 @@ export default function SlideCanvas({
         }}
         onPointerCancel={(event) => {
           setDraw(null);
-          // A cancelled Alt+click must not silently change the selection.
-          if (drag?.altCycle) {
+          // A cancelled modifier-click must not silently change the selection.
+          if (drag?.altCycle || drag?.pendingToggle || drag?.pendingSingle) {
             setDrag(null);
             setGuides([]);
           } else {

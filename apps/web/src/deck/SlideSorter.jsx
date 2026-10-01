@@ -104,7 +104,11 @@ export default function SlideSorter({
               onDragLeave={() => setDragOver((v) => (v === index ? null : v))}
               onDrop={(e) => {
                 e.preventDefault();
-                if (dragFrom !== null && dragFrom !== index) onReorder(dragFrom, index);
+                // PowerPoint처럼 Ctrl(⌘)/Alt를 누른 채 놓으면 이동이 아니라 그
+                // 자리 뒤에 복제한다. 복제본은 원본 바로 뒤에 들어가므로 놓은
+                // 위치는 무시된다.
+                if (dragFrom !== null && (e.ctrlKey || e.metaKey || e.altKey)) onDuplicate?.(dragFrom);
+                else if (dragFrom !== null && dragFrom !== index) onReorder(dragFrom, index);
                 setDragFrom(null);
                 setDragOver(null);
               }}
@@ -139,7 +143,7 @@ export default function SlideSorter({
                   else onSelect(index - 1);
                 }
               }}
-              title={`${slide.title} — 끌어서 순서 변경, 우클릭으로 메뉴, Delete로 삭제`}
+              title={`${slide.title} — 끌어서 순서 변경 (Ctrl·Alt+드롭은 복제), 우클릭으로 메뉴, Delete로 삭제`}
             >
               <span className="sorter-item__no">{index + 1}</span>
               <SlideThumb slide={slide} folder={folder} />

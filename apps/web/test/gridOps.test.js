@@ -9,7 +9,7 @@ await loadCore();
 const { toRef, displayValue } = await import('../src/core/index.js');
 const {
   setCellInput, patchCells, paintFormat, clearRange, structuralEdit,
-  fillTarget, fillRange, mergeSelection, unmergeSelection, mergeCovering,
+  fillTarget, dropTarget, moveRange, fillRange, mergeSelection, unmergeSelection, mergeCovering,
   applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn,
   resolveTarget, findCells, replaceInCells,
   rangeToTsv, rangeToFormulaTsv, pasteTsv, normalizeRange, selectionStats,
@@ -589,4 +589,73 @@ test('a spill refuses to enter a merged range', () => {
   const sheet = setCellInput(sheetOf({}, { merges: ['A2:B2'] }), 0, 0, '=SEQUENCE(3)');
   assert.equal(shown(sheet, 'A1'), '#SPILL!');
   assert.equal(at(sheet, 'A2'), undefined, 'nothing lands under the merge');
+});
+
+/* --------------------------------------- selection-border drag (move/copy) */
+
+test('dropTarget carries the whole range along from the press cell', () => {
+  const source = { r1: 2, c1: 2, r2: 3, c2: 4 };
+  assert.deepEqual(
+    dropTarget(source, { r: 2, c: 2 }, { r: 5, c: 6 }),
+    { r1: 5, c1: 6, r2: 6, c2: 8 },
+    'same size, shifted by the pointer delta'
+  );
+  assert.equal(
+    dropTarget(source, { r: 2, c: 2 }, { r: 2, c: 2 }),
+    null,
+    'no movement is a click, not a drag'
+  );
+  assert.deepEqual(
+    dropTarget(source, { r: 3, c: 4 }, { r: 0, c: 0 }),
+    { r1: 0, c1: 0, r2: 1, c2: 2 },
+    'clamped at the sheet edges'
+  );
+});
+
+const moveSheet = () =>
+  sheetOf({
+    A1: { v: 1, t: 'n' }, B1: { v: 2, t: 'n' },
+    A2: { v: 3, t: 'n' }, B2: { v: 4, t: 'n' },
+  });
+
+test('moveRange moves values and clears the source', () => {
+  const source = { r1: 0, c1: 0, r2: 1, c2: 1 };
+  const sheet = moveRange(moveSheet(), source, { r1: 2, c1: 2, r2: 3, c2: 3 });
+  assert.equal(shown(sheet, 'C3'), '1');
+  assert.equal(shown(sheet, 'D4'), '4');
+  assert.equal(at(sheet, 'A1'), undefined, 'the source is cleared');
+  assert.equal(at(sheet, 'B2'), undefined, 'the source is cleared');
+});
+
+test('moveRange with copy overwrites the target and keeps the source', () => {
+  const source = { r1: 0, c1: 0, r2: 0, c2: 0 };
+  const sheet = moveRange(moveSheet(), source, { r1: 0, c1: 1, r2: 0, c2: 1 }, { copy: true });
+  assert.equal(shown(sheet, 'B1'), '1', 'the target is overwritten');
+  assert.equal(shown(sheet, 'A1'), '1', 'the source stays');
+});
+
+test('a no-op drop returns the sheet untouched', () => {
+  const sheet = moveSheet();
+  const source = { r1: 0, c1: 0, r2: 1, c2: 1 };
+  assert.equal(moveRange(sheet, source, { ...source }), sheet, 'same reference, no history dirtied');
+});
+
+test('a merge fully inside the source travels with it', () => {
+  const sheet = moveRange(
+    sheetOf({ A1: { v: 'h', t: 's' }, B1: { v: '', t: 's' } }, { merges: ['A1:B1'] }),
+    { r1: 0, c1: 0, r2: 0, c2: 1 },
+    { r1: 2, c1: 0, r2: 2, c2: 1 }
+  );
+  assert.ok(sheet.merges.includes('A3:B3'), `merge travelled: ${sheet.merges}`);
+  assert.ok(!sheet.merges.includes('A1:B1'), 'the source merge is gone after a move');
+});
+
+test('a copy onto occupied merges leaves them alone', () => {
+  const sheet = moveRange(
+    sheetOf({ A1: { v: 'h', t: 's' } }, { merges: ['C1:D1'] }),
+    { r1: 0, c1: 0, r2: 0, c2: 1 },
+    { r1: 0, c1: 2, r2: 0, c2: 3 },
+    { copy: true }
+  );
+  assert.deepEqual(sheet.merges, ['C1:D1'], 'merges never intersect');
 });

@@ -23,7 +23,7 @@ import {
   applyBorders, BORDER_PRESETS, setColWidth, setRowHeight, autoFitColumn, autoFitRow,
   resolveTarget, findCells, replaceInCells,
   edgeOf, currentRegion, fillWithin, cycleRefLocks,
-  sortRange, looksLikeHeader, stepDecimals, duplicateSheetAt,
+  sortRange, looksLikeHeader, stepDecimals, duplicateSheetAt, moveRange,
 } from './gridOps.js';
 
 const TABS = ['파일', '홈', '삽입', '수식', '데이터', 'AI'];
@@ -356,6 +356,23 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
 
   const doFill = useCallback((source, target) => patchSheets((s) => fillRange(s, source, target)), [patchSheets]);
 
+  /**
+   * 선택 테두리 끌기 — Excel's selection-border drag.
+   *
+   * 그대로 놓으면 이동, Ctrl/Alt를 누른 채 놓으면 복사. 놓은 자리가 원본과
+   * 같으면 `moveRange`가 시트를 그대로 돌려주므로 히스토리를 더럽히지 않고,
+   * 선택은 놓은 자리(복사·이동 공통)를 따라간다.
+   */
+  const doMoveRange = useCallback(
+    (source, target, { copy = false } = {}) => {
+      if (target.r1 === source.r1 && target.c1 === source.c1) return;
+      patchSheets((s) => moveRange(s, source, target, { copy }));
+      setSel({ row: target.r1, col: target.c1, row2: target.r2, col2: target.c2 });
+      notify(copy ? '선택 영역을 복사했습니다 (Ctrl/Alt+드래그)' : '선택 영역을 이동했습니다');
+    },
+    [patchSheets, notify]
+  );
+
   /* -------------------------------------------------------- format painter */
 
   /**
@@ -417,6 +434,25 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
       setSelectedChartId(null);
     },
     [patchSheet]
+  );
+
+  /**
+   * Ctrl/Alt+드래그로 차트를 복사 — Excel에서 떠 있는 개체를 복제하는 손동작.
+   *
+   * 놓은 자리에 새 id의 복사본이 남고 선택이 복사본으로 넘어간다.
+   */
+  const duplicateChart = useCallback(
+    (id, box) => {
+      const nid = newBlockId();
+      patchSheet((s) => {
+        const src = (s.charts ?? []).find((c) => c.id === id);
+        if (!src) return s;
+        return { ...s, charts: [...(s.charts ?? []), { ...src, id: nid, x: box.x, y: box.y }] };
+      });
+      setSelectedChartId(nid);
+      notify('차트를 복사했습니다 (Ctrl/Alt+드래그)');
+    },
+    [patchSheet, notify]
   );
 
   /*
@@ -1376,6 +1412,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           onRefDrag={handleRefDrag}
           onRefDragEnd={handleRefDragEnd}
           onFill={doFill}
+          onMoveRange={doMoveRange}
           onResizeCol={(c, width) => patchSheet((s) => setColWidth(s, c, width))}
           onResizeRow={(r, height) => patchSheet((s) => setRowHeight(s, r, height))}
           onAutoFitCol={(c) => patchSheet((s) => setColWidth(s, c, autoFitColumn(s, c, used?.maxRow ?? 20)))}
@@ -1389,6 +1426,7 @@ export default function GridEditor({ ctl, onHome, notify, onNewProject }) {
           selectedChartId={selectedChartId}
           onSelectChart={setSelectedChartId}
           onMoveChart={(id, box) => updateChart(id, box)}
+          onDuplicateChart={duplicateChart}
           onEditChart={(id) => setChartDialog({ mode: 'edit', id })}
           onDeleteChart={deleteChart}
         />
