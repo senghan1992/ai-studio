@@ -7,7 +7,7 @@ import { duplicateSlideAt } from '../src/deck/blockOps.js';
 import { duplicateSheetAt } from '../src/grid/gridOps.js';
 
 await loadCore();
-const { newSlideId, newSheetId } = await import('../src/core/index.js');
+const { newSlideId, newSheetId, localSlideId, localSheetId } = await import('../src/core/index.js');
 
 /**
  * Duplicating a slide or a sheet must produce an object the saver accepts:
@@ -62,4 +62,17 @@ test('the core hands out slide and sheet ids', () => {
   assert.notEqual(a, b);
   const c = newSheetId();
   assert.ok(c.startsWith('sh_'), c);
+});
+
+test('local id fallback matches the core format when wasm is stale', () => {
+  // `src/core/pkg/` is gitignored, so a checkout can run a wasm binary from
+  // before an export existed — calling it would throw inside a React state
+  // updater and blank the screen. The fallback keeps duplicate working.
+  for (const [gen, prefix] of [[localSlideId, 's_'], [localSheetId, 'sh_']]) {
+    const a = gen();
+    const b = gen();
+    assert.ok(a.startsWith(prefix), a);
+    assert.match(a, new RegExp(`^${prefix}[a-z0-9]{5}$`), a);
+    assert.notEqual(a, b);
+  }
 });

@@ -174,8 +174,28 @@ export const makeSheet = ({ name = '시트1', withSample = false } = {}) =>
   wasm.makeSheet(name, withSample);
 
 export const newBlockId = () => wasm.newBlockId();
-export const newSlideId = () => wasm.newSlideId();
-export const newSheetId = () => wasm.newSheetId();
+
+/**
+ * Local id fallback, in the core's own format (`s_`/`sh_` plus five
+ * lowercase alphanumerics — see `crates/ai-format/src/ids.rs`).
+ *
+ * `src/core/pkg/` is gitignored, so a checkout can run a wasm binary built
+ * before an export existed; calling it would throw a TypeError inside a
+ * React state updater and blank the screen. Preferring the core but falling
+ * back here keeps duplicate working on a stale binary.
+ */
+const LOCAL_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+const localId = (prefix) =>
+  `${prefix}${Array.from(
+    { length: 5 },
+    () => LOCAL_ALPHABET[Math.floor(Math.random() * LOCAL_ALPHABET.length)]
+  ).join('')}`;
+
+export const localSlideId = () => localId('s_');
+export const localSheetId = () => localId('sh_');
+
+export const newSlideId = () => wasm.newSlideId?.() ?? localSlideId();
+export const newSheetId = () => wasm.newSheetId?.() ?? localSheetId();
 export const slugify = (title) => wasm.slugify(String(title ?? ''));
 export const usedRange = (cells) => wasm.usedRange(cells ?? {});
 
