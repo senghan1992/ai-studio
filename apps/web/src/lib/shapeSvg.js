@@ -326,6 +326,10 @@ export function shapePath(preset, shape) {
       return 'M50,0L72,28L58,28L58,58L78,58L78,42L100,70L78,98L78,82L22,82L22,98L0,70L22,42L22,58L42,58L42,28L28,28Z';
     case 'bentArrow':
       return 'M0,100L0,55C0,35 15,25 35,25L70,25L70,0L100,32L70,64L70,40L38,40C30,40 25,45 25,55L25,100Z';
+    case 'bentUpArrow':
+      return 'M50,0L100,50L85,50L85,30L55,55L55,100L45,100L45,55L15,30L15,50Z';
+    case 'curvedUpArrow':
+      return 'M50,0C35,15 30,40 35,55L20,55L45,100L70,55L55,55C60,40 55,15 50,0Z';
     case 'uturnArrow':
       return 'M0,100L0,40C0,18 16,0 38,0C60,0 76,18 76,40L76,62L100,62L62,100L24,62L48,62L48,40C48,34 44,28 38,28C32,28 28,34 28,40L28,100Z';
     case 'curvedRightArrow':
@@ -354,6 +358,37 @@ export function shapePath(preset, shape) {
       return 'M0,100L0,30L20,30L20,20L5,20L50,0L95,20L80,20L80,30L100,30L100,100Z';
     case 'downArrowCallout':
       return 'M0,0L0,70L20,70L20,80L5,80L50,100L95,80L80,80L80,70L100,70L100,0Z';
+    case 'leftRightArrowCallout':
+      // A two-headed callout arrow: a shaft with heads on both ends, and a
+      // vertical tail dropping to a point at the adjust handle.
+      {
+        const shaft = clamp(adj(shape, 'adj1', 0.5), 0.05, 1) * 50;
+        const head = clamp(adj(shape, 'adj2', 0.5), 0.05, 0.5) * 100;
+        const tx = 50 + clamp(adj(shape, 'adj3', 0), -1.5, 1.5) * 100;
+        const ty = clamp(adj(shape, 'adj4', 0.8), -1.5, 1.5) * 100;
+        const y0 = 50 - shaft,
+          y1 = 50 + shaft;
+        return [
+          `M0,50L${head},0L${head},${y0}L${100 - head},${y0}L${100 - head},0L100,50`,
+          `L${100 - head},100L${100 - head},${y1}L${head},${y1}L${head},100Z`,
+          `M50,${y1}L${tx},${ty}L70,${y1}Z`,
+        ].join(' ');
+      }
+    case 'upDownArrowCallout':
+      // The same two-headed callout, rotated to point up and down.
+      {
+        const shaft = clamp(adj(shape, 'adj1', 0.5), 0.05, 1) * 50;
+        const head = clamp(adj(shape, 'adj2', 0.5), 0.05, 0.5) * 100;
+        const tx = 50 + clamp(adj(shape, 'adj3', 0), -1.5, 1.5) * 100;
+        const ty = clamp(adj(shape, 'adj4', 0.8), -1.5, 1.5) * 100;
+        const x0 = 50 - shaft,
+          x1 = 50 + shaft;
+        return [
+          `M50,0L0,${head}L${x0},${head}L${x0},${100 - head}L0,${100 - head}L50,100`,
+          `L100,${100 - head}L${x1},${100 - head}L${x1},${head}L100,${head}Z`,
+          `M${x1},50L${tx},${ty}L${x1},70Z`,
+        ].join(' ');
+      }
 
     /* --------------------------------------------------------- flowchart */
     case 'flowChartInputOutput':
