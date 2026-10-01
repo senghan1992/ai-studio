@@ -20,7 +20,7 @@ use ai_format::chart::{ChartSpec, Series};
 use ai_format::geometry::{Canvas, DEFAULT_CANVAS};
 use ai_format::ids::{new_block_id, new_slide_id};
 use ai_format::model::{Slide, SlideBlock};
-use ai_format::shape::{Dash, Fill, Line, ShapeSpec};
+use ai_format::shape::{Dash, Fill, Line, Marker, ShapeSpec};
 use ai_format::table::{apply_markdown_authority, to_markdown_table, CellFormat, TableSpec};
 
 use crate::ooxml::{px, solid_color, Node, Package, Relationship, Result};
@@ -399,6 +399,19 @@ fn apply_modifiers(base: &str, node: &Node) -> String {
         g.clamp(0.0, 255.0).round() as u8,
         b.clamp(0.0, 255.0).round() as u8
     )
+}
+
+/// The markers at a line's ends: `headEnd` draws at the path's end, `tailEnd`
+/// at its start. A connector arrow without these comes back as a plain line,
+/// which is the most visible way an imported diagram fails to look like itself.
+fn line_markers(ln: &Node) -> (Marker, Marker) {
+    let end = |name: &str| {
+        ln.child(name)
+            .and_then(|n| n.attr("type"))
+            .map(Marker::from_ooxml)
+            .unwrap_or(Marker::None)
+    };
+    (end("headEnd"), end("tailEnd"))
 }
 
 /// The first `alpha` under a colour node, as a 0–100 percentage.
@@ -1513,6 +1526,13 @@ impl SlideCtx<'_> {
             .and_then(|n| n.attr("txBox"))
             .is_some_and(|v| v == "1" || v == "true");
         let has_geometry = sp.path(&["spPr", "prstGeom"]).is_some();
+        // A freeform carries its outline in `a:custGeom`, which has no preset
+        // name to keep: it comes across as a rectangle with its real fill and
+        // outline, and the reader is told rather than left guessing.
+        if sp.path(&["spPr", "custGeom"]).is_some() {
+            self.warnings
+                .note("사용자 지정 도형은 사각형으로 바꿨습니다");
+        }
         let use_style = placeholder.is_none() && !is_text_box && has_geometry;
         let spec = self.shape_spec(sp, &preset, geometry, use_style);
 
@@ -1531,6 +1551,21 @@ impl SlideCtx<'_> {
         let kind = if decorative { Kind::Shape } else { Kind::Text };
         if kind == Kind::Text && markdown.trim().is_empty() {
             return;
+        }
+        // Rotation and flips on a text box have no ShapeSpec to ride in, so
+        // they live on the style — the same keys an image uses, which the
+        // renderer and both exporters already read. Without this a rotated
+        // caption comes back upright.
+        if kind == Kind::Text {
+            if geometry.rotation != 0.0 {
+                text_style.insert("rotation".to_string(), json!(geometry.rotation));
+            }
+            if geometry.flip_h {
+                text_style.insert("flipH".to_string(), json!(true));
+            }
+            if geometry.flip_v {
+                text_style.insert("flipV".to_string(), json!(true));
+            }
         }
 
         // The layout's cached text for a slide number is `‹#›`; the slide's own
@@ -1681,7 +1716,14 @@ impl SlideCtx<'_> {
                 .and_then(|d| d.attr("val"))
                 .map(Dash::from_ooxml)
                 .unwrap_or(Dash::Solid);
-            Some(Line { color, width, dash })
+            let (head, tail) = line_markers(ln);
+            Some(Line {
+                color,
+                width,
+                dash,
+                head,
+                tail,
+            })
         });
         // A themed outline, unless the shape stated one and said "none".
         let stated_none = explicit_line
@@ -1704,9 +1746,16 @@ impl SlideCtx<'_> {
                 .and_then(|d| d.attr("val"))
                 .map(Dash::from_ooxml)
                 .unwrap_or(Dash::Solid);
-            self.theme
-                .color_of(reference)
-                .map(|color| Line { color, width, dash })
+            let (head, tail) = explicit_line
+                .map(line_markers)
+                .unwrap_or((Marker::None, Marker::None));
+            self.theme.color_of(reference).map(|color| Line {
+                color,
+                width,
+                dash,
+                head,
+                tail,
+            })
         });
 
         let adjust: IndexMap<String, f64> = props

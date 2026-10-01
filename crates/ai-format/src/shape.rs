@@ -297,6 +297,48 @@ impl Dash {
     }
 }
 
+/// A line-end marker: the arrowhead (or plain end) a connector or line draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Marker {
+    #[default]
+    None,
+    Triangle,
+    Stealth,
+    Diamond,
+    Oval,
+    Arrow,
+}
+
+impl Marker {
+    /// The OOXML `a:headEnd`/`a:tailEnd` type value.
+    pub fn as_ooxml(self) -> &'static str {
+        match self {
+            Marker::None => "none",
+            Marker::Triangle => "triangle",
+            Marker::Stealth => "stealth",
+            Marker::Diamond => "diamond",
+            Marker::Oval => "oval",
+            Marker::Arrow => "arrow",
+        }
+    }
+
+    pub fn from_ooxml(value: &str) -> Marker {
+        match value {
+            "triangle" => Marker::Triangle,
+            "stealth" => Marker::Stealth,
+            "diamond" => Marker::Diamond,
+            "oval" => Marker::Oval,
+            "arrow" => Marker::Arrow,
+            _ => Marker::None,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        *self == Marker::None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Line {
     pub color: String,
@@ -305,6 +347,12 @@ pub struct Line {
     pub width: f64,
     #[serde(default, skip_serializing_if = "is_solid")]
     pub dash: Dash,
+    /// The marker at the path's start (`a:tailEnd`) and end (`a:headEnd`).
+    /// Absent on old files, which read as plain ends.
+    #[serde(default, skip_serializing_if = "Marker::is_none")]
+    pub head: Marker,
+    #[serde(default, skip_serializing_if = "Marker::is_none")]
+    pub tail: Marker,
 }
 
 fn one_px() -> f64 {
@@ -446,6 +494,8 @@ mod tests {
                 color: "#000000".into(),
                 width: 2.0,
                 dash: Dash::Dash,
+                head: Marker::None,
+                tail: Marker::None,
             }),
             ..ShapeSpec::default()
         };
@@ -456,6 +506,24 @@ mod tests {
         );
         let back: ShapeSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn line_markers_map_both_ways() {
+        for marker in [
+            Marker::None,
+            Marker::Triangle,
+            Marker::Stealth,
+            Marker::Diamond,
+            Marker::Oval,
+            Marker::Arrow,
+        ] {
+            assert_eq!(Marker::from_ooxml(marker.as_ooxml()), marker, "{marker:?}");
+        }
+        // Office has no other end types, but an unknown value must not break.
+        assert_eq!(Marker::from_ooxml("nonsense"), Marker::None);
+        assert!(Marker::None.is_none());
+        assert!(!Marker::Triangle.is_none());
     }
 
     #[test]

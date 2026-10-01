@@ -506,6 +506,25 @@ export function shapePath(preset, shape) {
   }
 }
 
+/**
+ * A line-end marker in a 0..10 box, tip at x=10.
+ *
+ * The names are the stored `Line.head`/`Line.tail` values (the OOXML
+ * `headEnd`/`tailEnd` types), so an imported connector arrow draws the heads
+ * PowerPoint drew. `null` means a plain end with no marker.
+ */
+const MARKERS = {
+  triangle: 'M0,0L10,5L0,10Z',
+  stealth: 'M0,0L10,5L0,10L3.5,5Z',
+  diamond: 'M5,0L10,5L5,10L0,5Z',
+  oval: 'M0,5A5,5 0 1 1 10,5A5,5 0 1 1 0,5Z',
+  arrow: 'M1,1L9,5L1,9',
+};
+
+export function markerPath(type) {
+  return MARKERS[type] ?? null;
+}
+
 /** Presets that are open lines rather than closed regions. */
 const OPEN = new Set([
   'line',

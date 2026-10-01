@@ -357,6 +357,37 @@ fn xfrm(block: &SlideBlock) -> String {
     )
 }
 
+/// Rotation and flips from a block's style, for the text boxes that carry
+/// them there rather than on a ShapeSpec — the importer's side of the same key.
+fn style_xfrm_attrs(style: &indexmap::IndexMap<String, Json>) -> String {
+    let mut attrs = String::new();
+    if style.get("rotation").and_then(Json::as_f64).unwrap_or(0.0) != 0.0 {
+        attrs.push_str(&format!(
+            " rot=\"{}\"",
+            (style["rotation"].as_f64().unwrap_or(0.0) * 60_000.0).round() as i64
+        ));
+    }
+    if style.get("flipH").and_then(Json::as_bool).unwrap_or(false) {
+        attrs.push_str(" flipH=\"1\"");
+    }
+    if style.get("flipV").and_then(Json::as_bool).unwrap_or(false) {
+        attrs.push_str(" flipV=\"1\"");
+    }
+    attrs
+}
+
+/// The same as `xfrm`, plus a text box's rotation and flips from its style.
+fn xfrm_styled(block: &SlideBlock) -> String {
+    format!(
+        "<a:xfrm{}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm>",
+        style_xfrm_attrs(&block.style),
+        emu(block.x),
+        emu(block.y),
+        emu(block.w.max(1.0)),
+        emu(block.h.max(1.0)),
+    )
+}
+
 /// The same, plus a shape's rotation and flips.
 ///
 /// `rot` is in 60,000ths of a degree, and negative values are legal — Office
@@ -405,7 +436,7 @@ fn text_shape(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> String 
         "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
 <p:txBody><a:bodyPr wrap=\"square\"{anchor} lIns=\"18000\" tIns=\"18000\" rIns=\"18000\" bIns=\"18000\"/><a:lstStyle/>{body}</p:txBody></p:sp>",
-        xfrm(block)
+        xfrm_styled(block)
     )
 }
 
@@ -467,8 +498,15 @@ fn shape_element(id: usize, block: &SlideBlock, links: &mut Vec<String>) -> Stri
             } else {
                 format!("<a:prstDash val=\"{}\"/>", line.dash.as_ooxml())
             };
+            // The markers at the path's ends, without which an arrow connector
+            // comes back from PowerPoint as a plain line.
+            let ends = [("headEnd", line.head), ("tailEnd", line.tail)]
+                .iter()
+                .filter(|(_, marker)| !marker.is_none())
+                .map(|(tag, marker)| format!("<a:{tag} type=\"{}\"/>", marker.as_ooxml()))
+                .collect::<String>();
             format!(
-                "<a:ln w=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>{dash}</a:ln>",
+                "<a:ln w=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>{dash}{ends}</a:ln>",
                 emu(line.width.max(0.25)),
                 hex(&line.color)
             )

@@ -7,13 +7,12 @@ import ShapeView from '../components/ShapeView.jsx';
 import TableView from '../components/TableView.jsx';
 import { adjustHandles, adjustValueAt } from '../lib/shapeAdjust.js';
 import { blockTransform, cropImageStyle } from '../lib/imageStyle.js';
+import { MIN_W, MIN_H, resizeBox } from '../lib/resize.js';
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const SNAP = 7;
 /** Office snaps rotation to 15° while Shift is held. */
 const ROTATE_SNAP = 15;
-const MIN_W = 48;
-const MIN_H = 28;
 
 /**
  * The slide surface: absolutely positioned blocks, drag to move, handles to
@@ -146,7 +145,7 @@ export default function SlideCanvas({
         x: rect.left + (block.x + block.w / 2) * scale,
         y: rect.top + (block.y + block.h / 2) * scale,
       },
-      rotation: block.shape?.rotation ?? 0,
+      rotation: rotationOf(block),
     });
   };
 
@@ -276,7 +275,17 @@ export default function SlideCanvas({
     const dx = (event.clientX - drag.startX) / scale;
     const dy = (event.clientY - drag.startY) / scale;
 
-    let box = drag.mode === 'move' ? moveBox(drag.origin, dx, dy) : resizeBox(drag.origin, drag.mode, dx, dy);
+    /*
+     * Shift locks the aspect ratio and Ctrl/Cmd resizes from the centre, as in
+     * Office. (Alt is already taken: it turns snapping off.)
+     */
+    let box =
+      drag.mode === 'move'
+        ? moveBox(drag.origin, dx, dy)
+        : resizeBox(drag.origin, drag.mode, dx, dy, {
+            lockAspect: event.shiftKey,
+            fromCenter: event.ctrlKey || event.metaKey,
+          });
     box = clamp(box);
 
     const shown = [];
@@ -298,8 +307,14 @@ export default function SlideCanvas({
       const { id, rotation } = drag;
       setDrag(null);
       const block = slide.blocks.find((b) => b.id === id);
-      if (block && (block.shape?.rotation ?? 0) !== rotation) {
-        onChangeBlock(id, { shape: { ...(block.shape ?? {}), rotation } });
+      if (block && rotationOf(block) !== rotation) {
+        // Rotation lives on `shape` for shapes and on `style` for everything
+        // else (an image has no ShapeSpec) — the renderer reads both.
+        if (block.kind === 'shape') {
+          onChangeBlock(id, { shape: { ...(block.shape ?? {}), rotation } });
+        } else {
+          onChangeBlock(id, { style: { ...(block.style ?? {}), rotation } });
+        }
       }
       return;
     }
@@ -566,7 +581,10 @@ export default function SlideCanvas({
 function previewOf(block, drag) {
   if (drag?.id !== block.id) return block;
   if (drag.mode === 'rotate') {
-    return { ...block, shape: { ...(block.shape ?? {}), rotation: drag.rotation } };
+    if (block.kind === 'shape') {
+      return { ...block, shape: { ...(block.shape ?? {}), rotation: drag.rotation } };
+    }
+    return { ...block, style: { ...(block.style ?? {}), rotation: drag.rotation } };
   }
   if (drag.mode === 'adjust') {
     return {
@@ -701,8 +719,11 @@ function Block({
             />
           ))}
 
-          {/* Office puts the rotate handle on a stem above the top edge. */}
-          {block.kind === 'shape' && (
+          {/*
+            Office puts the rotate handle on a stem above the top edge — on
+            shapes, text boxes and pictures. Tables and charts have none.
+          */}
+          {(block.kind === 'shape' || block.kind === 'text' || block.kind === 'image') && (
             <div
               className="handle handle--rotate"
               title="끌어서 회전 (Shift: 15°씩)"
@@ -770,28 +791,9 @@ function moveBox(origin, dx, dy) {
   return { ...origin, x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) };
 }
 
-function resizeBox(origin, mode, dx, dy) {
-  let { x, y, w, h } = origin;
-  if (mode.includes('e')) w = origin.w + dx;
-  if (mode.includes('s')) h = origin.h + dy;
-  if (mode.includes('w')) {
-    w = origin.w - dx;
-    x = origin.x + dx;
-  }
-  if (mode.includes('n')) {
-    h = origin.h - dy;
-    y = origin.y + dy;
-  }
-  // Keep the anchored edge fixed when the drag crosses it.
-  if (w < MIN_W) {
-    if (mode.includes('w')) x = origin.x + origin.w - MIN_W;
-    w = MIN_W;
-  }
-  if (h < MIN_H) {
-    if (mode.includes('n')) y = origin.y + origin.h - MIN_H;
-    h = MIN_H;
-  }
-  return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+/** Rotation lives on `shape` for shapes and on `style` for the rest. */
+function rotationOf(block) {
+  return block.shape?.rotation ?? block.style?.rotation ?? 0;
 }
 
 /**

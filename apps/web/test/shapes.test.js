@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
-import { shapePath, canDraw, isOpenShape, presetRotation } from '../src/lib/shapeSvg.js';
+import { shapePath, canDraw, isOpenShape, presetRotation, markerPath } from '../src/lib/shapeSvg.js';
 
 /**
  * Every preset in the Rust gallery must have a path here.
@@ -75,6 +75,23 @@ test('the arrow family reuses one path with a rotation', () => {
   assert.equal(presetRotation('upArrow'), -90);
   assert.equal(presetRotation('rightArrow'), 0);
   assert.equal(presetRotation('rect'), 0);
+});
+
+test('every stored line-end marker has a path', () => {
+  for (const type of ['triangle', 'stealth', 'diamond', 'oval', 'arrow']) {
+    const path = markerPath(type);
+    assert.ok(path, `${type} has no marker path`);
+    for (const [value] of path.matchAll(/-?\d+(?:\.\d+)?/g)) {
+      const n = Number(value);
+      assert.ok(n >= 0 && n <= 10, `${type}: coordinate ${n} escapes the 0..10 marker box`);
+    }
+  }
+});
+
+test('a plain line end has no marker path', () => {
+  assert.equal(markerPath('none'), null);
+  assert.equal(markerPath('solid'), null);
+  assert.equal(markerPath(undefined), null);
 });
 
 test('a star has two vertices per point', () => {

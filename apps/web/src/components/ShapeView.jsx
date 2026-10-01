@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { shapePath, isOpenShape, presetRotation, canDraw } from '../lib/shapeSvg.js';
+import React, { useId, useMemo } from 'react';
+import { shapePath, isOpenShape, presetRotation, markerPath, canDraw } from '../lib/shapeSvg.js';
 
 /**
  * A shape, drawn from its preset geometry.
@@ -15,6 +15,7 @@ import { shapePath, isOpenShape, presetRotation, canDraw } from '../lib/shapeSvg
 export default function ShapeView({ shape, width, height }) {
   const preset = shape?.preset ?? 'rect';
   const path = useMemo(() => shapePath(preset, shape) ?? shapePath('rect', null), [preset, shape]);
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
 
   const fill = shape?.fill?.color;
   const opacity = shape?.fill?.opacity;
@@ -22,9 +23,13 @@ export default function ShapeView({ shape, width, height }) {
   const open = isOpenShape(preset);
   const spin = presetRotation(preset);
 
-  // A stroke straddles the path, so half of it would fall outside the box.
+  // The stroke is in screen pixels: `vectorEffect="non-scaling-stroke"` keeps
+  // it out of the 0..100 box mapping, so the width crosses over unchanged.
+  // Scaling it back by the box size (as was done before) drew every imported
+  // outline hairline-thin — a 2px border on a 600px shape came out 0.33px.
   const stroke = line ? Math.max(0.5, line.width ?? 1) : 0;
-  const inset = stroke / 2;
+  const head = markerPath(line?.head);
+  const tail = markerPath(line?.tail);
 
   return (
     <svg
@@ -36,6 +41,12 @@ export default function ShapeView({ shape, width, height }) {
       aria-hidden="true"
       focusable="false"
     >
+      {(head || tail) && (
+        <defs>
+          {head && <EndMarker id={`${uid}h`} d={head} color={line.color} orient="auto" />}
+          {tail && <EndMarker id={`${uid}t`} d={tail} color={line.color} orient="auto-start-reverse" />}
+        </defs>
+      )}
       <g
         transform={
           spin
@@ -49,19 +60,41 @@ export default function ShapeView({ shape, width, height }) {
           fillOpacity={opacity !== undefined && opacity < 100 ? opacity / 100 : undefined}
           fillRule="evenodd"
           stroke={line?.color ?? 'none'}
-          strokeWidth={
-            // The stroke is in the block's pixels but the path is in the 0..100
-            // box, so it has to be scaled back or a 2px outline draws as 2% of
-            // the shape — thick on a small shape, invisible on a large one.
-            stroke ? (stroke * 100) / Math.max(width, height, 1) : undefined
-          }
+          strokeWidth={stroke ? stroke : undefined}
           strokeDasharray={dashArray(line)}
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
+          markerStart={tail ? `url(#${uid}t)` : undefined}
+          markerEnd={head ? `url(#${uid}h)` : undefined}
         />
       </g>
-      {inset > 0 ? null : null}
     </svg>
+  );
+}
+
+/**
+ * One line-end marker. `markerUnits` defaults to `strokeWidth`, so the head
+ * scales with the line's own width the way Office draws it.
+ */
+function EndMarker({ id, d, color, orient }) {
+  const open = d.charAt(0) === 'M' && !d.endsWith('Z');
+  return (
+    <marker
+      id={id}
+      viewBox="0 0 10 10"
+      refX="8"
+      refY="5"
+      markerWidth="4"
+      markerHeight="4"
+      orient={orient}
+    >
+      <path
+        d={d}
+        fill={open ? 'none' : color}
+        stroke={open ? color : 'none'}
+        strokeWidth={open ? 1.6 : undefined}
+      />
+    </marker>
   );
 }
 

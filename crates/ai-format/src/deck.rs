@@ -731,7 +731,7 @@ mod tests {
 #[cfg(test)]
 mod shape_table_tests {
     use super::*;
-    use crate::shape::{Dash, Fill, Line};
+    use crate::shape::{Dash, Fill, Line, Marker};
     use crate::table::TableStyle;
 
     fn box_of() -> Box {
@@ -759,6 +759,8 @@ mod shape_table_tests {
                 color: "#2a78d6".into(),
                 width: 2.0,
                 dash: Dash::Dash,
+                head: Marker::None,
+                tail: Marker::None,
             }),
             rotation: 15.0,
             flip_h: true,
@@ -798,6 +800,8 @@ mod shape_table_tests {
                 color: "#000000".into(),
                 width: 1.5,
                 dash: Dash::Solid,
+                head: Marker::None,
+                tail: Marker::None,
             }),
             ..ShapeSpec::default()
         });

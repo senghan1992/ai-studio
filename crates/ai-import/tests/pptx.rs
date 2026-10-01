@@ -83,6 +83,8 @@ fn a_shape_survives_the_round_trip_with_its_preset() {
             color: "#2a78d6".into(),
             width: 2.0,
             dash: ai_format::shape::Dash::Dash,
+            head: ai_format::shape::Marker::Triangle,
+            tail: ai_format::shape::Marker::None,
         }),
         rotation: 15.0,
         flip_h: true,
@@ -104,6 +106,11 @@ fn a_shape_survives_the_round_trip_with_its_preset() {
     assert_eq!(
         spec.line.as_ref().unwrap().dash,
         ai_format::shape::Dash::Dash
+    );
+    assert_eq!(
+        spec.line.as_ref().unwrap().head,
+        ai_format::shape::Marker::Triangle,
+        "a marker survives the round trip"
     );
     assert_eq!(spec.rotation, 15.0);
     assert!(spec.flip_h && !spec.flip_v);
@@ -1710,4 +1717,107 @@ fn an_underlined_run_survives_as_a_u_tag() {
     assert!(xml.contains("u=\"sng\""), "{xml}");
     assert!(!xml.contains("<u>"), "{xml}");
     assert_eq!(read_deck(&exported)[0].blocks[0].md, block.md);
+}
+
+#[test]
+fn a_horizontal_line_with_no_height_stays_visible() {
+    // PowerPoint stores a horizontal line with `cy="0"`: the box has no
+    // height, but the line is on the slide. Importing the zero as-is makes an
+    // invisible block, so the line is lost.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Straight Line"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="0"/></a:xfrm>
+                   <a:prstGeom prst="line"><a:avLst/></a:prstGeom>
+                   <a:ln w="19050"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr>
+               </p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    assert_eq!(slides[0].blocks.len(), 1);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.kind, Kind::Shape);
+    assert!(block.h >= 1.0, "a zero-height line is invisible: {block:?}");
+    assert!(block.w >= 1.0, "{block:?}");
+    let spec = block.shape.as_ref().expect("a shape");
+    assert_eq!(spec.preset, "line");
+    assert!(spec.line.is_some(), "the outline must survive");
+}
+
+#[test]
+fn a_connector_keeps_its_arrowheads() {
+    // An arrow connector states its heads on the line, not on the geometry;
+    // dropping them turns every arrow in a diagram into a plain line.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="2" name="Arrow"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                   <a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>
+                   <a:ln w="19050"><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill>
+                     <a:headEnd type="triangle"/><a:tailEnd type="oval"/></a:ln></p:spPr>
+               </p:cxnSp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    assert_eq!(slides[0].blocks.len(), 1);
+    let spec = slides[0].blocks[0].shape.as_ref().expect("a shape");
+    let line = spec.line.as_ref().expect("the outline survived");
+    assert_eq!(line.head, ai_format::shape::Marker::Triangle, "headEnd");
+    assert_eq!(line.tail, ai_format::shape::Marker::Oval, "tailEnd");
+}
+
+#[test]
+fn a_custom_geometry_shape_says_what_happened() {
+    // A freeform (`a:custGeom`) has no preset name to keep; it comes across as
+    // a rectangle with its real fill and outline, and the reader is told.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Freeform"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                   <a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="21600" b="21600"/><a:pathLst><a:path><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path></a:pathLst></a:custGeom>
+                   <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr>
+               </p:sp>"#,
+        )
+        .build();
+
+    let package = Package::open(&deck).unwrap();
+    let mut warnings = Warnings::default();
+    let deck = ai_import::pptx::read(&package, &mut warnings).unwrap();
+    let spec = deck.slides[0].blocks[0].shape.as_ref().expect("a shape");
+    assert_eq!(spec.preset, "rect", "the honest fallback keeps its name");
+    assert_eq!(
+        spec.fill.as_ref().map(|f| f.color.as_str()),
+        Some("#ff0000"),
+        "the fill still crosses over"
+    );
+    let warnings = warnings.into_vec();
+    assert!(
+        warnings.iter().any(|w| w.contains("사용자 지정 도형")),
+        "the reader should be told: {warnings:?}"
+    );
+}
+
+#[test]
+fn a_rotated_text_box_stays_rotated() {
+    // Rotation on a text box has no ShapeSpec to ride in; without storing it
+    // on the style, a rotated caption comes back upright.
+    let deck = Builder::new()
+        .slide(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+                 <p:spPr><a:xfrm rot="5400000"><a:off x="0" y="0"/><a:ext cx="2743200" cy="457200"/></a:xfrm></p:spPr>
+                 <p:txBody><a:bodyPr/><a:p><a:r><a:t>기울어진 설명</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        )
+        .build();
+
+    let slides = read_deck(&deck);
+    let block = &slides[0].blocks[0];
+    assert_eq!(block.kind, Kind::Text);
+    assert_eq!(
+        block.style["rotation"],
+        serde_json::json!(90.0),
+        "5400000 sixty-thousandths is 90 degrees: {:?}",
+        block.style
+    );
 }

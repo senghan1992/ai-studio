@@ -658,6 +658,8 @@ fn a_shape_exports_with_its_preset_geometry() {
             color: "#2a78d6".into(),
             width: 2.0,
             dash: ai_format::shape::Dash::Dash,
+            head: ai_format::shape::Marker::None,
+            tail: ai_format::shape::Marker::None,
         }),
         rotation: 15.0,
         flip_h: true,
@@ -1326,4 +1328,56 @@ fn an_export_states_only_what_the_block_states_and_stores_a_picture_once() {
         parts.names()
     );
     assert_eq!(slide.matches("<p:pic>").count(), 2, "{slide}");
+}
+
+#[test]
+fn a_line_with_markers_exports_its_arrowheads() {
+    let ws = Workspace::new("pptxmarkers");
+    let mut block = ai_format::deck::make_shape("straightConnector1", geometry());
+    block.shape = Some(ai_format::shape::ShapeSpec {
+        preset: "straightConnector1".into(),
+        fill: None,
+        line: Some(ai_format::shape::Line {
+            color: "#4472c4".into(),
+            width: 2.0,
+            dash: ai_format::shape::Dash::Solid,
+            head: ai_format::shape::Marker::Triangle,
+            tail: ai_format::shape::Marker::Oval,
+        }),
+        ..Default::default()
+    });
+    let project = deck_with(&ws, "화살표", block);
+
+    let slide = Parts::of(&export(&project, Format::Pptx).unwrap())
+        .get("ppt/slides/slide1.xml")
+        .to_string();
+    assert!(
+        slide.contains("<a:headEnd type=\"triangle\""),
+        "the head must cross over: {slide}"
+    );
+    assert!(
+        slide.contains("<a:tailEnd type=\"oval\""),
+        "the tail must cross over: {slide}"
+    );
+}
+
+#[test]
+fn a_rotated_text_box_exports_its_rotation() {
+    let ws = Workspace::new("pptxtextrot");
+    let mut block = ai_format::deck::make_shape("rect", geometry());
+    block.kind = ai_format::blocks::Kind::Text;
+    block.md = "기울어진 설명".into();
+    block.shape = None;
+    block
+        .style
+        .insert("rotation".into(), serde_json::json!(90.0));
+    let project = deck_with(&ws, "회전", block);
+
+    let slide = Parts::of(&export(&project, Format::Pptx).unwrap())
+        .get("ppt/slides/slide1.xml")
+        .to_string();
+    assert!(
+        slide.contains("rot=\"5400000\""),
+        "90 degrees must cross over: {slide}"
+    );
 }
