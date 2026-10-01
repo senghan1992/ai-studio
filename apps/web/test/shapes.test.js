@@ -88,6 +88,25 @@ test('every stored line-end marker has a path', () => {
   }
 });
 
+test('a wide roundRect rounds against the short side', () => {
+  // Office measures the corner against `ss` (the short side): the same shape
+  // in a wide box and a square box has the same corner in pixels. A uniform
+  // radius over-rounds every wide rectangle.
+  const path = shapePath('roundRect', { adjust: { adj: 16667 } }, { w: 600, h: 120 });
+  // 16667 is a 20px radius here: 3.333 across, 16.667 down.
+  assert.ok(path.includes('A3.333,16.667'), path);
+});
+
+test('a square roundRect draws as before', () => {
+  const path = shapePath('roundRect', { adjust: { adj: 16667 } });
+  assert.ok(path.includes('A16.667,16.667'), path);
+});
+
+test('a wide snip cuts the same pixels on both axes', () => {
+  const path = shapePath('snip1Rect', { adjust: { adj: 16667 } }, { w: 600, h: 120 });
+  assert.ok(path.includes('96.667') && path.includes('16.667'), path);
+});
+
 test('a plain line end has no marker path', () => {
   assert.equal(markerPath('none'), null);
   assert.equal(markerPath('solid'), null);

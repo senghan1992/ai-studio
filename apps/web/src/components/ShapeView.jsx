@@ -14,7 +14,12 @@ import { shapePath, isOpenShape, presetRotation, markerPath, canDraw } from '../
  */
 export default function ShapeView({ shape, width, height }) {
   const preset = shape?.preset ?? 'rect';
-  const path = useMemo(() => shapePath(preset, shape) ?? shapePath('rect', null), [preset, shape]);
+  // The box matters: corner treatments convert against its short side, so the
+  // path has to be recomputed when the block is resized.
+  const path = useMemo(
+    () => shapePath(preset, shape, { w: width, h: height }) ?? shapePath('rect', null),
+    [preset, shape, width, height]
+  );
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
 
   const fill = shape?.fill?.color;

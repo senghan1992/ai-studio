@@ -74,7 +74,9 @@ export default function DocEditor({ ctl, onHome, notify, onNewProject }) {
   const [selectedId, setSelectedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [tab, setTab] = useState('홈');
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // The inspector starts closed and opens on demand — it is a lookup panel,
+  // not part of the page the author came to work on.
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [tableDialog, setTableDialog] = useState(null);
   const tableAnchor = useRef(null);

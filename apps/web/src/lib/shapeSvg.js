@@ -22,6 +22,22 @@ const adj = (shape, name, fallback) => {
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
+/** Path numbers to three decimals, so a box never prints 3.3333333333333335. */
+const n3 = (v) => Math.round(v * 1000) / 1000;
+
+/**
+ * The box a path is drawn into, in pixels. Office measures corner treatments
+ * against `ss` — the short side: a roundRect corner is a circle whose radius
+ * is `adj` of `ss`, so the same shape in a wide box and a square box has the
+ * same corner in pixels. A caller that passes no box gets a square, which is
+ * what the gallery thumbnails draw.
+ */
+const boxOf = (box) => {
+  const w = Number.isFinite(box?.w) && box.w > 0 ? box.w : 100;
+  const h = Number.isFinite(box?.h) && box.h > 0 ? box.h : 100;
+  return { w, h, ss: Math.min(w, h) };
+};
+
 /** A regular polygon inscribed in the box, first vertex at the top. */
 function polygon(sides, rotate = -90) {
   const points = [];
@@ -43,18 +59,22 @@ function star(points, inner) {
   return `M${path.join('L')}Z`;
 }
 
-/** A rectangle with per-corner radii, as an SVG path. */
-function rounded([tl, tr, br, bl]) {
+/**
+ * A rectangle with per-corner, per-axis radii, as an SVG path. Each corner is
+ * `[rx, ry]` in box units, because a corner that is a circle in pixels is an
+ * ellipse in the stretched 0..100 box whenever the box is not square.
+ */
+function rounded([[tlx, tly], [trx, try_], [brx, bry], [blx, bly]]) {
   return [
-    `M${tl},0`,
-    `L${100 - tr},0`,
-    tr ? `A${tr},${tr} 0 0 1 100,${tr}` : '',
-    `L100,${100 - br}`,
-    br ? `A${br},${br} 0 0 1 ${100 - br},100` : '',
-    `L${bl},100`,
-    bl ? `A${bl},${bl} 0 0 1 0,${100 - bl}` : '',
-    `L0,${tl}`,
-    tl ? `A${tl},${tl} 0 0 1 ${tl},0` : '',
+    `M${tlx},0`,
+    `L${100 - trx},0`,
+    trx || try_ ? `A${trx},${try_} 0 0 1 100,${try_}` : '',
+    `L100,${100 - bry}`,
+    brx || bry ? `A${brx},${bry} 0 0 1 ${100 - brx},100` : '',
+    `L${blx},100`,
+    blx || bly ? `A${blx},${bly} 0 0 1 0,${100 - bly}` : '',
+    `L0,${tly}`,
+    tlx || tly ? `A${tlx},${tly} 0 0 1 ${tlx},0` : '',
     'Z',
   ]
     .filter(Boolean)
@@ -62,16 +82,16 @@ function rounded([tl, tr, br, bl]) {
 }
 
 /** The same with corners cut off instead of rounded. */
-function snipped([tl, tr, br, bl]) {
+function snipped([[tlx, tly], [trx, try_], [brx, bry], [blx, bly]]) {
   return [
-    `M${tl},0`,
-    `L${100 - tr},0`,
-    tr ? `L100,${tr}` : '',
-    `L100,${100 - br}`,
-    br ? `L${100 - br},100` : '',
-    `L${bl},100`,
-    bl ? `L0,${100 - bl}` : '',
-    `L0,${tl}`,
+    `M${tlx},0`,
+    `L${100 - trx},0`,
+    trx || try_ ? `L100,${try_}` : '',
+    `L100,${100 - bry}`,
+    brx || bry ? `L${100 - brx},100` : '',
+    `L${blx},100`,
+    blx || bly ? `L0,${100 - bly}` : '',
+    `L0,${tly}`,
     'Z',
   ]
     .filter(Boolean)
@@ -103,7 +123,11 @@ function doubleArrow(shape) {
 function callout(shape, radius) {
   const x = 50 + clamp(adj(shape, 'adj1', -0.2), -1.5, 1.5) * 100;
   const y = 50 + clamp(adj(shape, 'adj2', 0.8), -1.5, 1.5) * 100;
-  const box = radius ? rounded([radius, radius, radius, radius]) : rounded([0, 0, 0, 0]);
+  // A fixed corner in box units, as before — only handle-driven geometry
+  // converts against the short side.
+  const corner = [radius, radius];
+  const flat = [0, 0];
+  const box = radius ? rounded([corner, corner, corner, corner]) : rounded([flat, flat, flat, flat]);
   // The tail leaves the bottom edge, which is where Office puts it by default.
   return `${box} M35,100L${x},${y}L55,100Z`;
 }
@@ -122,7 +146,16 @@ function annulus(inner) {
  *
  * Grouped the way Office's gallery is, so a missing shape is easy to place.
  */
-export function shapePath(preset, shape) {
+export function shapePath(preset, shape, box) {
+  const { w: bw, h: bh, ss } = boxOf(box);
+  // A corner treatment as `[rx, ry]` in box units: Office states the size as
+  // a fraction of the short side, so the radius converts per axis.
+  const ssR = (frac) => {
+    const r = n3(clamp(frac, 0, 0.5) * 100);
+    return [n3((r * ss) / bw), n3((r * ss) / bh)];
+  };
+  const quad = (corner) => [corner, corner, corner, corner];
+  const flat = [0, 0];
   switch (preset) {
     /* ------------------------------------------------------------- lines */
     case 'line':
@@ -139,61 +172,61 @@ export function shapePath(preset, shape) {
       return 'M0,0L100,0L100,100L0,100Z';
     case 'roundRect':
     case 'flowChartAlternateProcess': {
-      const r = clamp(adj(shape, 'adj', 0.16667), 0, 0.5) * 100;
-      return rounded([r, r, r, r]);
+      const r = ssR(adj(shape, 'adj', 0.16667));
+      return rounded(quad(r));
     }
     case 'round1Rect': {
-      const r = clamp(adj(shape, 'adj', 0.16667), 0, 0.5) * 100;
-      return rounded([0, r, 0, 0]);
+      const r = ssR(adj(shape, 'adj', 0.16667));
+      return rounded([flat, r, flat, flat]);
     }
     case 'round2SameRect': {
-      const r = clamp(adj(shape, 'adj1', 0.16667), 0, 0.5) * 100;
-      return rounded([r, r, 0, 0]);
+      const r = ssR(adj(shape, 'adj1', 0.16667));
+      return rounded([r, r, flat, flat]);
     }
     case 'round2DiagRect': {
-      const r = clamp(adj(shape, 'adj1', 0.16667), 0, 0.5) * 100;
-      return rounded([r, 0, r, 0]);
+      const r = ssR(adj(shape, 'adj1', 0.16667));
+      return rounded([r, flat, r, flat]);
     }
     case 'snip1Rect': {
-      const r = clamp(adj(shape, 'adj', 0.16667), 0, 0.5) * 100;
-      return snipped([0, r, 0, 0]);
+      const r = ssR(adj(shape, 'adj', 0.16667));
+      return snipped([flat, r, flat, flat]);
     }
     case 'snip2SameRect': {
-      const r = clamp(adj(shape, 'adj1', 0.16667), 0, 0.5) * 100;
-      return snipped([r, r, 0, 0]);
+      const r = ssR(adj(shape, 'adj1', 0.16667));
+      return snipped([r, r, flat, flat]);
     }
     case 'snip2DiagRect': {
-      const r = clamp(adj(shape, 'adj1', 0.16667), 0, 0.5) * 100;
-      return snipped([r, 0, r, 0]);
+      const r = ssR(adj(shape, 'adj1', 0.16667));
+      return snipped([r, flat, r, flat]);
     }
     case 'snipRoundRect': {
-      const r = clamp(adj(shape, 'adj1', 0.16667), 0, 0.5) * 100;
+      const [rx, ry] = ssR(adj(shape, 'adj1', 0.16667));
       // One corner snipped, the adjacent one rounded.
       return [
-        `M${r},0`,
-        `L${100 - r},0L100,${r}`,
+        `M${rx},0`,
+        `L${100 - rx},0L100,${ry}`,
         'L100,100L0,100',
-        `L0,${r}A${r},${r} 0 0 1 ${r},0`,
+        `L0,${ry}A${rx},${ry} 0 0 1 ${rx},0`,
         'Z',
       ].join(' ');
     }
     case 'plaque': {
-      const r = clamp(adj(shape, 'adj', 0.16667), 0, 0.5) * 100;
+      const [rx, ry] = ssR(adj(shape, 'adj', 0.16667));
       return [
-        `M0,${r}A${r},${r} 0 0 0 ${r},0`,
-        `L${100 - r},0A${r},${r} 0 0 0 100,${r}`,
-        `L100,${100 - r}A${r},${r} 0 0 0 ${100 - r},100`,
-        `L${r},100A${r},${r} 0 0 0 0,${100 - r}Z`,
+        `M0,${ry}A${rx},${ry} 0 0 0 ${rx},0`,
+        `L${100 - rx},0A${rx},${ry} 0 0 0 100,${ry}`,
+        `L100,${100 - ry}A${rx},${ry} 0 0 0 ${100 - rx},100`,
+        `L${rx},100A${rx},${ry} 0 0 0 0,${100 - ry}Z`,
       ].join(' ');
     }
     case 'bevel':
     case 'frame': {
-      const t = clamp(adj(shape, 'adj1', 0.125), 0.01, 0.49) * 100;
-      return `M0,0L100,0L100,100L0,100Z M${t},${t}L${100 - t},${t}L${100 - t},${100 - t}L${t},${100 - t}Z`;
+      const [tx, ty] = ssR(adj(shape, 'adj1', 0.125));
+      return `M0,0L100,0L100,100L0,100Z M${tx},${ty}L${100 - tx},${ty}L${100 - tx},${100 - ty}L${tx},${100 - ty}Z`;
     }
     case 'halfFrame': {
-      const t = clamp(adj(shape, 'adj1', 0.2), 0.01, 0.49) * 100;
-      return `M0,0L100,0L${100 - t},${t}L${t},${t}L${t},${100 - t}L0,100Z`;
+      const [tx, ty] = ssR(adj(shape, 'adj1', 0.2));
+      return `M0,0L100,0L${100 - tx},${ty}L${tx},${ty}L${tx},${100 - ty}L0,100Z`;
     }
     case 'corner': {
       const t = clamp(adj(shape, 'adj1', 0.5), 0.01, 0.99) * 100;
@@ -204,8 +237,8 @@ export function shapePath(preset, shape) {
       return `M0,${t}L${t},0L100,0L100,${100 - t}L${100 - t},100L0,100Z`;
     }
     case 'foldedCorner': {
-      const t = clamp(adj(shape, 'adj', 0.16667), 0.01, 0.5) * 100;
-      return `M0,0L100,0L100,${100 - t}L${100 - t},100L0,100Z M${100 - t},100L${100 - t},${100 - t}L100,${100 - t}`;
+      const [fx, fy] = ssR(adj(shape, 'adj', 0.16667));
+      return `M0,0L100,0L100,${100 - fy}L${100 - fx},100L0,100Z M${100 - fx},100L${100 - fx},${100 - fy}L100,${100 - fy}`;
     }
 
     /* ------------------------------------------------------ basic shapes */
@@ -224,8 +257,10 @@ export function shapePath(preset, shape) {
     }
     case 'trapezoid':
     case 'flowChartManualOperation': {
-      const t = clamp(adj(shape, 'adj', 0.25), 0, 0.5) * 100;
-      return `M${t},0L${100 - t},0L100,100L0,100Z`;
+      // The slant is symmetric in pixels, so it converts against `ss` like a
+      // corner does — a uniform slant leans every wide trapezoid too far.
+      const tx = n3((clamp(adj(shape, 'adj', 0.25), 0, 0.5) * ss * 100) / bw);
+      return `M${tx},0L${100 - tx},0L100,100L0,100Z`;
     }
     case 'diamond':
     case 'flowChartDecision':
@@ -402,7 +437,9 @@ export function shapePath(preset, shape) {
     case 'flowChartMultidocument':
       return 'M0,10L88,10L88,88C66,102 22,74 0,88Z M6,4L94,4L94,10 M12,0L100,0L100,82';
     case 'flowChartTerminator':
-      return rounded([50, 50, 50, 50]);
+      // Fully round ends: half the short side, converted per axis so the ends
+      // stay semicircles in wide boxes instead of over-rounding.
+      return rounded(quad(ssR(0.5)));
     case 'flowChartPreparation':
       return 'M20,0L80,0L100,50L80,100L20,100L0,50Z';
     case 'flowChartManualInput':

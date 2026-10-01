@@ -146,7 +146,9 @@ export default function DeckEditor({ ctl, onHome, notify, onNewProject }) {
   const [tab, setTab] = useState('홈');
   const [zoomMode, setZoomMode] = useState('fit');
   const [zoom, setZoom] = useState(1);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // The inspector starts closed and opens on demand — it is a lookup panel,
+  // not part of the canvas the author came to work on.
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [stageSize, setStageSize] = useState({ w: 900, h: 560 });
   const [imageDialog, setImageDialog] = useState(null);
   const [chartDialog, setChartDialog] = useState(null);
